@@ -2334,8 +2334,18 @@ actually leaves.
 Refuses an added line matching a shell parameter expansion whose
 variable name carries MEDIA, ROM, BIOS, FIRMWARE, GAME, ISO, ASSET,
 SAMPLE, FONT, MODEL, SAVE or DISC and whose default is not empty.
-`${XEMU_MEDIA:-}` passes. `${XEMU_MEDIA:-$ROOT/../_scratch/media}`, which
-is exactly the line that caused this, does not.
+An empty default passes. A default naming a path that happens to exist
+on this machine, which is exactly the shape of the line that caused all
+this, does not.
+
+Writing that sentence is itself how the guard first proved it works: the
+earlier wording quoted the bad form literally, the guard read the devlog
+as if it were a build script and refused the push. The rule is about
+build scripts and cannot tell a description of a pattern from the
+pattern, so the description avoids the literal syntax. Narrowing the
+rule to skip documentation would be the other fix, and it is a
+deliberate weakening of a guard rather than a wording change, so it is
+not made casually.
 
 Tested against five cases in a throwaway repository rather than reasoned
 about: a clean push passes, the same push to a private GitLab exits
