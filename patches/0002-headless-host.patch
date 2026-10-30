@@ -1,0 +1,3829 @@
+diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+index 1433c0df5a..698070256d 100644
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -18,6 +18,10 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#include <mach/mach.h>
++#endif
+ #include "qemu/qemu-print.h"
+ #include "qapi/error.h"
+ #include "qapi/type-helpers.h"
+@@ -446,6 +450,16 @@ static vaddr log_pc(CPUState *cpu, const TranslationBlock *tb)
+  * TCG is not considered a security-sensitive part of QEMU so this does not
+  * affect the impact of CFI in environment with high security requirements
+  */
++#if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
++/* For the host's speed line: how fast is the guest actually going. */
++unsigned long xemu_host_blocks_executed;
++unsigned xemu_host_tb_flush_count(void);
++unsigned xemu_host_tb_flush_count(void)
++{
++    return tb_ctx.tb_flush_count;
++}
++#endif
++
+ static inline TranslationBlock * QEMU_DISABLE_CFI
+ cpu_tb_exec(CPUState *cpu, TranslationBlock *itb, int *tb_exit)
+ {
+@@ -458,7 +472,45 @@ cpu_tb_exec(CPUState *cpu, TranslationBlock *itb, int *tb_exit)
+     }
+ 
+     qemu_thread_jit_execute();
++#if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
++    /*
++     * The first blocks, announced before and after. The prologue and a
++     * two-instruction stub run from every thread, so if this process is
++     * killed it is inside a real block, and this says which one and where.
++     */
++    {
++        static unsigned long n_exec;
++        n_exec++;
++        xemu_host_blocks_executed = n_exec;
++        if (n_exec <= 8 || n_exec % 1000000 == 0) {
++            /* Footprint alongside, because a silent death is also jetsam. */
++            task_vm_info_data_t vm;
++            mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
++            unsigned long long mib = 0;
++            if (task_info(mach_task_self(), TASK_VM_INFO,
++                          (task_info_t)&vm, &cnt) == KERN_SUCCESS) {
++                mib = vm.phys_footprint >> 20;
++            }
++            fprintf(stderr, "[tcg] exec #%lu: host %p size %u guest pc "
++                            "0x%llx, footprint %llu MiB\n", n_exec, tb_ptr,
++                    (unsigned)itb->tc.size,
++                    (unsigned long long)log_pc(cpu, itb), mib);
++            fflush(stderr);
++        }
++    }
++#endif
+     ret = tcg_qemu_tb_exec(cpu_env(cpu), tb_ptr);
++#if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
++    {
++        static unsigned long n_ret;
++        n_ret++;
++        if (n_ret <= 8 || n_ret % 1000000 == 0) {
++            fprintf(stderr, "[tcg] exec #%lu returned 0x%lx\n", n_ret,
++                    (unsigned long)ret);
++            fflush(stderr);
++        }
++    }
++#endif
+     cpu->neg.can_do_io = true;
+     qemu_plugin_disable_mem_helpers(cpu);
+     /*
+diff --git a/accel/tcg/tcg-accel-ops-mttcg.c b/accel/tcg/tcg-accel-ops-mttcg.c
+index 25dbb198ff..5dc2de18f6 100644
+--- a/accel/tcg/tcg-accel-ops-mttcg.c
++++ b/accel/tcg/tcg-accel-ops-mttcg.c
+@@ -85,6 +85,30 @@ static void *mttcg_cpu_thread_fn(void *arg)
+     cpu_thread_signal_created(cpu);
+     qemu_guest_random_seed_thread_part2(cpu->random_seed);
+ 
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++#if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
++    {
++        /* The thread that will run guest code, before it does. */
++        extern void tcg_jit_selftest(const char *when);
++        extern void tcg_jit_selftest_prologue(const char *when);
++        tcg_jit_selftest("vcpu thread");
++        tcg_jit_selftest_prologue("vcpu thread");
++
++        /*
++         * An alternate signal stack, so a fault inside a block can still
++         * reach the crash handler even if the fault is the stack itself.
++         */
++        stack_t ss = { .ss_sp = g_malloc(256 * 1024),
++                       .ss_size = 256 * 1024, .ss_flags = 0 };
++        sigaltstack(&ss, NULL);
++        fprintf(stderr, "[tcg] vcpu thread stack %zu bytes, altstack set\n",
++                pthread_get_stacksize_np(pthread_self()));
++        fflush(stderr);
++    }
++#endif
++
+     do {
+         qemu_process_cpu_events(cpu);
+ 
+diff --git a/block/file-posix.c b/block/file-posix.c
+index 6265d2e248..cb337c027e 100644
+--- a/block/file-posix.c
++++ b/block/file-posix.c
+@@ -1568,6 +1568,11 @@ static void raw_refresh_limits(BlockDriverState *bs, Error **errp)
+     }
+ 
+ #if defined(__APPLE__) && (__MACH__)
++    /*
++     * statfs comes in transitively on macOS and does not on visionOS, where
++     * this is the only thing in the file that needs it.
++     */
++#include <sys/mount.h>
+     struct statfs buf;
+ 
+     if (!fstatfs(s->fd, &buf)) {
+diff --git a/configure b/configure
+index 410bf21b1c..166713106c 100755
+--- a/configure
++++ b/configure
+@@ -636,6 +636,8 @@ for opt do
+   ;;
+   --cross-prefix=*)
+   ;;
++  --extra-cross-file=*) extra_cross_files="$extra_cross_files $optarg"
++  ;;
+   --cc=*)
+   ;;
+   --host-cc=*) host_cc="$optarg"
+@@ -1973,6 +1975,18 @@ if test "$skip_meson" = no; then
+   if test -f "$source_path/configs/meson/$host_os.txt"; then
+     meson_add_machine_file $source_path/configs/meson/$host_os.txt
+   fi
++  # --extra-cross-file, added for the visionOS build.
++  #
++  # Applied LAST on purpose. Meson merges machine files left to right, and a
++  # later [built-in options] section REPLACES an earlier one rather than
++  # appending to it. config-meson.cross carries --extra-cflags in c_args,
++  # including -DXBOX=1, so a file layered on top of it must only add
++  # properties and binaries, never built-in options, or those defines vanish
++  # silently and the build dies thousands of compile errors later with no
++  # hint of the cause.
++  for f in $extra_cross_files; do
++    meson_add_machine_file "$f"
++  done
+ 
+   rm -rf meson-private meson-info meson-logs
+ 
+diff --git a/hw/xbox/mcpx/apu/dsp/dsp.c b/hw/xbox/mcpx/apu/dsp/dsp.c
+index 0d844af07d..ea612ed8dc 100644
+--- a/hw/xbox/mcpx/apu/dsp/dsp.c
++++ b/hw/xbox/mcpx/apu/dsp/dsp.c
+@@ -119,11 +119,16 @@ DSPState *dsp_init(void *rw_opaque, dsp_scratch_rw_func scratch_rw,
+     dsp->dma.scratch_rw = scratch_rw;
+     dsp->dma.fifo_rw = fifo_rw;
+ 
++#ifdef CONFIG_DSP_JIT
+     if (g_config.audio.use_dsp_jit) {
+         dsp_jit_init(dsp);
+     } else {
+         dsp_c_init(dsp);
+     }
++#else
++    /* Recompiler not built: the interpreter is the only engine. */
++    dsp_c_init(dsp);
++#endif
+ 
+     dsp_reset(dsp);
+ 
+@@ -212,6 +217,10 @@ void dsp_sync_from_vm(DSPState *dsp)
+ 
+ void dsp_set_engine(DSPState *dsp, bool use_jit)
+ {
++#ifndef CONFIG_DSP_JIT
++    /* Nothing to switch to. */
++    return;
++#else
+     bool currently_jit = (dsp->ops == &jit_dsp_ops);
+     if (use_jit == currently_jit) {
+         return;
+@@ -227,4 +236,5 @@ void dsp_set_engine(DSPState *dsp, bool use_jit)
+     }
+ 
+     dsp_sync_from_vm(dsp);
++#endif
+ }
+diff --git a/hw/xbox/mcpx/apu/dsp/meson.build b/hw/xbox/mcpx/apu/dsp/meson.build
+index 3429547e24..9187e85190 100644
+--- a/hw/xbox/mcpx/apu/dsp/meson.build
++++ b/hw/xbox/mcpx/apu/dsp/meson.build
+@@ -1,11 +1,27 @@
+-dsp56300_emu_ffi = dependency('dsp56300-emu-ffi', fallback: ['dsp56300', 'dsp56300_dep'])
++# dsp56300-emu-ffi is a Rust recompiler for the MCPX's DSP56300. Its crate
++# builds for the host triple, aarch64-apple-darwin, so a visionOS link fails
++# with "built for 'macOS'". It is also a second JIT, in a project where the
++# first one already costs a debugger attach, and it is not needed: a C
++# interpreter for the same DSP sits next to it in interp/ and dsp.c already
++# switches between them at runtime on g_config.audio.use_dsp_jit.
++dsp_jit_args = []
++if get_option('dsp_jit').disabled()
++  dsp56300_emu_ffi = declare_dependency()
++  dsp_jit_sources = []
++else
++  dsp56300_emu_ffi = dependency('dsp56300-emu-ffi',
++                                fallback: ['dsp56300', 'dsp56300_dep'])
++  dsp_jit_sources = files('dsp_jit.c')
++  dsp_jit_args = ['-DCONFIG_DSP_JIT']
++endif
+ 
+ subdir('interp')
+ 
+ libdsp = static_library(
+   'dsp',
+-  files(['dsp.c', 'dsp_c.c', 'dsp_jit.c', 'dsp_dma.c']) + genh,
++  files(['dsp.c', 'dsp_c.c', 'dsp_dma.c']) + dsp_jit_sources + genh,
+   dependencies: [dsp56300_emu_ffi],
++  c_args: dsp_jit_args,
+ )
+ 
+ dsp = declare_dependency(
+diff --git a/hw/xbox/nv2a/nv2a.c b/hw/xbox/nv2a/nv2a.c
+index 1565c05211..2121ed997f 100644
+--- a/hw/xbox/nv2a/nv2a.c
++++ b/hw/xbox/nv2a/nv2a.c
+@@ -77,6 +77,23 @@ DMAObject nv_dma_load(NV2AState *d, hwaddr dma_obj_address)
+     };
+ }
+ 
++static NV2ACpuFramebuffer g_cpu_framebuffer;
++
++void nv2a_set_cpu_framebuffer(const NV2ACpuFramebuffer *fb)
++{
++    g_cpu_framebuffer = *fb;
++}
++
++bool nv2a_get_cpu_framebuffer(NV2ACpuFramebuffer *out)
++{
++    if (!g_cpu_framebuffer.data || g_cpu_framebuffer.width <= 0 ||
++        g_cpu_framebuffer.height <= 0) {
++        return false;
++    }
++    *out = g_cpu_framebuffer;
++    return true;
++}
++
+ void *nv_dma_map(NV2AState *d, hwaddr dma_obj_address, hwaddr *len)
+ {
+     DMAObject dma = nv_dma_load(d, dma_obj_address);
+diff --git a/hw/xbox/nv2a/nv2a.h b/hw/xbox/nv2a/nv2a.h
+index 2a9b7312d4..050166a017 100644
+--- a/hw/xbox/nv2a/nv2a.h
++++ b/hw/xbox/nv2a/nv2a.h
+@@ -24,6 +24,37 @@
+ void nv2a_init(PCIBus *bus, int devfn, MemoryRegion *ram);
+ void nv2a_context_init(void);
+ int nv2a_get_framebuffer_surface(void);
++int nv2a_get_frame_count(void);
++/*
++ * Zero-copy presentation: copy the scanned-out surface into a Metal
++ * texture on the GPU. Returns 1 when a frame was copied, 0 when there
++ * was nothing to show or the size did not match (ask nv2a_present_size
++ * and try again), -1 when this device cannot import Metal textures.
++ */
++int nv2a_present_to_metal(void *mtl_texture, int w, int h);
++bool nv2a_present_size(int *w, int *h);
++
++/*
++ * Where the last scanned-out frame lives in guest memory.
++ *
++ * With no GL display path the Vulkan renderer downloads the frame into
++ * guest VRAM and has nothing to present it with, which is correct: the host
++ * presents now. This hands the host a CPU pointer to those pixels so it can
++ * do what it likes with them, which today is a PNG and on visionOS is a
++ * Metal texture upload.
++ *
++ * Only valid immediately after nv2a_get_framebuffer_surface(), and only
++ * until the guest draws again.
++ */
++typedef struct NV2ACpuFramebuffer {
++    void *data;
++    int width;
++    int height;
++    int stride;
++} NV2ACpuFramebuffer;
++
++void nv2a_set_cpu_framebuffer(const NV2ACpuFramebuffer *fb);
++bool nv2a_get_cpu_framebuffer(NV2ACpuFramebuffer *out);
+ void nv2a_release_framebuffer_surface(void);
+ void nv2a_set_surface_scale_factor(unsigned int scale);
+ unsigned int nv2a_get_surface_scale_factor(void);
+diff --git a/hw/xbox/nv2a/pgraph/meson.build b/hw/xbox/nv2a/pgraph/meson.build
+index fc52f609eb..ca105c5ce4 100644
+--- a/hw/xbox/nv2a/pgraph/meson.build
++++ b/hw/xbox/nv2a/pgraph/meson.build
+@@ -12,7 +12,11 @@ if have_renderdoc
+ endif
+ subdir('thirdparty')
+ subdir('null')
+-subdir('gl')
++# The GL backend is 6,239 lines against an API that does not exist on
++# visionOS, and leaving it in drags 113 epoxy_gl* symbols into the link.
++# Vulkan through MoltenVK is the path this port uses. Upstream's Vulkan
++# backend cannot even create a device on Metal; the patched one can.
++# subdir('gl')
+ subdir('glsl')
+ subdir('vk')
+ specific_ss.add(nv2a_vsh_cpu)
+diff --git a/hw/xbox/nv2a/pgraph/pgraph.c b/hw/xbox/nv2a/pgraph/pgraph.c
+index 1e8ce7df80..bb6d10f1be 100644
+--- a/hw/xbox/nv2a/pgraph/pgraph.c
++++ b/hw/xbox/nv2a/pgraph/pgraph.c
+@@ -254,15 +254,20 @@ void pgraph_clear_dirty_reg_map(PGRAPHState *pg)
+ 
+ static CONFIG_DISPLAY_RENDERER get_default_renderer(void)
+ {
+-#ifdef CONFIG_OPENGL
+-    if (renderers[CONFIG_DISPLAY_RENDERER_OPENGL]) {
+-        return CONFIG_DISPLAY_RENDERER_OPENGL;
+-    }
+-#endif
++    /*
++     * Vulkan first. Upstream prefers OpenGL here, which is the right call
++     * on a desktop and the wrong one on anything Apple: the GL backend is
++     * not built at all in this tree.
++     */
+ #ifdef CONFIG_VULKAN
+     if (renderers[CONFIG_DISPLAY_RENDERER_VULKAN]) {
+         return CONFIG_DISPLAY_RENDERER_VULKAN;
+     }
++#endif
++#ifdef CONFIG_OPENGL
++    if (renderers[CONFIG_DISPLAY_RENDERER_OPENGL]) {
++        return CONFIG_DISPLAY_RENDERER_OPENGL;
++    }
+ #endif
+     fprintf(stderr, "Warning: No available renderer\n");
+     return CONFIG_DISPLAY_RENDERER_NULL;
+@@ -355,6 +360,49 @@ void pgraph_destroy(PGRAPHState *pg)
+     qemu_mutex_destroy(&pg->lock);
+ }
+ 
++#if defined(__APPLE__)
++int pgraph_vk_present_to_metal(NV2AState *d, void *mtl_texture, int w, int h);
++bool pgraph_vk_present_size(NV2AState *d, int *w, int *h);
++
++int nv2a_present_to_metal(void *mtl_texture, int w, int h)
++{
++    NV2AState *d = g_nv2a;
++    if (!d) {
++        return 0;    /* the host asks before the machine exists */
++    }
++    PGRAPHState *pg = &d->pgraph;
++    int r = -1;
++    qemu_mutex_lock(&pg->renderer_lock);
++    if (pg->renderer && pg->renderer->type == CONFIG_DISPLAY_RENDERER_VULKAN) {
++        r = pgraph_vk_present_to_metal(d, mtl_texture, w, h);
++    }
++    qemu_mutex_unlock(&pg->renderer_lock);
++    return r;
++}
++
++bool nv2a_present_size(int *w, int *h)
++{
++    NV2AState *d = g_nv2a;
++    if (!d) {
++        return false;
++    }
++    PGRAPHState *pg = &d->pgraph;
++    bool ok = false;
++    qemu_mutex_lock(&pg->renderer_lock);
++    if (pg->renderer && pg->renderer->type == CONFIG_DISPLAY_RENDERER_VULKAN) {
++        ok = pgraph_vk_present_size(d, w, h);
++    }
++    qemu_mutex_unlock(&pg->renderer_lock);
++    return ok;
++}
++#endif
++
++/* Flips the guest has presented, for the host's speed line. */
++int nv2a_get_frame_count(void)
++{
++    return g_nv2a ? g_nv2a->pgraph.frame_time : 0;
++}
++
+ int nv2a_get_framebuffer_surface(void)
+ {
+     NV2AState *d = g_nv2a;
+diff --git a/hw/xbox/nv2a/pgraph/vk/buffer.c b/hw/xbox/nv2a/pgraph/vk/buffer.c
+index d87c875aa4..b06bc450f3 100644
+--- a/hw/xbox/nv2a/pgraph/vk/buffer.c
++++ b/hw/xbox/nv2a/pgraph/vk/buffer.c
+@@ -18,6 +18,9 @@
+  */
+ 
+ #include "renderer.h"
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
+ 
+ static void create_buffer(PGRAPHState *pg, StorageBuffer *buffer)
+ {
+@@ -76,7 +79,16 @@ void pgraph_vk_init_buffers(NV2AState *d)
+         .alloc_info = device_alloc_create_info,
+         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
++#if (defined(__APPLE__) && (TARGET_OS_VISION || TARGET_OS_IOS))
++        /*
++         * 800 MiB each on desktop, sized for surfaces scaled up to 10x.
++         * On a headset the scale is 1 and the process has a memory
++         * ceiling, so 2048 x 2048 x 8 is plenty and 1.5 GiB cheaper.
++         */
++        .buffer_size = (1024 * 2) * (1024 * 2) * 8,
++#else
+         .buffer_size = (1024 * 10) * (1024 * 10) * 8,
++#endif
+     };
+ 
+     r->storage_buffers[BUFFER_COMPUTE_SRC] = (StorageBuffer){
+diff --git a/hw/xbox/nv2a/pgraph/vk/gpuprops.c b/hw/xbox/nv2a/pgraph/vk/gpuprops.c
+index cbda5787f4..2ec96d62bb 100644
+--- a/hw/xbox/nv2a/pgraph/vk/gpuprops.c
++++ b/hw/xbox/nv2a/pgraph/vk/gpuprops.c
+@@ -591,7 +591,26 @@ void pgraph_vk_determine_gpu_properties(NV2AState *d)
+     const int height = 480;
+     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+ 
+-    if (!r->enabled_physical_device_features.geometryShader) {
++    /*
++     * MoltenVK on visionOS advertises geometryShader and then cannot compile
++     * one. It emulates the stage with Metal mesh shaders, and the generated
++     * source fails with "use of undeclared identifier
++     * _RESERVED_IDENTIFIER_FIXUP_gl_PerVertex" and an invalid [[payload]]
++     * attribute. macOS reports the feature as absent and takes the branch
++     * below, so this only bites on device, inside an assert, after Vulkan
++     * has otherwise come up cleanly. Measured 2026-10-26.
++     *
++     * Treat the iOS family as having no geometry shaders, which is what the
++     * fast depth and quad conversion paths already assume on Apple.
++     */
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++    if (!r->enabled_physical_device_features.geometryShader
++#if TARGET_OS_VISION || TARGET_OS_IOS
++        || true
++#endif
++    ) {
+         memset(&pgraph_vk_gpu_properties, 0, sizeof(pgraph_vk_gpu_properties));
+         pgraph_vk_gpu_properties.no_geometry_shader = true;
+         fprintf(stderr, "VK: no geometry shader support, using fast depth\n");
+diff --git a/hw/xbox/nv2a/pgraph/vk/instance.c b/hw/xbox/nv2a/pgraph/vk/instance.c
+index 7f7d5abc25..d000506a2a 100644
+--- a/hw/xbox/nv2a/pgraph/vk/instance.c
++++ b/hw/xbox/nv2a/pgraph/vk/instance.c
+@@ -160,6 +160,7 @@ add_optional_instance_extension_names(PGRAPHState *pg,
+ }
+ 
+ #ifdef __APPLE__
++#include <TargetConditionals.h>
+ /*
+  * Load MoltenVK directly: from the app bundle first, then from Homebrew. This
+  * avoids depending on a Vulkan loader and ICD manifest being installed.
+@@ -167,11 +168,22 @@ add_optional_instance_extension_names(PGRAPHState *pg,
+ static VkResult load_vulkan_library(void)
+ {
+     static const char *const paths[] = {
++#if TARGET_OS_VISION || TARGET_OS_IOS
++        /*
++         * An iOS-family bundle puts the executable at the root, so
++         * Frameworks is a sibling and not one level up. MoltenVK also ships
++         * as a framework rather than a bare dylib there, which means the
++         * binary inside it carries no extension.
++         */
++        "@executable_path/Frameworks/MoltenVK.framework/MoltenVK",
++        "@rpath/MoltenVK.framework/MoltenVK",
++#else
+         "@executable_path/../Libraries/arm64/libMoltenVK.dylib",
+         "@executable_path/../Frameworks/libMoltenVK.dylib",
+         "@executable_path/libMoltenVK.dylib",
+         "/opt/homebrew/lib/libMoltenVK.dylib",
+         "/usr/local/lib/libMoltenVK.dylib",
++#endif
+     };
+ 
+     for (int i = 0; i < ARRAY_SIZE(paths); i++) {
+@@ -189,7 +201,19 @@ static VkResult load_vulkan_library(void)
+         dlclose(module);
+     }
+ 
++#if TARGET_OS_VISION || TARGET_OS_IOS
++    /*
++     * No fallback. volkInitialize() looks for a Vulkan loader on the system
++     * library path, and an iOS-family OS has no such path and no installed
++     * loader, so it can only fail later and less clearly. If MoltenVK is not
++     * in the bundle, say so here.
++     */
++    fprintf(stderr, "MoltenVK not found in the app bundle. Expected "
++                    "Frameworks/MoltenVK.framework/MoltenVK\n");
++    return VK_ERROR_INITIALIZATION_FAILED;
++#else
+     return volkInitialize();
++#endif
+ }
+ #endif
+ 
+diff --git a/hw/xbox/nv2a/pgraph/vk/meson.build b/hw/xbox/nv2a/pgraph/vk/meson.build
+index 668a8ff6b9..b311510f48 100644
+--- a/hw/xbox/nv2a/pgraph/vk/meson.build
++++ b/hw/xbox/nv2a/pgraph/vk/meson.build
+@@ -22,7 +22,12 @@ specific_ss.add([volk, libglslang, vma, vulkan, spirv_reflect,
+ 		)
+ 	])
+ 
+-if host_os == 'darwin'
++# The IOSurface display path presents through a GL context, so it brings
++# the OpenGL framework with it. visionOS has neither, and a headless host
++# presents for itself, so this whole block goes with -Dopengl=disabled.
++# S3 revisits IOSurface, which is the zero-copy route to an MTLTexture, and
++# will need it back without the GL half.
++if host_os == 'darwin' and not get_option('opengl').disabled()
+   specific_ss.add(dependency('appleframeworks',
+                              modules: ['CoreFoundation', 'IOSurface', 'OpenGL']),
+                   files('iosurface.c'))
+diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.c b/hw/xbox/nv2a/pgraph/vk/renderer.c
+index d69a31a9af..f5725a3b84 100644
+--- a/hw/xbox/nv2a/pgraph/vk/renderer.c
++++ b/hw/xbox/nv2a/pgraph/vk/renderer.c
+@@ -20,7 +20,9 @@
+ #include "hw/xbox/nv2a/nv2a_int.h"
+ #include "renderer.h"
+ 
++#if HAVE_GL_DISPLAY
+ #include "gloffscreen.h"
++#endif
+ 
+ #if HAVE_GL_DISPLAY
+ static GloContext *g_gl_context;
+@@ -50,15 +52,36 @@ static void pgraph_vk_init(NV2AState *d, Error **errp)
+         return;
+     }
+ 
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++#if TARGET_OS_VISION || TARGET_OS_IOS
++    /* Which of these costs the memory. Five gigabytes appeared in here. */
++    extern unsigned long long xemu_host_footprint_mib(void);
++#define VK_FP(what) fprintf(stderr, "[vk] footprint after %s: %llu MiB\n", \
++                            what, xemu_host_footprint_mib())
++#else
++#define VK_FP(what) do { } while (0)
++#endif
+     pgraph_vk_init_command_buffers(pg);
++    VK_FP("command_buffers");
+     pgraph_vk_init_buffers(d);
++    VK_FP("buffers");
+     pgraph_vk_init_surfaces(pg);
++    VK_FP("surfaces");
+     pgraph_vk_init_shaders(pg);
++    VK_FP("shaders");
+     pgraph_vk_init_pipelines(pg);
++    VK_FP("pipelines");
+     pgraph_vk_init_textures(pg);
++    VK_FP("textures");
+     pgraph_vk_init_reports(pg);
++    VK_FP("reports");
+     pgraph_vk_init_compute(pg);
++    VK_FP("compute");
+     pgraph_vk_init_display(pg);
++    VK_FP("display");
++    qemu_event_init(&pg->vk_renderer_state->present_complete, false);
+ 
+     pgraph_vk_update_vertex_ram_buffer(&d->pgraph, 0, d->vram_ptr,
+                                    memory_region_size(d->vram));
+@@ -119,6 +142,7 @@ static void pgraph_vk_process_pending(NV2AState *d)
+ 
+     if (qatomic_read(&r->downloads_pending) ||
+         qatomic_read(&r->download_dirty_surfaces_pending) ||
++        qatomic_read(&r->present_pending) ||
+         qatomic_read(&d->pgraph.sync_pending) ||
+         qatomic_read(&d->pgraph.flush_pending)
+     ) {
+@@ -127,6 +151,9 @@ static void pgraph_vk_process_pending(NV2AState *d)
+         if (qatomic_read(&r->downloads_pending)) {
+             pgraph_vk_process_pending_downloads(d);
+         }
++        if (qatomic_read(&r->present_pending)) {
++            pgraph_vk_process_pending_present(d);
++        }
+         if (qatomic_read(&r->download_dirty_surfaces_pending)) {
+             pgraph_vk_download_dirty_surfaces(d);
+         }
+@@ -141,6 +168,23 @@ static void pgraph_vk_process_pending(NV2AState *d)
+     }
+ }
+ 
++/* Called from the host's presenting thread: ask, kick, wait. */
++int pgraph_vk_present_to_metal(NV2AState *d, void *mtl_texture, int w, int h)
++{
++    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
++
++    qemu_mutex_lock(&d->pfifo.lock);
++    r->present_target = mtl_texture;
++    r->present_width = w;
++    r->present_height = h;
++    qemu_event_reset(&r->present_complete);
++    qatomic_set(&r->present_pending, true);
++    pfifo_kick(d);
++    qemu_mutex_unlock(&d->pfifo.lock);
++    qemu_event_wait(&r->present_complete);
++    return r->present_result;
++}
++
+ static void pgraph_vk_flip_stall(NV2AState *d)
+ {
+     pgraph_vk_finish(&d->pgraph, VK_FINISH_REASON_FLIP_STALL);
+@@ -200,6 +244,19 @@ static int pgraph_vk_get_framebuffer_surface(NV2AState *d)
+ #else
+     qemu_mutex_unlock(&d->pfifo.lock);
+     pgraph_vk_wait_for_surface_download(surface);
++
++    /*
++     * The download has put the frame in guest VRAM at surface->vram_addr.
++     * Publish a pointer to it so the host can present it. Returning 0 here
++     * is unchanged and still means "no GL texture", which is true.
++     */
++    NV2ACpuFramebuffer fb = {
++        .data   = (uint8_t *)d->vram_ptr + surface->vram_addr,
++        .width  = surface->width,
++        .height = surface->height,
++        .stride = surface->pitch,
++    };
++    nv2a_set_cpu_framebuffer(&fb);
+     return 0;
+ #endif
+ }
+diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.h b/hw/xbox/nv2a/pgraph/vk/renderer.h
+index b805a76333..08e2a11c58 100644
+--- a/hw/xbox/nv2a/pgraph/vk/renderer.h
++++ b/hw/xbox/nv2a/pgraph/vk/renderer.h
+@@ -44,7 +44,17 @@
+ #ifdef __APPLE__
+ /* No GL_EXT_memory_object on macOS: share the display image via IOSurface */
+ #define HAVE_EXTERNAL_MEMORY 0
+-#define HAVE_IOSURFACE_DISPLAY 1
++/*
++ * The IOSurface presentation path still creates a GL context to present
++ * through, and this build has no GL at all. Headless takes the CPU
++ * readback branch instead, which lands the frame in the QEMU console
++ * surface, which is where the host reads it from.
++ *
++ * S3 revisits this: IOSurface is a zero-copy route to an MTLTexture and is
++ * the right answer on device. It is turned off here because presenting is
++ * the host's job now, not the renderer's.
++ */
++#define HAVE_IOSURFACE_DISPLAY 0
+ #define DISPLAY_VK_FORMAT VK_FORMAT_B8G8R8A8_UNORM
+ #else
+ #define HAVE_EXTERNAL_MEMORY 1
+@@ -296,7 +306,9 @@ typedef struct PGRAPHVkDisplayState {
+     int width, height;
+     int draw_time;
+ 
+-    // OpenGL Interop
++    // OpenGL Interop. Only present when there is a GL display path to
++    // interop with; a headless or Metal host has neither.
++#if HAVE_GL_DISPLAY
+ #ifdef WIN32
+     HANDLE handle;
+ #elif HAVE_IOSURFACE_DISPLAY
+@@ -308,6 +320,7 @@ typedef struct PGRAPHVkDisplayState {
+ #endif
+     GLuint gl_memory_obj;
+     GLuint gl_texture_id;
++#endif
+ } PGRAPHVkDisplayState;
+ 
+ typedef struct ComputePipelineKey {
+@@ -408,6 +421,26 @@ typedef struct PGRAPHVkState {
+     SurfaceBinding *color_binding, *zeta_binding;
+     bool downloads_pending;
+     QemuEvent downloads_complete;
++
++    /*
++     * Zero-copy presentation. The host hands in a Metal texture; the
++     * render thread imports it as a VkImage once per texture and copies
++     * the scan-out surface into it on the GPU. No download, no memcpy.
++     */
++    bool present_pending;
++    QemuEvent present_complete;
++    void *present_target;          /* id<MTLTexture>, unretained */
++    int present_width, present_height;
++    /* The drawable queue rotates a few textures; keep each imported once. */
++    struct {
++        void *target;
++        VkImage image;
++        VmaAllocation alloc;
++        int width, height;
++    } present_images[4];
++    int present_images_next;
++    VkImage present_image;         /* the one for this frame */
++    int present_result;
+     bool download_dirty_surfaces_pending;
+     QemuEvent dirty_surfaces_download_complete; // common
+ 
+@@ -531,6 +564,9 @@ void pgraph_vk_surface_flush(NV2AState *d);
+ void pgraph_vk_process_pending_downloads(NV2AState *d);
+ void pgraph_vk_surface_download_if_dirty(NV2AState *d, SurfaceBinding *surface);
+ SurfaceBinding *pgraph_vk_surface_get_within(NV2AState *d, hwaddr addr);
++void pgraph_vk_process_pending_present(NV2AState *d);
++int pgraph_vk_present_to_metal(NV2AState *d, void *mtl_texture, int w, int h);
++bool pgraph_vk_present_size(NV2AState *d, int *w, int *h);
+ void pgraph_vk_wait_for_surface_download(SurfaceBinding *e);
+ void pgraph_vk_download_dirty_surfaces(NV2AState *d);
+ void pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg, hwaddr start, hwaddr size);
+diff --git a/hw/xbox/nv2a/pgraph/vk/surface.c b/hw/xbox/nv2a/pgraph/vk/surface.c
+index 9d438f2d7b..10ae89a530 100644
+--- a/hw/xbox/nv2a/pgraph/vk/surface.c
++++ b/hw/xbox/nv2a/pgraph/vk/surface.c
+@@ -1758,3 +1758,203 @@ void pgraph_vk_surface_flush(NV2AState *d)
+ 
+     pgraph_vk_reload_surface_scale_factor(pg);
+ }
++
++
++/* ------------------------------------------------------------------ */
++/* Zero-copy presentation                                               */
++/* ------------------------------------------------------------------ */
++
++/*
++ * VK_EXT_metal_objects, import direction. Declared here rather than
++ * through vulkan_metal.h so the file needs no platform define; the
++ * layout is the one from the header (sType, pNext, plane, mtlTexture).
++ */
++typedef struct {
++    VkStructureType sType;
++    const void *pNext;
++    VkImageAspectFlagBits plane;
++    void *mtlTexture;
++} XemuImportMetalTextureInfoEXT;
++
++static bool ensure_present_image(PGRAPHVkState *r)
++{
++    for (int i = 0; i < 4; i++) {
++        if (r->present_images[i].target == r->present_target &&
++            r->present_images[i].width == r->present_width &&
++            r->present_images[i].height == r->present_height) {
++            r->present_image = r->present_images[i].image;
++            return true;
++        }
++    }
++
++    /* A new texture, or a resized one: take the next slot over. */
++    int slot = r->present_images_next;
++    r->present_images_next = (slot + 1) % 4;
++    if (r->present_images[slot].image != VK_NULL_HANDLE) {
++        vkDestroyImage(r->device, r->present_images[slot].image, NULL);
++        if (r->present_images[slot].alloc) {
++            vmaFreeMemory(r->allocator, r->present_images[slot].alloc);
++        }
++        memset(&r->present_images[slot], 0, sizeof(r->present_images[slot]));
++    }
++
++    XemuImportMetalTextureInfoEXT import = {
++        .sType = VK_STRUCTURE_TYPE_IMPORT_METAL_TEXTURE_INFO_EXT,
++        .plane = VK_IMAGE_ASPECT_PLANE_0_BIT,
++        .mtlTexture = r->present_target,
++    };
++    VkImageCreateInfo ci = {
++        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
++        .pNext = &import,
++        .imageType = VK_IMAGE_TYPE_2D,
++        .extent.width = r->present_width,
++        .extent.height = r->present_height,
++        .extent.depth = 1,
++        .mipLevels = 1,
++        .arrayLayers = 1,
++        .format = VK_FORMAT_B8G8R8A8_SRGB,
++        .tiling = VK_IMAGE_TILING_OPTIMAL,
++        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
++        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
++        .samples = VK_SAMPLE_COUNT_1_BIT,
++        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
++    };
++    VkImage image = VK_NULL_HANDLE;
++    VmaAllocation alloc = NULL;
++    VkResult res = vkCreateImage(r->device, &ci, NULL, &image);
++    if (res != VK_SUCCESS) {
++        fprintf(stderr, "[vk] present: import of Metal texture refused (%d)\n",
++                (int)res);
++        return false;
++    }
++    /* An imported texture may or may not want memory bound; ask. */
++    VkMemoryRequirements req;
++    vkGetImageMemoryRequirements(r->device, image, &req);
++    if (req.size) {
++        /* vmaAllocateMemoryForImage refuses the AUTO usages; GPU_ONLY it is. */
++        VmaAllocationCreateInfo ai = { .usage = VMA_MEMORY_USAGE_GPU_ONLY };
++        res = vmaAllocateMemoryForImage(r->allocator, image, &ai, &alloc, NULL);
++        if (res == VK_SUCCESS) {
++            res = vmaBindImageMemory(r->allocator, alloc, image);
++        }
++        if (res != VK_SUCCESS) {
++            fprintf(stderr, "[vk] present: memory for imported image failed "
++                            "(%d)\n", (int)res);
++            vkDestroyImage(r->device, image, NULL);
++            return false;
++        }
++    }
++    fprintf(stderr, "[vk] present: imported Metal texture %p as %dx%d "
++                    "(memory requirement %llu bytes), slot %d\n",
++            r->present_target, r->present_width, r->present_height,
++            (unsigned long long)req.size, slot);
++    fflush(stderr);
++    r->present_images[slot].target = r->present_target;
++    r->present_images[slot].image = image;
++    r->present_images[slot].alloc = alloc;
++    r->present_images[slot].width = r->present_width;
++    r->present_images[slot].height = r->present_height;
++    r->present_image = image;
++    return true;
++}
++
++static SurfaceBinding *scanout_surface(NV2AState *d)
++{
++    VGADisplayParams vp;
++    d->vga.get_params(&d->vga, &vp);
++    SurfaceBinding *s = pgraph_vk_surface_get_within(d, d->pcrtc.start + vp.line_offset);
++    if (!s || !s->color || !s->width || !s->height) {
++        return NULL;
++    }
++    return s;
++}
++
++bool pgraph_vk_present_size(NV2AState *d, int *w, int *h)
++{
++    PGRAPHState *pg = &d->pgraph;
++    qemu_mutex_lock(&d->pfifo.lock);
++    SurfaceBinding *s = scanout_surface(d);
++    bool ok = s != NULL;
++    if (ok) {
++        unsigned sw = s->width, sh = s->height;
++        pgraph_apply_scaling_factor(pg, &sw, &sh);
++        *w = sw;
++        *h = sh;
++    }
++    qemu_mutex_unlock(&d->pfifo.lock);
++    return ok;
++}
++
++/* On the render thread, under the pgraph lock, like a download. */
++void pgraph_vk_process_pending_present(NV2AState *d)
++{
++    PGRAPHState *pg = &d->pgraph;
++    PGRAPHVkState *r = pg->vk_renderer_state;
++    int result = 0;
++    static int shown;
++
++    SurfaceBinding *surface = scanout_surface(d);
++    if (surface) {
++        unsigned sw = surface->width, sh = surface->height;
++        pgraph_apply_scaling_factor(pg, &sw, &sh);
++        if ((int)sw != r->present_width || (int)sh != r->present_height) {
++            result = 0;          /* the host will resize and try again */
++        } else if (!ensure_present_image(r)) {
++            result = -1;         /* no import on this device: use the CPU path */
++        } else {
++            pgraph_vk_finish(pg, VK_FINISH_REASON_SURFACE_DOWN);
++            VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
++            pgraph_vk_transition_image_layout(
++                pg, cmd, surface->image, surface->host_fmt.vk_format,
++                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
++                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++            pgraph_vk_transition_image_layout(
++                pg, cmd, r->present_image, VK_FORMAT_B8G8R8A8_SRGB,
++                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++
++            bool bgra = surface->host_fmt.vk_format == VK_FORMAT_B8G8R8A8_UNORM ||
++                        surface->host_fmt.vk_format == VK_FORMAT_B8G8R8A8_SRGB;
++            if (bgra) {
++                /* Same bits, no conversion: the surface's sRGB values land
++                 * in the sRGB drawable untouched. */
++                VkImageCopy region = {
++                    .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++                    .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++                    .extent = { sw, sh, 1 },
++                };
++                vkCmdCopyImage(cmd, surface->image,
++                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                               r->present_image,
++                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++            } else {
++                VkImageBlit blit = {
++                    .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++                    .srcOffsets = { { 0, 0, 0 }, { (int)sw, (int)sh, 1 } },
++                    .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++                    .dstOffsets = { { 0, 0, 0 }, { (int)sw, (int)sh, 1 } },
++                };
++                vkCmdBlitImage(cmd, surface->image,
++                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                               r->present_image,
++                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
++                               VK_FILTER_NEAREST);
++            }
++            pgraph_vk_transition_image_layout(
++                pg, cmd, surface->image, surface->host_fmt.vk_format,
++                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
++            pgraph_vk_end_single_time_commands(pg, cmd);
++            result = 1;
++            if (shown++ < 3) {
++                fprintf(stderr, "[vk] present: %s %ux%u surface format %d\n",
++                        bgra ? "copied" : "blitted", sw, sh,
++                        (int)surface->host_fmt.vk_format);
++                fflush(stderr);
++            }
++        }
++    }
++
++    r->present_result = result;
++    qatomic_set(&r->present_pending, false);
++    qemu_event_set(&r->present_complete);
++}
+diff --git a/hw/xbox/nv2a/pgraph/vk/texture.c b/hw/xbox/nv2a/pgraph/vk/texture.c
+index 5647275520..bbae3cbcc8 100644
+--- a/hw/xbox/nv2a/pgraph/vk/texture.c
++++ b/hw/xbox/nv2a/pgraph/vk/texture.c
+@@ -1546,8 +1546,24 @@ void pgraph_vk_init_textures(PGRAPHState *pg)
+ {
+     PGRAPHVkState *r = pg->vk_renderer_state;
+ 
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++#if TARGET_OS_VISION || TARGET_OS_IOS
++    extern unsigned long long xemu_host_footprint_mib(void);
++    fprintf(stderr, "[vk] footprint entering textures: %llu MiB\n",
++            xemu_host_footprint_mib());
++#endif
+     texture_cache_init(r);
++#if TARGET_OS_VISION || TARGET_OS_IOS
++    fprintf(stderr, "[vk] footprint after texture cache: %llu MiB\n",
++            xemu_host_footprint_mib());
++#endif
+     create_dummy_texture(pg);
++#if TARGET_OS_VISION || TARGET_OS_IOS
++    fprintf(stderr, "[vk] footprint after dummy texture: %llu MiB\n",
++            xemu_host_footprint_mib());
++#endif
+ 
+     r->texture_format_properties = g_malloc0_n(
+         ARRAY_SIZE(kelvin_color_format_vk_map), sizeof(VkFormatProperties));
+diff --git a/hw/xbox/xid.c b/hw/xbox/xid.c
+index 396d8119bc..f55b735575 100644
+--- a/hw/xbox/xid.c
++++ b/hw/xbox/xid.c
+@@ -101,6 +101,45 @@ void update_input(USBXIDGamepadState *s)
+     s->in_state.sThumbLY = state->axis[CONTROLLER_AXIS_LSTICK_Y];
+     s->in_state.sThumbRX = state->axis[CONTROLLER_AXIS_RSTICK_X];
+     s->in_state.sThumbRY = state->axis[CONTROLLER_AXIS_RSTICK_Y];
++
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++#if TARGET_OS_VISION || TARGET_OS_IOS
++    /*
++     * The report as the guest will read it, on change. Start reached the
++     * dashboard and A did not, and both come from the same state word, so
++     * the report is where to look.
++     */
++    {
++        static uint16_t last_w;
++        static uint8_t last_a, last_b;
++        static int16_t last_lx, last_ly, last_rx, last_ry;
++        static int shown;
++        uint8_t a = s->in_state.bAnalogButtons[GAMEPAD_A];
++        uint8_t bb = s->in_state.bAnalogButtons[GAMEPAD_B];
++        if (shown < 200 &&
++            (s->in_state.wButtons != last_w || a != last_a || bb != last_b ||
++             abs(s->in_state.sThumbLX - last_lx) > 4000 ||
++             abs(s->in_state.sThumbLY - last_ly) > 4000 ||
++             abs(s->in_state.sThumbRX - last_rx) > 4000 ||
++             abs(s->in_state.sThumbRY - last_ry) > 4000)) {
++            shown++;
++            fprintf(stderr, "[xid] port %d report: wButtons 0x%04x A %u B %u "
++                            "LT %u RT %u L %d,%d R %d,%d (state 0x%04x)\n",
++                    s->device_index, s->in_state.wButtons, a, bb,
++                    s->in_state.bAnalogButtons[GAMEPAD_LEFT_TRIGGER],
++                    s->in_state.bAnalogButtons[GAMEPAD_RIGHT_TRIGGER],
++                    s->in_state.sThumbLX, s->in_state.sThumbLY,
++                    s->in_state.sThumbRX, s->in_state.sThumbRY,
++                    state->buttons);
++            fflush(stderr);
++            last_w = s->in_state.wButtons; last_a = a; last_b = bb;
++            last_lx = s->in_state.sThumbLX; last_ly = s->in_state.sThumbLY;
++            last_rx = s->in_state.sThumbRX; last_ry = s->in_state.sThumbRY;
++        }
++    }
++#endif
+ }
+ 
+ void usb_xid_handle_reset(USBDevice *dev)
+diff --git a/include/qemu/osdep.h b/include/qemu/osdep.h
+index e3881aad08..e89eed59bc 100644
+--- a/include/qemu/osdep.h
++++ b/include/qemu/osdep.h
+@@ -857,7 +857,29 @@ size_t qemu_get_host_physmem(void);
+  * Toggle write/execute on the pages marked MAP_JIT
+  * for the current thread.
+  */
+-#ifdef __APPLE__
++/*
++ * __APPLE__ is too wide a guard. pthread_jit_write_protect_np() exists on
++ * macOS and is marked unavailable on the iOS family, including visionOS,
++ * where even naming it fails to compile. Narrow it to macOS.
++ *
++ * On visionOS this is correctly a no-op rather than a missing feature. The
++ * app never toggles W^X there, because it cannot: MAP_JIT returns EPERM and
++ * mprotect to R+X is refused at the first instruction fetch, both measured
++ * on device. Instead the pages are made executable once, before use, by a
++ * debugger writing to each of them, and they stay executable afterwards.
++ * There is nothing to toggle per translation block.
++ */
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++
++#if defined(__APPLE__) && defined(TARGET_OS_OSX) && TARGET_OS_OSX
++#define QEMU_HAVE_JIT_WRITE_PROTECT 1
++#else
++#define QEMU_HAVE_JIT_WRITE_PROTECT 0
++#endif
++
++#if QEMU_HAVE_JIT_WRITE_PROTECT
+ /*
+  * MAP_JIT protection of the current thread: -1 unknown, 0 write, 1 execute.
+  * pthread_jit_write_protect_np() is costly and cpu_tb_exec() requests execute
+diff --git a/meson.build b/meson.build
+index 909017ca60..defc108e51 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1882,10 +1882,17 @@ if not get_option('coreaudio').auto() or (host_os == 'darwin' and have_system)
+                          required: get_option('coreaudio'))
+ endif
+ 
+-epoxy = dependency('epoxy', required: true)
++# Both of these were unconditional on a system build, so -Dopengl=disabled
++# did nothing and a darwin build always linked -framework OpenGL. That
++# framework does not exist on visionOS, and neither does libepoxy, so the
++# flag has to actually mean something.
++epoxy = not_found
++if not get_option('opengl').disabled()
++  epoxy = dependency('epoxy', required: true)
++endif
+ 
+ opengl = not_found
+-if not get_option('opengl').auto() or have_system or have_vhost_user_gpu
++if not get_option('opengl').disabled() and (not get_option('opengl').auto() or have_system or have_vhost_user_gpu)
+   # FIXME: Use meson's 'gl' dep
+   if host_os == 'darwin'
+     opengl_libs=['-framework', 'OpenGL']
+@@ -2452,36 +2459,22 @@ if host_os == 'windows'
+   libpcap = declare_dependency(include_directories: 'winpcap-loader/include',
+                                link_args: ['-lws2_32'])
+ else
+-  libpcap = dependency('libpcap', method: 'pkg-config', required: true)
+-endif
+-
+-libsamplerate = dependency('samplerate', method: 'pkg-config', required: true)
+-
+-imgui_proj = subproject('imgui', required: true,
+-                         default_options: [
+-                           'default_library=static',
+-                           'dx9=disabled',
+-                           'dx10=disabled',
+-                           'dx11=disabled',
+-                           'dx12=disabled',
+-                           'metal=disabled',
+-                           'opengl=enabled',
+-                           'sdl2_renderer=disabled',
+-                           'sdl3_renderer=disabled',
+-                           'vulkan=disabled',
+-                           'webgpu=disabled',
+-                           'glfw=disabled',
+-                           'sdl2=disabled',
+-                           'sdl3=enabled',
+-                           'osx=disabled',
+-                           'win=disabled',
+-                           'allegro5=disabled',
+-                        ])
+-imgui = imgui_proj.get_variable('imgui_dep')
+-
+-implot_proj = subproject('implot', required: true,
+-                         default_options: ['default_library=static'])
+-implot = implot_proj.get_variable('implot_dep')
++  # Was required: true, which stops a visionOS configure dead. pcap is a
++  # host packet-capture network backend; a headset has no use for it and the
++  # sysroot has no libpcap. net/pcap.c is dropped with it, see net/meson.build.
++  libpcap = dependency('libpcap', method: 'pkg-config', required: false)
++endif
++
++# Also was required: true. The APU uses it to resample, so this is really
++# S4's audio work; until then the guest simply gets no resampler.
++libsamplerate = dependency('samplerate', method: 'pkg-config', required: false)
++
++# imgui and implot were required subprojects with no consumers left once
++# ui/xui/ was deleted. imgui carried 'sdl3=enabled', which pulled in the
++# SDL3 CMake subproject, which is the first thing that broke a cross build.
++# Five statements removed take SDL3 out of configure entirely.
++imgui = not_found
++implot = not_found
+ 
+ genconfig_proj = subproject('genconfig', required: true)
+ genconfig = genconfig_proj.get_variable('cnode_dep')
+diff --git a/meson_options.txt b/meson_options.txt
+index b1e7b3484d..2cc98368f2 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -394,3 +394,6 @@ option('rust', type: 'feature', value: 'disabled',
+        description: 'Rust support')
+ option('strict_rust_lints', type: 'boolean', value: false,
+        description: 'Enable stricter set of Rust warnings')
++
++option('dsp_jit', type : 'feature', value : 'auto',
++       description: 'Rust recompiler for the MCPX DSP56300 (a C interpreter is always built)')
+diff --git a/net/meson.build b/net/meson.build
+index 804eb71f82..47f8bd3b47 100644
+--- a/net/meson.build
++++ b/net/meson.build
+@@ -62,7 +62,12 @@ else
+   system_ss.add(files('tap.c', 'tap-stub.c'))
+ endif
+ 
+-system_ss.add([libpcap, files('pcap.c')])
++if libpcap.found()
++  system_ss.add([libpcap, files('pcap.c')])
++  # net.c names net_init_pcap in its client table, so the table entry has to
++  # disappear with the file or the link fails on one symbol.
++  config_host_data.set('CONFIG_PCAP', true)
++endif
+ 
+ if have_vhost_net_vdpa
+   system_ss.add(when: 'CONFIG_VIRTIO_NET', if_true: files('vhost-vdpa.c'), if_false: files('vhost-vdpa-stub.c'))
+diff --git a/net/net.c b/net/net.c
+index 2609958dc0..e0df3582a4 100644
+--- a/net/net.c
++++ b/net/net.c
+@@ -1308,7 +1308,9 @@ static int (* const net_client_init_fun[NET_CLIENT_DRIVER__MAX])(
+ #ifdef CONFIG_L2TPV3
+         [NET_CLIENT_DRIVER_L2TPV3]    = net_init_l2tpv3,
+ #endif
++#ifdef CONFIG_PCAP
+         [NET_CLIENT_DRIVER_PCAP]      = net_init_pcap,
++#endif
+ #ifdef CONFIG_VMNET
+         [NET_CLIENT_DRIVER_VMNET_HOST] = net_init_vmnet_host,
+         [NET_CLIENT_DRIVER_VMNET_SHARED] = net_init_vmnet_shared,
+diff --git a/system/vl.c b/system/vl.c
+index f45bdc3458..c1bab2c7c5 100644
+--- a/system/vl.c
++++ b/system/vl.c
+@@ -3053,6 +3053,38 @@ void qemu_init(int argc, char **argv)
+         fake_argv[fake_argc++] = strdup(flashrom_path);
+     }
+ 
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++#if TARGET_OS_VISION || TARGET_OS_IOS
++    /*
++     * Two defaults are wrong on a headset and both fail the same way, with
++     * "allocate 1073741824 bytes for jit buffer: Operation not permitted".
++     *
++     * split-wx: accel/tcg/tcg-all.c only enables it under CONFIG_DEBUG_TCG,
++     * so a release build takes the non-splitwx path, which asks for MAP_JIT
++     * on Darwin, which visionOS refuses with EPERM. Measured on device in
++     * S0: MAP_JIT is never granted here. With split-wx the code buffer is
++     * an ordinary RW mapping plus a separate RX view, and the RX view is
++     * what a debugger prepares.
++     *
++     * tb-size: the default is min(1 GiB, physmem/8), so 1 GiB on a 16 GB
++     * device. Every prepared page is written and therefore resident dirty,
++     * which would be 1 GiB of RSS before a single guest instruction and
++     * about 6.5 s of preparation. UTM uses 128 MiB and it works.
++     */
++    /* Whatever the guest does wrong, say so. Cheap and off by default. */
++    fake_argv[fake_argc++] = strdup("-d");
++    fake_argv[fake_argc++] = strdup("guest_errors,unimp");
++
++    fake_argv[fake_argc++] = strdup("-accel");
++    fake_argv[fake_argc++] = strdup("tcg,split-wx=on,tb-size=32");
++
++    /* Thread names, so a stack dump of the process reads as QEMU roles. */
++    fake_argv[fake_argc++] = strdup("-name");
++    fake_argv[fake_argc++] = strdup("xemu,debug-threads=on");
++#endif
++
+     int mem = ((int)g_config.sys.mem_limit + 1) * 64;
+     fake_argv[fake_argc++] = strdup("-m");
+     fake_argv[fake_argc++] = g_strdup_printf("%d", mem);
+diff --git a/tcg/region.c b/tcg/region.c
+index 848bc25fc6..f261e3cedb 100644
+--- a/tcg/region.c
++++ b/tcg/region.c
+@@ -668,28 +668,158 @@ static void prepare_jit_region(void *addr, size_t size)
+ }
+ #endif
+ 
++/*
++ * Diagnostic: do the writable and executable views still show the same
++ * bytes? They are meant to be one set of pages seen twice. If they ever
++ * diverge, the code TCG writes is not the code that executes, which would
++ * look exactly like a CPU that never leaves its reset vector and never
++ * faults. Compares the start of the buffer, where the prologue lives.
++ */
++/*
++ * Diagnostic: a scratch slot the host may write code into and call. The
++ * last 64 bytes of the last region sit below the highwater mark, so TB
++ * allocation never reaches them. rx_base is the executable view of the
++ * buffer start, where the prologue lives.
++ */
++int tcg_splitwx_scratch(void **rw, void **rx, size_t *len, void **rx_base)
++{
++    void *start, *end;
++    if (!tcg_splitwx_diff || !region.start_aligned || !region.n) {
++        return 0;
++    }
++    tcg_region_bounds(region.n - 1, &start, &end);
++    *len = 64;
++    *rw = (char *)end - 64;
++    *rx = (char *)*rw + tcg_splitwx_diff;
++    *rx_base = (char *)region.start_aligned + tcg_splitwx_diff;
++    return 1;
++}
++
++int tcg_splitwx_views_match(size_t n, size_t *first_diff)
++{
++    if (!tcg_splitwx_diff || !region.start_aligned) {
++        return -1;
++    }
++    const uint8_t *rw = (const uint8_t *)region.start_aligned;
++    const uint8_t *rx = rw + tcg_splitwx_diff;
++    for (size_t i = 0; i < n; i++) {
++        if (rw[i] != rx[i]) {
++            if (first_diff) *first_diff = i;
++            return 0;
++        }
++    }
++    return 1;
++}
++
++#if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
++#include "qemu/cacheflush.h"
++
++/*
++ * Diagnostic: run two instructions from the prepared buffer, and say so
++ * before doing it. A kill for executing a page the monitor rejects
++ * arrives as SIGKILL with nothing to catch, so the last of these lines in
++ * the log is the step that revoked execution. The slot is the last 64
++ * bytes below the guard page, which TB allocation never reaches.
++ */
++static uint8_t *selftest_rw;
++static uint8_t *selftest_rx;
++/* A second slot at the very start of a page, over the debugger's word. */
++static uint8_t *selftest2_rw;
++static uint8_t *selftest2_rx;
++
++static void selftest_slot(const char *when, const char *which,
++                          uint8_t *rw, uint8_t *rx)
++{
++    uint32_t code[2] = { 0xD2800540u, 0xD65F03C0u };   /* mov x0, #42; ret */
++    memcpy(rw, code, sizeof(code));
++    flush_idcache_range((uintptr_t)rx, (uintptr_t)rw, sizeof(code));
++    {
++        extern unsigned long long xemu_host_footprint_mib(void);
++        fprintf(stderr, "[tcg] selftest %s: %s calling %p (footprint %llu MiB)\n",
++                when, which, rx, xemu_host_footprint_mib());
++    }
++    fflush(stderr);
++    int r = ((int (*)(void))rx)();
++    fprintf(stderr, "[tcg] selftest %s: %s returned %d\n", when, which, r);
++    fflush(stderr);
++}
++
++void tcg_jit_selftest(const char *when)
++{
++    if (!selftest_rw) {
++        return;
++    }
++    selftest_slot(when, "far slot", selftest_rw, selftest_rx);
++    selftest_slot(when, "page-start slot", selftest2_rw, selftest2_rx);
++}
++
++/*
++ * The real prologue, entered the way cpu_tb_exec enters it, with the
++ * epilogue as its target so it returns at once. env is never touched on
++ * that path. This executes the first page of the buffer, which TCG
++ * overwrote from byte zero.
++ */
++void tcg_jit_selftest_prologue(const char *when)
++{
++    if (!tcg_code_gen_epilogue) {
++        fprintf(stderr, "[tcg] selftest %s: no prologue yet\n", when);
++        return;
++    }
++    fprintf(stderr, "[tcg] selftest %s: prologue calling %p -> %p\n", when,
++            (void *)tcg_qemu_tb_exec, tcg_code_gen_epilogue);
++    fflush(stderr);
++    uintptr_t r = tcg_qemu_tb_exec(NULL, tcg_code_gen_epilogue);
++    fprintf(stderr, "[tcg] selftest %s: prologue returned 0x%lx\n", when,
++            (unsigned long)r);
++    fflush(stderr);
++}
++
++static void *selftest_thread_fn(void *arg)
++{
++    const char *when = arg;
++    tcg_jit_selftest(when);
++    tcg_jit_selftest_prologue(when);
++    return NULL;
++}
++
++/* The same, from a thread that never issued the request. */
++void tcg_jit_selftest_thread(const char *when)
++{
++    pthread_t t;
++    if (pthread_create(&t, NULL, selftest_thread_fn, (void *)when) == 0) {
++        pthread_join(t, NULL);
++    }
++}
++#endif
++
+ static int alloc_code_gen_buffer_splitwx_vmremap(size_t size, Error **errp)
+ {
+     kern_return_t ret;
+     mach_vm_address_t buf_rw, buf_rx;
+     vm_prot_t cur_prot, max_prot;
+ 
++#if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
+     /*
+-     * The base mapping is R+X here, not R+W.
+-     *
+-     * A debugger can only prepare pages that have no writable mapping at
+-     * that moment, so the writable alias is created afterwards, at the end
+-     * of this function. On every other platform this is simply R+W from
+-     * the start.
++     * UTM's order, exactly, because UTM's QEMU runs with JIT on this very
++     * headset: the base anonymous mapping is R+X, the remap is made and
++     * set R+X as upstream does, the debugger prepares the remap while no
++     * writable mapping of those pages exists, and only then is the base
++     * made writable. The rules from the people who found them: only a
++     * mapping that already allows execute, and that the debugger wrote to
++     * while attached, runs code; the app's own writable memory can never
++     * become executable; writable views of prepared memory can be made at
++     * any time. The upstream order starts from writable memory and on
++     * device parks the vCPU on the first prologue instruction forever
++     * (measured 2026-10-29).
+      */
+-#if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
+-    const int base_prot = PROT_READ | PROT_EXEC;
+-#else
+-    const int base_prot = PROT_READ | PROT_WRITE;
+-#endif
++    if (!debugger_is_attached()) {
++        error_setg(errp, "JIT needs a debugger attached on this platform. "
++                         "Launch through Apparition or StikDebug.");
++        return -1;
++    }
+ 
+-    if (!alloc_code_gen_buffer_anon(size, base_prot,
+-                                    MAP_PRIVATE | MAP_ANONYMOUS, errp)) {
++    if (alloc_code_gen_buffer_anon(size, PROT_READ | PROT_EXEC,
++                                   MAP_PRIVATE | MAP_ANONYMOUS, errp) < 0) {
+         return -1;
+     }
+ 
+@@ -707,8 +837,7 @@ static int alloc_code_gen_buffer_splitwx_vmremap(size_t size, Error **errp)
+                         &max_prot,
+                         VM_INHERIT_NONE);
+     if (ret != KERN_SUCCESS) {
+-        /* TODO: Convert "ret" to a human readable error message. */
+-        error_setg(errp, "vm_remap for jit splitwx failed");
++        error_setg(errp, "vm_remap for jit splitwx failed (%d)", (int)ret);
+         munmap((void *)buf_rw, size);
+         return -1;
+     }
+@@ -720,34 +849,64 @@ static int alloc_code_gen_buffer_splitwx_vmremap(size_t size, Error **errp)
+         return -1;
+     }
+ 
+-#if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
+-    /*
+-     * Ask the debugger to make the executable view executable, while no
+-     * writable mapping of it exists. Without this the pages are RX and
+-     * still refuse to run, and the process dies at the first translated
+-     * block with no message at all.
+-     */
+-    if (debugger_is_attached()) {
+-        prepare_jit_region((void *)buf_rx, size);
+-    } else {
+-        error_setg(errp, "JIT needs a debugger attached on this platform. "
+-                         "Launch through Apparition or StikDebug.");
++    prepare_jit_region((void *)buf_rx, size);
++
++    if (mprotect((void *)buf_rw, size, PROT_READ | PROT_WRITE) != 0) {
++        error_setg_errno(errp, errno, "mprotect rw base for jit splitwx");
+         munmap((void *)buf_rx, size);
+         munmap((void *)buf_rw, size);
+         return -1;
+     }
+ 
+-    /* Only now is the writable alias safe to create. */
+-    if (mprotect((void *)buf_rw, size, PROT_READ | PROT_WRITE) != 0) {
+-        error_setg_errno(errp, errno, "mprotect rw alias for jit splitwx");
++    tcg_splitwx_diff = buf_rx - buf_rw;
++    fprintf(stderr, "[tcg] jit: base 0x%llx now rw, remap 0x%llx prepared "
++                    "(remap cur %d max %d)\n",
++            (unsigned long long)buf_rw, (unsigned long long)buf_rx,
++            (int)cur_prot, (int)max_prot);
++
++    selftest_rw = (uint8_t *)buf_rw + size - qemu_real_host_page_size() - 64;
++    selftest_rx = selftest_rw + tcg_splitwx_diff;
++    selftest2_rw = (uint8_t *)buf_rw + size - 2 * qemu_real_host_page_size();
++    selftest2_rx = selftest2_rw + tcg_splitwx_diff;
++    tcg_jit_selftest("after alias");
++    tcg_jit_selftest_thread("after alias, new thread");
++    return PROT_READ | PROT_WRITE;
++#else
++    if (!alloc_code_gen_buffer_anon(size, PROT_READ | PROT_WRITE,
++                                    MAP_PRIVATE | MAP_ANONYMOUS, errp)) {
++        return -1;
++    }
++
++    buf_rw = (mach_vm_address_t)region.start_aligned;
++    buf_rx = 0;
++    ret = mach_vm_remap(mach_task_self(),
++                        &buf_rx,
++                        size,
++                        0,
++                        VM_FLAGS_ANYWHERE,
++                        mach_task_self(),
++                        buf_rw,
++                        false,
++                        &cur_prot,
++                        &max_prot,
++                        VM_INHERIT_NONE);
++    if (ret != KERN_SUCCESS) {
++        /* TODO: Convert "ret" to a human readable error message. */
++        error_setg(errp, "vm_remap for jit splitwx failed");
++        munmap((void *)buf_rw, size);
++        return -1;
++    }
++
++    if (mprotect((void *)buf_rx, size, host_prot_read_exec()) != 0) {
++        error_setg_errno(errp, errno, "mprotect for jit splitwx");
+         munmap((void *)buf_rx, size);
+         munmap((void *)buf_rw, size);
+         return -1;
+     }
+-#endif
+ 
+     tcg_splitwx_diff = buf_rx - buf_rw;
+     return PROT_READ | PROT_WRITE;
++#endif
+ }
+ #endif /* CONFIG_DARWIN */
+ #endif /* CONFIG_TCG_INTERPRETER */
+@@ -933,6 +1092,10 @@ void tcg_region_init(size_t tb_size, int splitwx, unsigned max_threads)
+         }
+     }
+ 
++#if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
++    tcg_jit_selftest("after guard pages");
++#endif
++
+     tcg_region_trees_init();
+ 
+     /*
+diff --git a/tcg/tcg.c b/tcg/tcg.c
+index 7967bbcafd..6f3c51b656 100644
+--- a/tcg/tcg.c
++++ b/tcg/tcg.c
+@@ -23,6 +23,9 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
+ 
+ /* Define to jump the ELF file used to communicate with GDB.  */
+ #undef DEBUG_JIT
+@@ -1933,6 +1936,12 @@ void tcg_prologue_init(void)
+     perf_report_prologue(s->code_gen_ptr, prologue_size);
+ 
+ #ifndef CONFIG_TCG_INTERPRETER
++#if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
++    {
++        extern void tcg_jit_selftest(const char *when);
++        tcg_jit_selftest("after prologue written");
++    }
++#endif
+     flush_idcache_range((uintptr_t)tcg_splitwx_to_rx(s->code_buf),
+                         (uintptr_t)s->code_buf, prologue_size);
+ #endif
+@@ -1979,6 +1988,15 @@ void tcg_prologue_init(void)
+ #endif
+ 
+     tcg_region_prologue_set(s);
++
++#if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
++    {
++        extern void tcg_jit_selftest_prologue(const char *when);
++        extern void tcg_jit_selftest_thread(const char *when);
++        tcg_jit_selftest_prologue("after prologue, init thread");
++        tcg_jit_selftest_thread("after prologue, new thread");
++    }
++#endif
+ }
+ 
+ void tcg_func_start(TCGContext *s)
+diff --git a/ui/meson.build b/ui/meson.build
+index ea46bf0f44..498b27af7c 100644
+--- a/ui/meson.build
++++ b/ui/meson.build
+@@ -27,10 +27,16 @@ xemu_ss.add(files(
+   'xemu-settings.cc',
+   'xemu-controllers.cc',
+ 
+-  'xemu.c',
++  # xemu.c was an SDL3 window, a GL context and the ImGui menu bar.
++  # xemu-host.c keeps the framebuffer instead and hands it to a host.
++  'xemu-host.c',
++  'xemu-host-png.cc',
++  # Compiles to nothing off the iOS family; TargetConditionals decides.
++  'xemu-host-ios.m',
+   'xemu-data.c',
+   'xemu-snapshots.c',
+-  'xemu-thumbnail.cc',
++  # xemu-thumbnail.cc drew snapshot previews into GL textures for a panel
++  # that no longer exists.
+   'xemu-widescreen.c',
+ ))
+ 
+@@ -40,21 +46,49 @@ if host_os == 'windows'
+   xemu_ss.add(nvapi, d3d11, dxgi)
+ endif
+ 
+-subdir('xui')
++# xui/ was 50 files of ImGui. There is no menu to draw.
+ 
+-if host_os == 'darwin'
+-  xemu_cocoa = dependency('appleframeworks', modules: 'Cocoa')
+-  xemu_ss.add(xemu_cocoa)
+-endif
++# Cocoa is AppKit, which visionOS does not have. It came in with
++# xemu-os-utils-macos.m, which opened Finder windows and URLs for a desktop
++# menu that no longer exists. Same family as the -framework OpenGL problem
++# and not covered by -Dopengl=disabled.
+ 
+ if host_os == 'linux'
+   xemu_ss.add([gtk, files('xemu-os-utils-linux.c')])
+ elif host_os == 'windows'
+   xemu_ss.add(files('xemu-os-utils-windows.c'))
+-elif host_os == 'darwin'
+-  xemu_ss.add(files('xemu-os-utils-macos.m'))
+ endif
+-xemu_ss.add(imgui, implot, stb_image, sdl, opengl, fa, fpng, json, fatx, tomlplusplus, genconfig)
++# Dropped with the shell: imgui, implot, fa (Font Awesome), stb_image,
++# fpng, and crucially sdl and opengl. png stays, because the headless path
++# writes one. See system_ss.add(png) above.
++xemu_ss.add(fpng, json, fatx, tomlplusplus, genconfig)
++
++# The iOS-family entry point is a SwiftUI App (see xemu-host-app.swift for
++# why). swiftc produces one object; ld64 reads the autolink entries in it,
++# so the only extra link input is where the Swift stub libraries live.
++ios_family = host_os == 'darwin' and cc.compiles('''
++  #include <TargetConditionals.h>
++  #if !TARGET_OS_VISION && !TARGET_OS_IOS
++  #error not the iOS family
++  #endif
++  int x;''', name: 'iOS family host')
++if ios_family
++  xcrun = find_program('xcrun')
++  xros_sdk = run_command(xcrun, '-sdk', 'xros', '--show-sdk-path',
++                         check: true).stdout().strip()
++  swift_app = custom_target('xemu-host-app.o',
++    input: 'xemu-host-app.swift',
++    output: 'xemu-host-app.o',
++    depend_files: files('xemu-host-bridge.h'),
++    command: [xcrun, '-sdk', 'xros', 'swiftc',
++              '-target', 'arm64-apple-xros26.0', '-O', '-parse-as-library',
++              '-emit-object',
++              '-import-objc-header', meson.current_source_dir() / 'xemu-host-bridge.h',
++              '@INPUT@', '-o', '@OUTPUT@'])
++  xemu_ss.add(swift_app)
++  emulator_link_args += ['-L' + xros_sdk / 'usr/lib/swift']
++endif
++
+ system_ss.add_all(xemu_ss)
+ 
+ system_ss.add(when: pixman, if_true: files('console-vc.c'), if_false: files('console-vc-stubs.c'))
+diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
+new file mode 100644
+index 0000000000..a8c6e0b859
+--- /dev/null
++++ b/ui/xemu-host-app.swift
+@@ -0,0 +1,230 @@
++// The entry point, and now the screen.
++//
++// Measured on 2026-10-29: a spatial controller (the PSVR2 Sense pair)
++// delivers buttons and sticks to an app only while an immersive space is
++// open, and only while the user is not looking at one of the app's
++// windows; gaze on a window turns the controller back into that window's
++// pointer. So there is no window. The app launches straight into a mixed
++// immersive space and the guest's frame is a plane in it, textured from
++// the same BGRA copies the sampler publishes. Everything else stays in
++// the Objective-C shell, reached through xemu-host-bridge.h.
++import SwiftUI
++import RealityKit
++import Metal
++
++@main struct XemuHostApp: App {
++    @UIApplicationDelegateAdaptor(XemuHostAppDelegate.self) var delegate
++
++    /// Reads the controllers on a display link. It is a view controller
++    /// because it was one when the frame lived in a window; its view is
++    /// never shown now and the display link does not care.
++    nonisolated(unsafe) static var ticker: XemuScreenViewController?
++
++    init() {
++        xemu_host_prepare()
++        let vc = XemuScreenViewController()
++        vc.loadViewIfNeeded()
++        XemuHostApp.ticker = vc
++    }
++
++    var body: some SwiftUI.Scene {
++        /*
++         * The default scene, and the only window: a small launcher that
++         * opens the space and dismisses itself. It exists so the app has
++         * something the system can bring back when its icon is tapped
++         * after the space was dismissed (found by the owner: without it
++         * the app could not be reopened), and it is gone while playing so
++         * there is nothing of the app's to look at.
++         */
++        WindowGroup(id: "launcher") {
++            LauncherView()
++        }
++        .defaultSize(width: 480, height: 240)
++
++        ImmersiveSpace(id: "screen") {
++            ScreenSpace()
++                .onAppear {
++                    fputs("[host] immersive space appeared\n", stderr); fflush(stderr)
++                }
++                .onDisappear {
++                    fputs("[host] immersive space disappeared\n", stderr); fflush(stderr)
++                }
++        }
++        .immersionStyle(selection: .constant(.mixed), in: .mixed)
++    }
++}
++
++struct LauncherView: View {
++    @Environment(\.openImmersiveSpace) private var openImmersive
++    @Environment(\.dismissWindow) private var dismissWindow
++    @State private var status = "opening the screen"
++
++    var body: some View {
++        VStack(spacing: 16) {
++            Text("XemuHost").font(.title2)
++            Text(status).foregroundStyle(.secondary)
++            Button("Resume") { Task { await open() } }
++        }
++        .padding(32)
++        .task { await open() }
++    }
++
++    @MainActor private func open() async {
++        let result = await openImmersive(id: "screen")
++        fputs("[host] launcher: immersive space \(result)\n", stderr); fflush(stderr)
++        switch result {
++        case .opened:
++            dismissWindow(id: "launcher")
++        default:
++            status = "could not open the screen (\(result)); try Resume"
++        }
++    }
++}
++
++/// A 4:3 screen two and a half metres ahead at eye height, two metres
++/// wide, fed thirty times a second from the published frame.
++struct ScreenSpace: View {
++    private let screen = GuestScreen()
++
++    var body: some View {
++        RealityView { content in
++            if let entity = screen.makeEntity() {
++                content.add(entity)
++            }
++            screen.start()
++        }
++    }
++}
++
++final class GuestScreen {
++    private var queue: TextureResource.DrawableQueue?
++    private var texture: TextureResource?
++    private var width = 0
++    private var height = 0
++    private var lastSeq: UInt64 = 0
++    private var task: Task<Void, Never>?
++    private var entity: ModelEntity?
++    private var shown: UInt64 = 0
++
++    func makeEntity() -> ModelEntity? {
++        do {
++            try rebuild(width: 640, height: 480)
++        } catch {
++            fputs("[host] screen: texture setup failed: \(error)\n", stderr)
++            return nil
++        }
++        var material = UnlitMaterial()
++        material.color = .init(texture: .init(texture!))
++        let mesh = MeshResource.generatePlane(width: 2.0, height: 1.5)
++        let e = ModelEntity(mesh: mesh, materials: [material])
++        e.position = [0, 1.4, -2.5]
++        entity = e
++        return e
++    }
++
++    /// A texture of the given size, backed by a drawable queue so each
++    /// frame is a copy into the next drawable rather than a new resource.
++    private func rebuild(width w: Int, height h: Int) throws {
++        /* The guest's pixels are sRGB; declared linear they come out with
++         * crushed gradients and lifted blacks. */
++        let desc = TextureResource.DrawableQueue.Descriptor(
++            pixelFormat: .bgra8Unorm_srgb, width: w, height: h,
++            usage: [.shaderRead, .shaderWrite], mipmapsMode: .none)
++        let q = try TextureResource.DrawableQueue(desc)
++        let black = UIImage(color: .black, size: CGSize(width: w, height: h)).cgImage!
++        let t = try TextureResource(image: black, options: .init(semantic: .color))
++        t.replace(withDrawables: q)
++        queue = q
++        texture = t
++        width = w
++        height = h
++        if let e = entity {
++            var material = UnlitMaterial()
++            material.color = .init(texture: .init(t))
++            e.model?.materials = [material]
++        }
++        fputs("[host] screen: \(w)x\(h) texture ready\n", stderr); fflush(stderr)
++    }
++
++    func start() {
++        task?.cancel()
++        task = Task.detached(priority: .userInitiated) { [weak self] in
++            xemu_host_set_metal_present(true)
++            var flips: Int32 = -1
++            var zeroCopy = true
++            while !Task.isCancelled {
++                guard let self else { return }
++                if zeroCopy {
++                    let now = xemu_host_guest_flips()
++                    if now != flips {
++                        flips = now
++                        let r = await self.presentFromGPU()
++                        if r < 0 {
++                            zeroCopy = false
++                            xemu_host_set_metal_present(false)
++                        }
++                    }
++                    try? await Task.sleep(nanoseconds: 2_000_000)
++                } else {
++                    await self.pump()
++                    try? await Task.sleep(nanoseconds: 33_000_000)
++                }
++            }
++        }
++    }
++
++    /// One frame from the renderer into the next drawable, no CPU in the
++    /// way. Rebuilds the queue when the guest changes its scan-out size.
++    @MainActor private func presentFromGPU() async -> Int32 {
++        var w: Int32 = 0, h: Int32 = 0
++        guard xemu_host_present_size(&w, &h), w > 0, h > 0 else { return 0 }
++        if Int(w) != width || Int(h) != height {
++            do { try rebuild(width: Int(w), height: Int(h)) } catch { return 0 }
++        }
++        guard let q = queue, let drawable = try? q.nextDrawable() else { return 0 }
++        let tex = Unmanaged.passUnretained(drawable.texture).toOpaque()
++        let r = xemu_host_present_frame(tex, w, h)
++        if r == 1 {
++            drawable.present()
++            shown += 1
++            if shown <= 3 || shown % 600 == 0 {
++                fputs("[host] screen: GPU frame \(shown) (\(w)x\(h))\n", stderr)
++                fflush(stderr)
++            }
++        }
++        return r
++    }
++
++    private func pump() {
++        var bgra: UnsafeMutableRawPointer?
++        var w: Int32 = 0, h: Int32 = 0
++        let seq = xemu_host_frame_take(lastSeq, &bgra, &w, &h)
++        guard seq != 0, let pixels = bgra else { return }
++        defer { free(pixels) }
++        lastSeq = seq
++        if Int(w) != width || Int(h) != height {
++            do { try rebuild(width: Int(w), height: Int(h)) } catch { return }
++        }
++        guard let q = queue, let drawable = try? q.nextDrawable() else { return }
++        let region = MTLRegionMake2D(0, 0, Int(w), Int(h))
++        drawable.texture.replace(region: region, mipmapLevel: 0,
++                                 withBytes: pixels, bytesPerRow: Int(w) * 4)
++        drawable.present()
++        shown += 1
++        if shown <= 3 || shown % 300 == 0 {
++            fputs("[host] screen: frame \(shown) (seq \(seq), \(w)x\(h))\n", stderr)
++            fflush(stderr)
++        }
++    }
++}
++
++private extension UIImage {
++    convenience init(color: UIColor, size: CGSize) {
++        let r = UIGraphicsImageRenderer(size: size)
++        let img = r.image { ctx in
++            color.setFill()
++            ctx.fill(CGRect(origin: .zero, size: size))
++        }
++        self.init(cgImage: img.cgImage!)
++    }
++}
+diff --git a/ui/xemu-host-bridge.h b/ui/xemu-host-bridge.h
+new file mode 100644
+index 0000000000..16c4d7ebd6
+--- /dev/null
++++ b/ui/xemu-host-bridge.h
+@@ -0,0 +1,35 @@
++/*
++ * What the Swift entry point sees of the Objective-C shell. Kept to the
++ * two classes it wraps and the one function it calls first.
++ */
++#pragma once
++#import <UIKit/UIKit.h>
++#include <stdbool.h>
++#include <stdint.h>
++
++/* Output redirection, the crash handler, SDL's main-ready flag. Call once,
++ * before UIKit does anything. */
++void xemu_host_prepare(void);
++
++/* Pause the machine and the frame grabs while the app is not in front. */
++void xemu_host_set_background(bool background);
++
++/* Zero-copy presentation. present_frame copies the scanned-out surface
++ * into the Metal texture on the GPU: 1 copied, 0 nothing or size changed
++ * (ask present_size and rebuild), -1 unsupported (use the CPU path). */
++void xemu_host_set_metal_present(bool on);
++int xemu_host_present_frame(void *mtl_texture, int w, int h);
++bool xemu_host_present_size(int *w, int *h);
++int xemu_host_guest_flips(void);
++
++/* The latest published frame as a malloc'd BGRA copy when the sequence
++ * number has moved since last_seq; returns the new sequence, or 0. */
++uint64_t xemu_host_frame_take(uint64_t last_seq, void **bgra, int *w, int *h);
++
++/* Spawns the emulator thread from didFinishLaunching. */
++@interface XemuHostAppDelegate : UIResponder <UIApplicationDelegate>
++@end
++
++/* Shows the guest's frame and reads the controllers on a display link. */
++@interface XemuScreenViewController : UIViewController
++@end
+diff --git a/ui/xemu-host-ios.m b/ui/xemu-host-ios.m
+new file mode 100644
+index 0000000000..ae6eac2ecc
+--- /dev/null
++++ b/ui/xemu-host-ios.m
+@@ -0,0 +1,869 @@
++/*
++ * xemu-host-ios.m -- the UIKit side of the house.
++ *
++ * Copyright (C) 2026 A. Cervantez
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ *
++ * visionOS will install a bundle whose executable never calls
++ * UIApplicationMain, and it will not run it: the process is killed about a
++ * second in, with no crash report, no stdout, and a launch error that says
++ * only "the connection was invalidated". Measured 2026-10-25.
++ *
++ * So the app checks in properly here, and the emulator runs on a worker
++ * thread, which is the arrangement ui/xemu.c already used on macOS.
++ */
++
++#import <TargetConditionals.h>
++
++#if TARGET_OS_VISION || TARGET_OS_IOS
++
++#import <UIKit/UIKit.h>
++#import <GameController/GameController.h>
++/*
++ * Deliberately NOT <SDL3/SDL_main.h>. That header renames main() to
++ * SDL_main() and supplies its own, which on the iOS family runs SDL's
++ * UIApplicationMain path. The binary then carries both _main and
++ * _SDL_main, ours runs second inside SDL's app, and SDL_SetMainReady has
++ * no effect because SDL is already past that point. Measured 2026-10-26.
++ *
++ * UIKit entry stays ours; only the one declaration is needed.
++ */
++extern void SDL_SetMainReady(void);
++#include <pthread.h>
++#include <execinfo.h>
++#include <signal.h>
++#include <unistd.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++int xemu_host_run(int argc, char **argv);
++
++/*
++ * Where the app's own files are. There is no working directory on a
++ * headset worth the name, and the media is copied into the bundle at build
++ * time, so this is how the C side finds it.
++ */
++const char *xemu_host_bundle_path(void)
++{
++    static char cached[1024];
++    if (cached[0] == '\0') {
++        snprintf(cached, sizeof cached, "%s",
++                 NSBundle.mainBundle.bundlePath.fileSystemRepresentation);
++    }
++    return cached;
++}
++
++int           xemu_host_stage = 2;
++static int    g_argc;
++static char **g_argv;
++
++/*
++ * Before anything else. There is no console on a headset: devicectl's
++ * --console gives nothing for a detached launch, and a process that dies
++ * early leaves no crash report either. A file in Documents is the only
++ * channel that survives, and it has to be opened first or the interesting
++ * failures happen upstream of it.
++ */
++static void redirect_output_to_documents(void)
++{
++    NSArray<NSURL *> *docs =
++        [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory
++                                             inDomains:NSUserDomainMask];
++    if (docs.count == 0) {
++        return;
++    }
++    NSURL *log = [docs.firstObject URLByAppendingPathComponent:@"host.log"];
++    const char *path = log.fileSystemRepresentation;
++
++    freopen(path, "w", stderr);
++    setvbuf(stderr, NULL, _IOLBF, 0);   /* line buffered: a crash keeps it */
++    dup2(fileno(stderr), fileno(stdout));
++
++    fprintf(stderr, "[host] log opened at %s\n", path);
++}
++
++/*
++ * A headset gives you nothing when a process dies: no console, no crash
++ * report, and a launch that simply stops producing output. Everything
++ * interesting so far has died that way. This turns "it vanished" into "it
++ * vanished here", written into the same log file as everything else.
++ *
++ * backtrace() in a signal handler is not strictly async-signal-safe, but
++ * the process is already dying and an imperfect trace beats none.
++ */
++static void crash_handler(int sig, siginfo_t *info, void *ctx)
++{
++    (void)ctx;
++
++    fprintf(stderr, "\n[host] ==== FATAL: signal %d (%s) ====\n",
++            sig, strsignal(sig));
++    if (info) {
++        fprintf(stderr, "[host] fault address %p, code %d\n",
++                info->si_addr, info->si_code);
++    }
++    fflush(stderr);
++
++    void *frames[64];
++    int n = backtrace(frames, 64);
++    fprintf(stderr, "[host] %d frames:\n", n);
++    fflush(stderr);
++    backtrace_symbols_fd(frames, n, fileno(stderr));
++
++    fsync(fileno(stderr));
++
++    /* Die the way we were going to. */
++    signal(sig, SIG_DFL);
++    raise(sig);
++}
++
++static void install_crash_handler(void)
++{
++    static const int sigs[] = { SIGSEGV, SIGBUS, SIGILL, SIGABRT,
++                                SIGTRAP, SIGFPE, SIGSYS };
++    struct sigaction sa;
++    memset(&sa, 0, sizeof sa);
++    sa.sa_sigaction = crash_handler;
++    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
++    sigemptyset(&sa.sa_mask);
++
++    for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++) {
++        sigaction(sigs[i], &sa, NULL);
++    }
++}
++
++
++/* ------------------------------------------------------------------ */
++/* Every thread's stack, on request                                     */
++/* ------------------------------------------------------------------ */
++
++#include <mach/mach.h>
++#include <dlfcn.h>
++
++/*
++ * A machine that is "running" with a vCPU parked on a lock is a question
++ * about every other thread, and the crash handler can only see its own.
++ * Suspend each thread in turn, read its registers, walk the frame pointer
++ * chain, and name what it finds. Reads go through vm_read_overwrite
++ * so a bad frame pointer is a short walk rather than a fault.
++ */
++static bool read_word(uint64_t at, uint64_t *out)
++{
++    vm_size_t got = 0;
++    kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)at,
++                                         sizeof(*out), (vm_address_t)out,
++                                         &got);
++    return kr == KERN_SUCCESS && got == sizeof(*out);
++}
++
++static void print_frame(int i, uint64_t addr)
++{
++    Dl_info info;
++    addr &= 0x0000007fffffffffULL;
++    if (dladdr((void *)addr, &info) && info.dli_sname) {
++        const char *img = strrchr(info.dli_fname, '/');
++        fprintf(stderr, "[host]     %2d  %s + %llu  (%s)\n", i, info.dli_sname,
++                (unsigned long long)(addr - (uint64_t)info.dli_saddr),
++                img ? img + 1 : info.dli_fname);
++    } else {
++        fprintf(stderr, "[host]     %2d  0x%llx\n", i, (unsigned long long)addr);
++    }
++}
++
++void xemu_host_dump_threads(const char *why)
++{
++    thread_act_array_t threads = NULL;
++    mach_msg_type_number_t count = 0;
++    if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS) {
++        fprintf(stderr, "[host] thread dump: task_threads failed\n");
++        return;
++    }
++    mach_port_t self = mach_thread_self();
++    fprintf(stderr, "[host] ==== %u threads (%s) ====\n", count, why);
++
++    for (mach_msg_type_number_t t = 0; t < count; t++) {
++        thread_t th = threads[t];
++        char name[64] = "";
++        pthread_t pt = pthread_from_mach_thread_np(th);
++        if (pt) {
++            pthread_getname_np(pt, name, sizeof(name));
++        }
++        if (th == self) {
++            fprintf(stderr, "[host]   thread %u '%s': this one (the sampler)\n",
++                    t, name);
++            continue;
++        }
++        if (thread_suspend(th) != KERN_SUCCESS) {
++            fprintf(stderr, "[host]   thread %u '%s': cannot suspend\n", t, name);
++            continue;
++        }
++        arm_thread_state64_t st;
++        mach_msg_type_number_t n = ARM_THREAD_STATE64_COUNT;
++        kern_return_t kr = thread_get_state(th, ARM_THREAD_STATE64,
++                                            (thread_state_t)&st, &n);
++        if (kr != KERN_SUCCESS) {
++            thread_resume(th);
++            fprintf(stderr, "[host]   thread %u '%s': no state\n", t, name);
++            continue;
++        }
++        uint64_t pc = arm_thread_state64_get_pc(st);
++        uint64_t lr = arm_thread_state64_get_lr(st);
++        uint64_t fp = arm_thread_state64_get_fp(st);
++
++        fprintf(stderr, "[host]   thread %u '%s':\n", t, name);
++        print_frame(0, pc);
++        print_frame(1, lr);
++        int i = 2;
++        for (; i < 28 && fp && (fp & 0xf) == 0; i++) {
++            uint64_t next = 0, ret = 0;
++            if (!read_word(fp, &next) || !read_word(fp + 8, &ret) || !ret) {
++                break;
++            }
++            print_frame(i, ret);
++            if (next <= fp) {
++                break;
++            }
++            fp = next;
++        }
++        thread_resume(th);
++    }
++    for (mach_msg_type_number_t t = 0; t < count; t++) {
++        mach_port_deallocate(mach_task_self(), threads[t]);
++    }
++    vm_deallocate(mach_task_self(), (vm_address_t)threads,
++                  count * sizeof(*threads));
++    mach_port_deallocate(mach_task_self(), self);
++    fprintf(stderr, "[host] ==== end of threads ====\n");
++    fflush(stderr);
++}
++
++/* ------------------------------------------------------------------ */
++/* What the kernel thinks of a page, and whether it will run code       */
++/* ------------------------------------------------------------------ */
++
++#include <libkern/OSCacheControl.h>
++
++void xemu_host_describe_page(const char *what, const void *addr)
++{
++    vm_address_t a = (vm_address_t)addr;
++    vm_size_t sz = 0;
++    natural_t depth = 1;
++    struct vm_region_submap_info_64 info;
++    mach_msg_type_number_t n = VM_REGION_SUBMAP_INFO_COUNT_64;
++    kern_return_t kr = vm_region_recurse_64(mach_task_self(), &a, &sz, &depth,
++                                            (vm_region_recurse_info_t)&info,
++                                            &n);
++    if (kr != KERN_SUCCESS) {
++        fprintf(stderr, "[host] page %s %p: vm_region failed %d\n", what, addr,
++                kr);
++        return;
++    }
++    fprintf(stderr, "[host] page %s %p: region 0x%lx+0x%lx prot %c%c%c max "
++                    "%c%c%c share %d tag %u resident %u dirty %u\n",
++            what, addr, (unsigned long)a, (unsigned long)sz,
++            (info.protection & VM_PROT_READ) ? 'r' : '-',
++            (info.protection & VM_PROT_WRITE) ? 'w' : '-',
++            (info.protection & VM_PROT_EXECUTE) ? 'x' : '-',
++            (info.max_protection & VM_PROT_READ) ? 'r' : '-',
++            (info.max_protection & VM_PROT_WRITE) ? 'w' : '-',
++            (info.max_protection & VM_PROT_EXECUTE) ? 'x' : '-',
++            info.share_mode, info.user_tag, info.pages_resident,
++            info.pages_dirtied);
++}
++
++static int probe_result = -1;
++static int (*probe_fn)(void);
++
++static void *exec_probe_thread(void *unused)
++{
++    (void)unused;
++    pthread_setname_np("exec_probe");
++    int r = probe_fn();
++    __atomic_store_n(&probe_result, r, __ATOMIC_SEQ_CST);
++    return NULL;
++}
++
++/*
++ * Write "mov x0, #42; ret" through the writable view, flush, and call it
++ * through the executable view from a helper thread. The helper is
++ * separate so a hang is a reported hang rather than the end of the log,
++ * and so the thread dump can show where it sits.
++ */
++void xemu_host_exec_probe(void *rw, void *rx)
++{
++    uint32_t code[2] = { 0xD2800540u, 0xD65F03C0u };
++    memcpy(rw, code, sizeof(code));
++    sys_dcache_flush(rw, sizeof(code));
++    sys_icache_invalidate(rx, sizeof(code));
++
++    if (memcmp(rx, code, sizeof(code)) != 0) {
++        fprintf(stderr, "[host] exec probe: rx view does not show the code\n");
++        return;
++    }
++
++    probe_fn = (int (*)(void))rx;
++    __atomic_store_n(&probe_result, -1, __ATOMIC_SEQ_CST);
++    pthread_t t;
++    if (pthread_create(&t, NULL, exec_probe_thread, NULL) != 0) {
++        fprintf(stderr, "[host] exec probe: no thread\n");
++        return;
++    }
++    pthread_detach(t);
++    for (int i = 0; i < 20; i++) {
++        usleep(100 * 1000);
++        int r = __atomic_load_n(&probe_result, __ATOMIC_SEQ_CST);
++        if (r != -1) {
++            fprintf(stderr, "[host] exec probe: returned %d after %d ms\n",
++                    r, (i + 1) * 100);
++            return;
++        }
++    }
++    fprintf(stderr, "[host] exec probe: HUNG, no return in 2 s\n");
++}
++
++/*
++ * Resident memory by VM tag, and every region over 64 MiB. The footprint
++ * jumped by gigabytes inside Vulkan init, and the tag says whose it is:
++ * malloc, IOKit (Metal), or a plain anonymous mapping.
++ */
++void xemu_host_dump_vm_regions(void)
++{
++    unsigned long long by_tag[256] = { 0 };
++    vm_address_t addr = 0;
++    unsigned long long total = 0;
++    fprintf(stderr, "[host] vm regions over 64 MiB:\n");
++    for (;;) {
++        vm_size_t size = 0;
++        natural_t depth = 1;
++        struct vm_region_submap_info_64 info;
++        mach_msg_type_number_t n = VM_REGION_SUBMAP_INFO_COUNT_64;
++        if (vm_region_recurse_64(mach_task_self(), &addr, &size, &depth,
++                                 (vm_region_recurse_info_t)&info, &n)
++            != KERN_SUCCESS) {
++            break;
++        }
++        unsigned long long resident =
++            (unsigned long long)info.pages_resident * vm_page_size;
++        by_tag[info.user_tag & 0xff] += resident;
++        total += resident;
++        if (resident >= (64ull << 20)) {
++            fprintf(stderr, "[host]   0x%lx +0x%lx tag %u prot %d/%d share %d "
++                            "resident %llu MiB\n",
++                    (unsigned long)addr, (unsigned long)size, info.user_tag,
++                    info.protection, info.max_protection, info.share_mode,
++                    resident >> 20);
++        }
++        addr += size;
++    }
++    fprintf(stderr, "[host] resident by tag (total %llu MiB):\n", total >> 20);
++    for (int t = 0; t < 256; t++) {
++        if (by_tag[t] >= (16ull << 20)) {
++            fprintf(stderr, "[host]   tag %3d: %llu MiB\n", t, by_tag[t] >> 20);
++        }
++    }
++    fflush(stderr);
++}
++
++static void log_normal_exit(void)
++{
++    fprintf(stderr, "[host] process exiting normally\n");
++    fflush(stderr);
++}
++
++static void *emulator_thread(void *unused)
++{
++    (void)unused;
++    fprintf(stderr, "[host] emulator thread starting\n");
++    int rc = xemu_host_run(g_argc, g_argv);
++    fprintf(stderr, "[host] emulator returned %d\n", rc);
++    return NULL;
++}
++
++/*
++ * visionOS will not call didFinishLaunching without a scene manifest, and a
++ * manifest naming a delegate class needs that class to exist. This one does
++ * nothing but put a window up, because something has to be on screen for
++ * the app to stay alive, and later it is where the compositor goes.
++ */
++#import "xemu-host-bridge.h"
++
++@interface XemuScreenViewController ()
++@property (nonatomic, strong) CADisplayLink *link;
++@property (nonatomic, assign) uint64_t ticks;
++@property (nonatomic, strong) UIImageView *screen;
++@property (nonatomic, assign) uint64_t frameSeq;
++@property (nonatomic, assign) uint64_t framesShown;
++@property (nonatomic, assign) uint16_t lastButtons;
++@property (nonatomic, assign) uint64_t padSamples;
++@end
++
++@implementation XemuScreenViewController
++
++- (void)viewDidLoad
++{
++    [super viewDidLoad];
++    fprintf(stderr, "[host] screen view loaded\n");
++    self.view.backgroundColor = UIColor.blackColor;
++
++    /*
++     * Lifecycle, with the tick count as a clock. Every thread's output
++     * stopped at once thirty seconds into a run, which is a suspend, and
++     * the log should say what preceded it.
++     */
++    NSArray *names = @[ UIApplicationDidEnterBackgroundNotification,
++                        UIApplicationWillEnterForegroundNotification,
++                        UIApplicationDidBecomeActiveNotification,
++                        UIApplicationWillResignActiveNotification,
++                        UISceneDidActivateNotification,
++                        UISceneWillDeactivateNotification,
++                        UISceneDidEnterBackgroundNotification,
++                        UISceneWillEnterForegroundNotification ];
++    for (NSNotificationName name in names) {
++        [NSNotificationCenter.defaultCenter
++            addObserverForName:name object:nil
++                         queue:NSOperationQueue.mainQueue
++                    usingBlock:^(NSNotification *n) {
++            fprintf(stderr, "[host] lifecycle %s at tick %llu\n",
++                    n.name.UTF8String, (unsigned long long)self.ticks);
++            fflush(stderr);
++            /* Leaving: before the GPU goes. Returning: once active again. */
++            if ([n.name isEqualToString:UIApplicationWillResignActiveNotification]) {
++                xemu_host_set_background(true);
++            } else if ([n.name isEqualToString:UIApplicationDidBecomeActiveNotification]) {
++                xemu_host_set_background(false);
++            }
++        }];
++    }
++
++    /* The guest's frame, scaled to fit, over the black. */
++    self.screen = [[UIImageView alloc] initWithFrame:self.view.bounds];
++    self.screen.autoresizingMask = UIViewAutoresizingFlexibleWidth |
++                                   UIViewAutoresizingFlexibleHeight;
++    self.screen.contentMode = UIViewContentModeScaleAspectFit;
++    [self.view addSubview:self.screen];
++
++    /*
++     * Present something every frame.
++     *
++     * The process is being killed with an uncatchable signal: no handler
++     * fires, no abort, no clean exit. Memory is part of it, but the other
++     * suspect is a scene that never draws while a worker thread runs flat
++     * out. This gives the compositor a reason to believe the app is alive,
++     * and it ticks the log for the first second so the timeline shows
++     * whether the scene was still running when the process went.
++     */
++    /*
++     * Controllers come through GameController. A DualSense paired in
++     * Settings shows up as an extended gamepad; the state is read on
++     * every display tick and handed to the emulator's port 1 controller.
++     */
++    for (GCController *c in GCController.controllers) {
++        fprintf(stderr, "[host] controller already present: %s\n",
++                c.vendorName.UTF8String ?: "?");
++    }
++    [NSNotificationCenter.defaultCenter
++        addObserverForName:GCControllerDidConnectNotification object:nil
++                     queue:NSOperationQueue.mainQueue
++                usingBlock:^(NSNotification *n) {
++        GCController *c = n.object;
++        fprintf(stderr, "[host] controller connected: %s (extended %s)\n",
++                c.vendorName.UTF8String ?: "?",
++                c.extendedGamepad ? "yes" : "no");
++        if (c.extendedGamepad) {
++            /* No stick value has ever reached the app through either
++             * profile; ask the sticks themselves. */
++            c.extendedGamepad.leftThumbstick.valueChangedHandler =
++                ^(GCControllerDirectionPad *pad, float x, float y) {
++                static int n; if (n++ < 60) {
++                    fprintf(stderr, "[host] left stick %.2f,%.2f\n", x, y); fflush(stderr); }
++            };
++            c.extendedGamepad.rightThumbstick.valueChangedHandler =
++                ^(GCControllerDirectionPad *pad, float x, float y) {
++                static int n; if (n++ < 60) {
++                    fprintf(stderr, "[host] right stick %.2f,%.2f\n", x, y); fflush(stderr); }
++            };
++            c.extendedGamepad.dpad.valueChangedHandler =
++                ^(GCControllerDirectionPad *pad, float x, float y) {
++                static int n; if (n++ < 60) {
++                    fprintf(stderr, "[host] dpad %.2f,%.2f\n", x, y); fflush(stderr); }
++            };
++        }
++        /* Every element the device offers, so a wrong guess shows here. */
++        NSArray *keys = [c.physicalInputProfile.elements.allKeys
++                            sortedArrayUsingSelector:@selector(compare:)];
++        fprintf(stderr, "[host]   elements: %s\n",
++                [keys componentsJoinedByString:@", "].UTF8String);
++        fflush(stderr);
++        /*
++         * Every element change the framework delivers, as it delivers it.
++         * Polling can miss a short press; this cannot. If only Menu ever
++         * fires here, the system is keeping the rest.
++         */
++        __block int fired = 0;
++        c.physicalInputProfile.valueDidChangeHandler =
++            ^(GCPhysicalInputProfile *profile, GCControllerElement *element) {
++            if (fired++ < 400) {
++                NSString *name = element.aliases.anyObject ?: @"?";
++                float v = 0;
++                if ([element isKindOfClass:GCControllerButtonInput.class]) {
++                    v = ((GCControllerButtonInput *)element).value;
++                } else if ([element isKindOfClass:GCControllerAxisInput.class]) {
++                    v = ((GCControllerAxisInput *)element).value;
++                }
++                fprintf(stderr, "[host] element '%s' -> %.2f\n",
++                        name.UTF8String, v);
++                fflush(stderr);
++            }
++        };
++    }];
++    [NSNotificationCenter.defaultCenter
++        addObserverForName:GCControllerDidDisconnectNotification object:nil
++                     queue:NSOperationQueue.mainQueue
++                usingBlock:^(NSNotification *n) {
++        GCController *c = n.object;
++        fprintf(stderr, "[host] controller disconnected: %s\n",
++                c.vendorName.UTF8String ?: "?");
++        fflush(stderr);
++    }];
++    fflush(stderr);
++
++    self.link = [CADisplayLink displayLinkWithTarget:self
++                                            selector:@selector(tick:)];
++    [self.link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
++}
++
++static void release_frame(void *info, const void *data, size_t size)
++{
++    (void)info; (void)size;
++    free((void *)data);
++}
++
++extern uint64_t xemu_host_frame_take(uint64_t last_seq, void **bgra,
++                                     int *w, int *h);
++extern void xemu_host_pad_set(uint16_t buttons, const int16_t axis[6]);
++
++static inline int16_t axis_of(float v)
++{
++    v = v < -1 ? -1 : v > 1 ? 1 : v;
++    return (int16_t)(v * 32767.0f);
++}
++
++/*
++ * Two kinds of controller reach the headset. A gamepad (DualSense, Xbox)
++ * carries the extended profile and maps onto the Duke one to one. The
++ * PSVR2 Sense controllers arrive as two separate devices with only the
++ * generic physical profile: a thumbstick, a trigger, a grip, two face
++ * buttons and a menu button each, and the vendor name says which hand.
++ * The right hand supplies A, B, the right stick, the right trigger, the
++ * grip as Black and Options as Start; the left supplies X, Y, the left
++ * stick, the left trigger, the grip as White and Menu as Back. Y up is
++ * positive in xemu's axis convention.
++ */
++- (void)readExtended:(GCExtendedGamepad *)g into:(uint16_t *)b axis:(int16_t *)axis
++{
++    if (g.buttonA.pressed)            *b |= 1 << 0;
++    if (g.buttonB.pressed)            *b |= 1 << 1;
++    if (g.buttonX.pressed)            *b |= 1 << 2;
++    if (g.buttonY.pressed)            *b |= 1 << 3;
++    if (g.dpad.left.pressed)          *b |= 1 << 4;
++    if (g.dpad.up.pressed)            *b |= 1 << 5;
++    if (g.dpad.right.pressed)         *b |= 1 << 6;
++    if (g.dpad.down.pressed)          *b |= 1 << 7;
++    if (g.buttonOptions.pressed)      *b |= 1 << 8;   /* back */
++    if (g.buttonMenu.pressed)         *b |= 1 << 9;   /* start */
++    if (g.leftShoulder.pressed)       *b |= 1 << 10;  /* white */
++    if (g.rightShoulder.pressed)      *b |= 1 << 11;  /* black */
++    if (g.leftThumbstickButton.pressed)  *b |= 1 << 12;
++    if (g.rightThumbstickButton.pressed) *b |= 1 << 13;
++    if (g.buttonHome.pressed)         *b |= 1 << 14;  /* guide */
++    axis[0] = axis_of(g.leftTrigger.value);
++    axis[1] = axis_of(g.rightTrigger.value);
++    axis[2] = axis_of(g.leftThumbstick.xAxis.value);
++    axis[3] = axis_of(g.leftThumbstick.yAxis.value);
++    axis[4] = axis_of(g.rightThumbstick.xAxis.value);
++    axis[5] = axis_of(g.rightThumbstick.yAxis.value);
++}
++
++- (void)readPhysical:(GCController *)c into:(uint16_t *)b axis:(int16_t *)axis
++{
++    GCPhysicalInputProfile *p = c.physicalInputProfile;
++    NSString *name = c.vendorName ?: @"";
++    BOOL right = [name containsString:@"(R)"];
++    BOOL left = [name containsString:@"(L)"];
++    if (!left && !right) {
++        right = YES;    /* an unknown single device: treat as the right hand */
++    }
++    NSDictionary<NSString *, GCControllerButtonInput *> *btn = p.buttons;
++    NSDictionary<NSString *, GCControllerDirectionPad *> *pads = p.dpads;
++
++    if (btn[GCInputButtonA].pressed)       *b |= 1 << 0;
++    if (btn[GCInputButtonB].pressed)       *b |= 1 << 1;
++    if (btn[GCInputButtonX].pressed)       *b |= 1 << 2;
++    if (btn[GCInputButtonY].pressed)       *b |= 1 << 3;
++    if (btn[GCInputButtonOptions].pressed) *b |= right ? 1 << 9 : 1 << 8;
++    if (btn[GCInputButtonMenu].pressed)    *b |= right ? 1 << 9 : 1 << 8;
++    if (btn[GCInputButtonHome].pressed)    *b |= 1 << 14;
++    if (btn[GCInputGripButton].pressed ||
++        btn[right ? GCInputRightShoulder : GCInputLeftShoulder].pressed) {
++        *b |= right ? 1 << 11 : 1 << 10;
++    }
++    if (btn[GCInputThumbstickButton].pressed ||
++        btn[right ? GCInputRightThumbstickButton
++                  : GCInputLeftThumbstickButton].pressed) {
++        *b |= right ? 1 << 13 : 1 << 12;
++    }
++    GCControllerButtonInput *trig = btn[GCInputTrigger]
++        ?: btn[right ? GCInputRightTrigger : GCInputLeftTrigger];
++    if (trig) {
++        axis[right ? 1 : 0] = axis_of(trig.value);
++    }
++    GCControllerDirectionPad *stick = pads[GCInputThumbstick]
++        ?: pads[right ? GCInputRightThumbstick : GCInputLeftThumbstick];
++    if (stick) {
++        axis[right ? 4 : 2] = axis_of(stick.xAxis.value);
++        axis[right ? 5 : 3] = axis_of(stick.yAxis.value);
++    }
++}
++
++/*
++ * Diagnostic: from the host, with no controller involved, press d-pad
++ * down for a quarter second every two seconds, and A once at the end.
++ * If the dashboard's highlight moves, the guest side of input is fine.
++ * Runs from the first shown frame for thirty seconds, then never again.
++ */
++- (BOOL)injectInto:(uint16_t *)b
++{
++    if (self.framesShown == 0 || true) {
++        return NO;   /* retired: the gaze rule explained it, see the app */
++    }
++    static uint64_t start;
++    if (!start) {
++        start = self.ticks;
++        fprintf(stderr, "[host] inject: starting at tick %llu\n",
++                (unsigned long long)start);
++        fflush(stderr);
++    }
++    uint64_t t = self.ticks - start;
++    if (t > 90 * 30) {
++        return NO;
++    }
++    uint64_t phase = t % 180;              /* two seconds at 90 Hz */
++    BOOL pressed = phase < 22;             /* a quarter second */
++    static BOOL was;
++    if (pressed != was) {
++        was = pressed;
++        fprintf(stderr, "[host] inject: %s at tick %llu\n",
++                pressed ? (t > 90 * 26 ? "A down" : "dpad down") : "release",
++                (unsigned long long)t);
++        fflush(stderr);
++    }
++    if (pressed) {
++        *b |= (t > 90 * 26) ? (1 << 0) : (1 << 7);
++    }
++    return YES;
++}
++
++- (void)readController
++{
++    uint16_t b = 0;
++    int16_t axis[6] = { 0 };
++    BOOL any = NO, haveLeft = NO, haveRight = NO;
++    if ([self injectInto:&b]) {
++        any = YES;
++    }
++    for (GCController *c in GCController.controllers) {
++        if (c.extendedGamepad) {
++            [self readExtended:c.extendedGamepad into:&b axis:axis];
++            haveLeft = haveRight = YES;
++        } else if (c.physicalInputProfile) {
++            [self readPhysical:c into:&b axis:axis];
++            NSString *name = c.vendorName ?: @"";
++            if ([name containsString:@"(L)"]) haveLeft = YES; else haveRight = YES;
++        } else {
++            continue;
++        }
++        any = YES;
++    }
++    if (!any) {
++        return;
++    }
++
++    /*
++     * One hand only: the dashboard and most menus navigate with the left
++     * stick and the d-pad, so a lone right controller lends its stick to
++     * the left side and to the d-pad, and a lone left controller lends
++     * its stick to the right. The moment the other hand connects each
++     * side is its own again.
++     */
++    if (haveRight && !haveLeft) {
++        axis[2] = axis[4];
++        axis[3] = axis[5];
++    } else if (haveLeft && !haveRight) {
++        axis[4] = axis[2];
++        axis[5] = axis[3];
++    }
++    if (!(haveLeft && haveRight)) {
++        const int16_t edge = 16000;
++        if (axis[2] < -edge) b |= 1 << 4;   /* d-pad left */
++        if (axis[3] >  edge) b |= 1 << 5;   /* up */
++        if (axis[2] >  edge) b |= 1 << 6;   /* right */
++        if (axis[3] < -edge) b |= 1 << 7;   /* down */
++    }
++    xemu_host_pad_set(b, axis);
++
++    /* Raw state once a second, so "no presses" and "presses not arriving"
++     * stop looking the same in the log. */
++    if (self.ticks % 450 == 0) {
++        fprintf(stderr, "[host] %lu controllers, current '%s'\n",
++                (unsigned long)GCController.controllers.count,
++                GCController.current.vendorName.UTF8String ?: "none");
++    }
++    if (self.ticks % 90 == 0) {
++        for (GCController *c in GCController.controllers) {
++            GCPhysicalInputProfile *p = c.physicalInputProfile;
++            fprintf(stderr, "[host] pad raw '%s': buttons %lu, A %d B %d X %d "
++                            "Y %d menu %d grip %.2f trigger %.2f stick %.2f,%.2f "
++                            "attached %d current %d\n",
++                    c.vendorName.UTF8String ?: "?",
++                    (unsigned long)p.buttons.count,
++                    p.buttons[GCInputButtonA].pressed,
++                    p.buttons[GCInputButtonB].pressed,
++                    p.buttons[GCInputButtonX].pressed,
++                    p.buttons[GCInputButtonY].pressed,
++                    p.buttons[GCInputButtonMenu].pressed,
++                    p.buttons[GCInputGripButton].value,
++                    p.buttons[GCInputTrigger].value,
++                    p.dpads[GCInputThumbstick].xAxis.value,
++                    p.dpads[GCInputThumbstick].yAxis.value,
++                    (int)c.isAttachedToDevice,
++                    (int)(GCController.current == c));
++        }
++        fflush(stderr);
++    }
++
++    self.padSamples++;
++    if (b != self.lastButtons) {
++        self.lastButtons = b;
++        fprintf(stderr, "[host] pad buttons 0x%04x\n", b);
++        fflush(stderr);
++    }
++}
++
++- (void)tick:(CADisplayLink *)link
++{
++    self.ticks++;
++    [self readController];
++
++    void *bgra = NULL;
++    int w = 0, h = 0;
++    uint64_t seq = xemu_host_frame_take(self.frameSeq, &bgra, &w, &h);
++    if (seq) {
++        self.frameSeq = seq;
++        /* x8r8g8b8 little endian in memory is BGRX, which this spells. */
++        CGDataProviderRef provider = CGDataProviderCreateWithData(
++            NULL, bgra, (size_t)w * 4 * h, release_frame);
++        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
++        CGImageRef img = CGImageCreate(
++            w, h, 8, 32, (size_t)w * 4, cs,
++            kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst,
++            provider, NULL, false, kCGRenderingIntentDefault);
++        self.screen.image = [UIImage imageWithCGImage:img];
++        CGImageRelease(img);
++        CGColorSpaceRelease(cs);
++        CGDataProviderRelease(provider);
++        self.framesShown++;
++        if (self.framesShown <= 3 || self.framesShown % 300 == 0) {
++            fprintf(stderr, "[host] shown frame %llu (seq %llu, %dx%d)\n",
++                    (unsigned long long)self.framesShown,
++                    (unsigned long long)seq, w, h);
++            fflush(stderr);
++        }
++    }
++
++    /* The strobe stays until the first real frame, so a dead machine still
++     * shows a live scene. */
++    if (self.framesShown == 0) {
++        CGFloat v = (self.ticks % 120) / 240.0;
++        self.view.backgroundColor = [UIColor colorWithRed:0 green:0 blue:v alpha:1];
++    } else if (self.framesShown == 1) {
++        self.view.backgroundColor = UIColor.blackColor;
++    }
++
++    if (self.ticks <= 3 || self.ticks % 300 == 0) {
++        fprintf(stderr, "[host] scene tick %llu\n",
++                (unsigned long long)self.ticks);
++        fflush(stderr);
++    }
++}
++
++@end
++
++@implementation XemuHostAppDelegate
++
++- (BOOL)application:(UIApplication *)application
++    didFinishLaunchingWithOptions:(NSDictionary *)options
++{
++    fprintf(stderr, "[host] didFinishLaunching\n");
++
++    /*
++     * Off the main thread. The emulator never returns while a machine is
++     * running, and blocking the main thread is what the watchdog kills an
++     * app for.
++     */
++    /*
++     * Bisect stage, so the one thing that stops the main run loop can be
++     * found by halving rather than guessing. Proven at stage 0: with no
++     * emulator at all the display link ticks and the app lives forever, so
++     * UIKit, the scene manifest and the window are all correct and the
++     * emulator is what does it.
++     *
++     *   0  no emulator
++     *   1  qemu_init, then stop
++     *   2  (unused)
++     *   3  everything
++     */
++    /* Set to 0 or 1 to bisect; 3 is the real thing. */
++    xemu_host_stage = 3;
++    fprintf(stderr, "[host] bisect stage %d\n", xemu_host_stage);
++
++    pthread_t t;
++    pthread_attr_t attr;
++    pthread_attr_init(&attr);
++    pthread_attr_setstacksize(&attr, 8 * 1024 * 1024);
++    pthread_create(&t, &attr, emulator_thread, NULL);
++    pthread_detach(t);
++    pthread_attr_destroy(&attr);
++
++    return YES;
++}
++
++@end
++
++/*
++ * Everything that used to happen in main() before UIApplicationMain. The
++ * Swift App's init calls it, which is before UIKit does anything.
++ */
++void xemu_host_prepare(void)
++{
++    static char *argv0[] = { "XemuHost", NULL };
++    g_argc = 1;
++    g_argv = argv0;
++    /*
++     * SDL3 expects to own main() on the iOS family, and refuses to
++     * initialise otherwise with "did you include SDL_main.h in the
++     * file containing your main() function". UIKit owns main here, so
++     * tell SDL the job is already done.
++     *
++     * Without this the MCPX APU fails to initialise, and the guest CPU
++     * then spins forever: measured 2026-10-26.
++     */
++    SDL_SetMainReady();
++
++    redirect_output_to_documents();
++    install_crash_handler();
++    atexit(log_normal_exit);
++    fprintf(stderr, "[host] prepared, handing off to SwiftUI\n");
++    fflush(stderr);
++}
++
++#endif /* TARGET_OS_VISION || TARGET_OS_IOS */
+diff --git a/ui/xemu-host-png.cc b/ui/xemu-host-png.cc
+new file mode 100644
+index 0000000000..1dd3732e61
+--- /dev/null
++++ b/ui/xemu-host-png.cc
+@@ -0,0 +1,27 @@
++/*
++ * xemu-host-png.cc -- C linkage over fpng.
++ *
++ * Copyright (C) 2026 A. Cervantez
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ *
++ * libpng is not available in this build ("PNG support: NO"), and adding it
++ * would mean cross-compiling another library for visionOS later. fpng is
++ * already vendored under ui/thirdparty and already compiled, so the
++ * headless framebuffer dump goes through it. The only reason this file is
++ * C++ is that fpng's API is in a namespace.
++ */
++
++#include <cstdint>
++#include <fpng.h>
++
++extern "C" bool xemu_host_write_png(const char *path, const void *rgb,
++                                    int w, int h)
++{
++    static bool initialised;
++    if (!initialised) {
++        fpng::fpng_init();
++        initialised = true;
++    }
++    return fpng::fpng_encode_image_to_file(path, rgb, (uint32_t)w,
++                                           (uint32_t)h, 3, 0);
++}
+diff --git a/ui/xemu-host.c b/ui/xemu-host.c
+new file mode 100644
+index 0000000000..093cb5ff14
+--- /dev/null
++++ b/ui/xemu-host.c
+@@ -0,0 +1,828 @@
++/*
++ * xemu-host.c -- the emulator without a desktop.
++ *
++ * Copyright (C) 2026 A. Cervantez
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ *
++ * This replaces ui/xemu.c (an SDL3 window, a GL context and an ImGui menu)
++ * and ui/xui/ (50 files of ImGui) with a display backend that keeps the
++ * framebuffer and hands it to whoever is hosting: a PNG on macOS today, a
++ * visionOS compositor later.
++ *
++ * It is deliberately small. Measuring the symbol boundary rather than
++ * guessing at it showed that the rest of the emulator asks only four things
++ * of the shell it is losing, so only four things are reimplemented here.
++ * Everything else under ui/ stays: QEMU's console, its input stack and its
++ * keymaps are not desktop code, and a host needs all of them.
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/main-loop.h"
++#include "qemu/thread.h"
++#include "qemu/atomic.h"
++#include "qemu/rcu.h"
++#ifdef __APPLE__
++#include <mach/mach.h>
++#endif
++#include "system/system.h"
++#include "system/runstate.h"
++#include "ui/console.h"
++#include "ui/surface.h"
++#include "hw/xbox/nv2a/nv2a.h"
++#include "hw/core/cpu.h"
++#include "exec/cpu-common.h"
++#include "block/aio.h"
++#include "tcg/startup.h"
++
++#include "xemu-settings.h"
++#include "xemu-input.h"
++#include "xemu-version.h"
++#include "xemu-notifications.h"
++#include "xemu-snapshots.h"
++
++const char *xemu_host_bundle_path(void);
++extern int xemu_host_stage;
++int tcg_splitwx_views_match(size_t n, size_t *first_diff);
++/* ui/xemu-host-ios.m: every thread's stack, for a machine that is stuck. */
++void xemu_host_dump_threads(const char *why);
++void xemu_host_describe_page(const char *what, const void *addr);
++void xemu_host_exec_probe(void *rw, void *rx);
++int tcg_splitwx_scratch(void **rw, void **rx, size_t *len, void **rx_base);
++
++#include <locale.h>
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++
++/* ui/xemu-host-png.cc, because fpng's API is C++ */
++bool xemu_host_write_png(const char *path, const void *rgb, int w, int h);
++
++/*
++ * Resident footprint, the number jetsam judges. The first guest block ran
++ * at 5119 MiB and the process died before the sixty-fifth, so where that
++ * memory comes from is the question, and these prints bisect startup.
++ */
++unsigned long long xemu_host_footprint_mib(void)
++{
++#ifdef __APPLE__
++    task_vm_info_data_t vm;
++    mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
++    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm, &cnt)
++        == KERN_SUCCESS) {
++        return vm.phys_footprint >> 20;
++    }
++#endif
++    return 0;
++}
++
++static void footprint(const char *where)
++{
++    fprintf(stderr, "[host] footprint %s: %llu MiB\n", where,
++            xemu_host_footprint_mib());
++    fflush(stderr);
++}
++
++/*
++ * A ticker, so the jump lines up against whatever device was printing
++ * at the time. Only speaks when the number moves by more than 16 MiB.
++ */
++static void *footprint_ticker(void *unused)
++{
++    (void)unused;
++    unsigned long long last = 0;
++    for (int i = 0; i < 40 * 4; i++) {
++        unsigned long long now = xemu_host_footprint_mib();
++        if (now > last + 16 || now + 16 < last) {
++            fprintf(stderr, "[host] fp t=%.2fs: %llu MiB\n", i * 0.25, now);
++            fflush(stderr);
++            last = now;
++        }
++        g_usleep(250 * 1000);
++    }
++    return NULL;
++}
++
++/*
++ * The latest frame, for whoever presents it. The sampler publishes a
++ * tightly packed BGRA copy thirty times a second; the UI takes a copy of
++ * that when the sequence number moves. Two copies per frame is nothing at
++ * 640x480 and it keeps every lock short.
++ */
++static DisplaySurface *current_surface;   /* set by host_gfx_switch below */
++uint64_t xemu_host_frame_take(uint64_t last_seq, void **bgra, int *w, int *h);
++void xemu_host_pad_set(uint16_t buttons, const int16_t axis[6]);
++void xemu_host_set_background(bool background);
++void xemu_host_set_metal_present(bool on);
++int xemu_host_present_frame(void *mtl_texture, int w, int h);
++bool xemu_host_present_size(int *w, int *h);
++int xemu_host_guest_flips(void);
++extern unsigned long xemu_host_blocks_executed;
++unsigned xemu_host_tb_flush_count(void);
++size_t tcg_nb_tbs(void);
++static pthread_mutex_t g_frame_lock = PTHREAD_MUTEX_INITIALIZER;
++static uint8_t *g_frame_bgra;
++static int g_frame_w, g_frame_h;
++static uint64_t g_frame_seq;
++static uint64_t g_frames_vga, g_frames_nv2a;
++
++static void publish_frame(const uint8_t *src, int w, int h, int stride)
++{
++    size_t row = (size_t)w * 4;
++    uint8_t *copy = g_malloc(row * h);
++    for (int y = 0; y < h; y++) {
++        memcpy(copy + y * row, src + (size_t)y * stride, row);
++    }
++    pthread_mutex_lock(&g_frame_lock);
++    g_free(g_frame_bgra);
++    g_frame_bgra = copy;
++    g_frame_w = w;
++    g_frame_h = h;
++    g_frame_seq++;
++    pthread_mutex_unlock(&g_frame_lock);
++}
++
++/*
++ * Ask the NV2A for the scanned-out surface, the way the desktop shell's
++ * window thread does every frame: get, copy, release. When nothing is in
++ * the surface cache (the guest is drawing with the CPU, or has not drawn
++ * yet) fall back to the VGA surface QEMU keeps for us.
++ */
++/*
++ * Foreground and background. A backgrounded app on this OS loses the GPU,
++ * and the renderer's next command buffer then fails with the device lost
++ * for good (measured 2026-10-29: VK_ERROR_DEVICE_LOST, "insufficient
++ * permission", then an assert in pgraph_vk_finish). So the machine is
++ * paused and the frame grabs stop the moment the system says the app is
++ * leaving, and both resume on return. The stop and start run on the main
++ * loop thread with the BQL, where they belong.
++ */
++static bool g_background;
++
++static void pause_bh(void *opaque)
++{
++    bool pause = (bool)(uintptr_t)opaque;
++    if (pause && runstate_is_running()) {
++        vm_stop(RUN_STATE_PAUSED);
++        fprintf(stderr, "[host] machine paused for the background\n");
++    } else if (!pause && !runstate_is_running()) {
++        vm_start();
++        fprintf(stderr, "[host] machine resumed\n");
++    }
++    fflush(stderr);
++}
++
++void xemu_host_set_background(bool background)
++{
++    qatomic_set(&g_background, background);
++    aio_bh_schedule_oneshot(qemu_get_aio_context(), pause_bh,
++                            (void *)(uintptr_t)background);
++}
++
++static bool g_metal_present;
++
++/* The screen presents straight from the GPU; the CPU grab stands down. */
++void xemu_host_set_metal_present(bool on)
++{
++    qatomic_set(&g_metal_present, on);
++    fprintf(stderr, "[host] presentation: %s\n", on ? "zero-copy" : "CPU copy");
++    fflush(stderr);
++}
++
++int xemu_host_present_frame(void *mtl_texture, int w, int h)
++{
++    if (qatomic_read(&g_background)) {
++        return 0;
++    }
++    return nv2a_present_to_metal(mtl_texture, w, h);
++}
++
++bool xemu_host_present_size(int *w, int *h)
++{
++    return nv2a_present_size(w, h);
++}
++
++int xemu_host_guest_flips(void)
++{
++    return nv2a_get_frame_count();
++}
++
++static void grab_frame(void)
++{
++    if (qatomic_read(&g_background) || qatomic_read(&g_metal_present)) {
++        return;
++    }
++    /*
++     * Only after the guest has flipped. Asking the NV2A for the surface
++     * forces a GPU to CPU download that stalls the render thread, and
++     * asking thirty times a second for a frame the guest has not changed
++     * is pure stall. The VGA fallback still gets a look once a second.
++     */
++    static int last_flip;
++    static int idle;
++    int flip = nv2a_get_frame_count();
++    if (flip == last_flip && ++idle < 30) {
++        return;
++    }
++    idle = 0;
++    last_flip = flip;
++    nv2a_get_framebuffer_surface();
++    NV2ACpuFramebuffer fb;
++    bool have = nv2a_get_cpu_framebuffer(&fb) && fb.width > 0 &&
++                fb.height > 0 && fb.data;
++    if (have) {
++        publish_frame(fb.data, fb.width, fb.height, fb.stride);
++        g_frames_nv2a++;
++    }
++    nv2a_release_framebuffer_surface();
++
++    if (!have && current_surface &&
++        surface_format(current_surface) == PIXMAN_x8r8g8b8) {
++        publish_frame(surface_data(current_surface),
++                      surface_width(current_surface),
++                      surface_height(current_surface),
++                      surface_stride(current_surface));
++        g_frames_vga++;
++    }
++}
++
++uint64_t xemu_host_frame_take(uint64_t last_seq, void **bgra, int *w, int *h)
++{
++    uint64_t seq = 0;
++    pthread_mutex_lock(&g_frame_lock);
++    if (g_frame_bgra && g_frame_seq != last_seq) {
++        size_t n = (size_t)g_frame_w * 4 * g_frame_h;
++        *bgra = malloc(n);
++        memcpy(*bgra, g_frame_bgra, n);
++        *w = g_frame_w;
++        *h = g_frame_h;
++        seq = g_frame_seq;
++    }
++    pthread_mutex_unlock(&g_frame_lock);
++    return seq;
++}
++
++static ControllerState *g_host_pad;
++
++/* Called from the shell at display rate with the controller's state. */
++void xemu_host_pad_set(uint16_t buttons, const int16_t axis[6])
++{
++    ControllerState *pad = g_host_pad;
++    if (!pad) {
++        return;
++    }
++    pad->buttons = buttons;
++    for (int i = 0; i < 6; i++) {
++        pad->axis[i] = axis[i];
++    }
++}
++
++static int dump_ramblock(RAMBlock *rb, void *opaque)
++{
++    (void)opaque;
++    fprintf(stderr, "[host]   ramblock %-24s used %llu MiB max %llu MiB\n",
++            qemu_ram_get_idstr(rb),
++            (unsigned long long)(qemu_ram_get_used_length(rb) >> 20),
++            (unsigned long long)(qemu_ram_get_max_length(rb) >> 20));
++    return 0;
++}
++
++static int      g_argc;
++static char   **g_argv;
++static int      exit_status;
++static bool     qemu_exiting;
++
++static QemuSemaphore  display_init_sem;
++static DisplayChangeListener dcl;
++static DisplaySurface *current_surface;
++static uint64_t frame_count;
++
++/* ------------------------------------------------------------------ */
++/* The four symbols the rest of the tree needed from the deleted shell. */
++/* ------------------------------------------------------------------ */
++
++void xemu_queue_notification(const char *msg)
++{
++    fprintf(stderr, "[xemu] %s\n", msg);
++}
++
++void xemu_queue_error_message(const char *msg)
++{
++    fprintf(stderr, "[xemu] error: %s\n", msg);
++}
++
++/*
++ * Snapshot thumbnails were GL textures drawn into an ImGui panel. There is
++ * no panel now. Save states still work; they just carry no preview image.
++ */
++void *xemu_snapshots_create_framebuffer_thumbnail_png(size_t *size)
++{
++    *size = 0;
++    return NULL;
++}
++
++bool xemu_snapshots_load_png_to_texture(unsigned int tex, void *buf,
++                                        size_t size)
++{
++    return false;
++}
++
++/* ------------------------------------------------------------------ */
++/* Framebuffer out                                                      */
++/* ------------------------------------------------------------------ */
++
++/*
++ * Writes a copy of whatever the guest last drew. The copy is the caller's,
++ * made while the NV2A held the surface for us, so nothing here touches the
++ * machine and nothing here blocks it.
++ */
++static bool write_framebuffer_png(const NV2ACpuFramebuffer *fb, const char *path)
++{
++    int w = fb->width;
++    int h = fb->height;
++    int stride = fb->stride;
++    const uint8_t *src = fb->data;
++    if (w <= 0 || h <= 0 || !src) {
++        return false;
++    }
++
++    /*
++     * The guest framebuffer is 32bpp little-endian x8r8g8b8, which is BGRA
++     * in memory order. Pack it down to tight RGB, which is what fpng wants
++     * and which also drops the stride padding.
++     */
++    uint8_t *rgb = g_malloc((size_t)3 * w * h);
++    for (int y = 0; y < h; y++) {
++        const uint8_t *p = src + (size_t)y * stride;
++        uint8_t *o = rgb + (size_t)3 * w * y;
++        for (int x = 0; x < w; x++) {
++            o[3 * x + 0] = p[4 * x + 2];
++            o[3 * x + 1] = p[4 * x + 1];
++            o[3 * x + 2] = p[4 * x + 0];
++        }
++    }
++
++    bool ok = xemu_host_write_png(path, rgb, w, h);
++    g_free(rgb);
++    if (!ok) {
++        return false;
++    }
++
++    fprintf(stderr, "[xemu-host] wrote %s (%dx%d)\n", path, w, h);
++    return true;
++}
++
++/* ------------------------------------------------------------------ */
++/* The display backend                                                  */
++/* ------------------------------------------------------------------ */
++
++static void host_gfx_update(DisplayChangeListener *l, int x, int y,
++                            int w, int h)
++{
++    /*
++     * Count, and nothing else. This runs on the machine's thread with the
++     * BQL held, and the NV2A scan-out waits on the pgraph thread, which
++     * itself takes the BQL. Asking for the frame from here deadlocked the
++     * whole machine at frame 1 (measured 2026-10-28: the vCPU queued on the
++     * BQL in cpu_handle_interrupt and never retired an instruction). Every
++     * in-tree caller that waits on pgraph drops the BQL first; the desktop
++     * shell asks from its window thread. The sampler thread does the same.
++     */
++    frame_count++;
++}
++
++static void host_gfx_switch(DisplayChangeListener *l, DisplaySurface *s)
++{
++    current_surface = s;
++}
++
++static void host_refresh(DisplayChangeListener *l)
++{
++    graphic_hw_update(l->con);
++}
++
++static const DisplayChangeListenerOps host_ops = {
++    .dpy_name       = "xemu-host",
++    .dpy_gfx_update = host_gfx_update,
++    .dpy_gfx_switch = host_gfx_switch,
++    .dpy_refresh    = host_refresh,
++};
++
++static void display_early_init(DisplayOptions *o)
++{
++}
++
++static void display_init(DisplayState *ds, DisplayOptions *o)
++{
++    assert(o->type == DISPLAY_TYPE_XEMU);
++
++    dcl.con = qemu_console_lookup_by_index(0);
++    dcl.ops = &host_ops;
++    register_displaychangelistener(&dcl);
++
++    /* main() is blocked until this fires. */
++    qemu_sem_post(&display_init_sem);
++}
++
++static QemuDisplay qemu_display_xemu = {
++    .type       = DISPLAY_TYPE_XEMU,
++    .early_init = display_early_init,
++    .init       = display_init,
++};
++
++static void register_xemu_display(void)
++{
++    qemu_display_register(&qemu_display_xemu);
++}
++
++type_init(register_xemu_display);
++
++/* ------------------------------------------------------------------ */
++/* Entry                                                                */
++/* ------------------------------------------------------------------ */
++
++static void *qemu_main_thread(void *opaque)
++{
++    footprint("before qemu_init");
++    qemu_init(g_argc, g_argv);
++    footprint("after qemu_init");
++
++    /*
++     * One controller on port 1, filled by the shell. qemu_init returns
++     * with the BQL held on this thread, which is what plugging the USB
++     * devices needs.
++     */
++    g_host_pad = xemu_input_bind_host_pad(0, "Headset Gamepad");
++    fprintf(stderr, "[host] gamepad bound to port 1: %s\n",
++            g_host_pad && g_host_pad->device ? "ok" : "NO DEVICE");
++    fflush(stderr);
++    fprintf(stderr, "[host] ramblocks:\n");
++    qemu_ram_foreach_block(dump_ramblock, NULL);
++    fflush(stderr);
++#if TARGET_OS_VISION || TARGET_OS_IOS
++    {
++        extern void xemu_host_dump_vm_regions(void);
++        xemu_host_dump_vm_regions();
++    }
++#endif
++
++#if TARGET_OS_VISION || TARGET_OS_IOS
++    fprintf(stderr, "[host] qemu_init returned, stage %d\n", xemu_host_stage);
++    if (xemu_host_stage < 3) {
++        fprintf(stderr, "[host] stopping before qemu_main_loop\n");
++        return NULL;
++    }
++#endif
++
++    exit_status = qemu_main_loop();
++    qatomic_set(&qemu_exiting, true);
++    bql_unlock();
++    return NULL;
++}
++
++/*
++ * On macOS this is the entry point. On the iOS family main() belongs to
++ * UIKit, in xemu-host-ios.m, and it calls this from a worker thread once
++ * the app has checked in. A visionOS process that never reaches
++ * UIApplicationMain is killed before any of this runs, with no crash report
++ * and no output, which is worth stating because it looks exactly like a
++ * dyld failure from the outside.
++ */
++#if TARGET_OS_VISION || TARGET_OS_IOS
++int xemu_host_run(int argc, char **argv)
++#else
++int main(int argc, char **argv)
++#endif
++{
++    QemuThread thread;
++
++    setlocale(LC_NUMERIC, "C");
++    g_argc = argc;
++    g_argv = argv;
++
++    for (int i = 1; i < argc; i++) {
++        if (!strcmp(argv[i], "-config_path") && i + 1 < argc) {
++            xemu_settings_set_path(argv[i + 1]);
++            break;
++        }
++    }
++
++    footprint("at entry");
++    {
++        QemuThread ticker;
++        qemu_thread_create(&ticker, "footprint", footprint_ticker, NULL,
++                           QEMU_THREAD_DETACHED);
++    }
++    if (!xemu_settings_load()) {
++        fprintf(stderr, "%s", xemu_settings_get_error_message());
++        return 1;
++    }
++    atexit(xemu_settings_save);
++
++#if TARGET_OS_VISION || TARGET_OS_IOS
++    /*
++     * There is no config file on a fresh install and nowhere obvious to put
++     * one, so point the machine at the media copied into the bundle. Only
++     * fills in what is empty, so a config written later still wins.
++     *
++     * The EEPROM goes in Documents rather than the bundle, because the
++     * bundle is read-only and xemu generates one if it is missing.
++     */
++    {
++        const char *bundle = xemu_host_bundle_path();
++        const char *home = getenv("HOME");
++
++        /*
++         * Set unconditionally, not just when empty. A saved config carries
++         * absolute paths with the container's UUID in them, and the
++         * container gets a NEW UUID on every reinstall, so yesterday's
++         * config points at a directory that no longer exists. The symptom
++         * is "Failed to generate EEPROM file" naming a path you have never
++         * seen.
++         */
++        xemu_settings_set_string(&g_config.sys.files.bootrom_path,
++            g_strdup_printf("%s/media/mcpx-1.0.bin", bundle));
++        xemu_settings_set_string(&g_config.sys.files.flashrom_path,
++            g_strdup_printf("%s/media/bios.bin", bundle));
++        /* A disc in the drive boots instead of the dashboard. Read-only
++         * is fine for a DVD, so it can stay in the bundle. */
++        {
++            g_autofree char *iso = g_strdup_printf("%s/media/game.iso", bundle);
++            if (g_file_test(iso, G_FILE_TEST_EXISTS)) {
++                xemu_settings_set_string(&g_config.sys.files.dvd_path, iso);
++                fprintf(stderr, "[host] dvd      %s\n", iso);
++            }
++        }
++        /*
++         * The hard disk has to live somewhere writable. An app bundle is
++         * read-only on this platform and QEMU opens a disk read-write, so
++         * pointing at the bundled copy fails with "Operation not
++         * permitted" before the machine ever starts.
++         *
++         * Copy it into the container once. It is 2 GB, so only if it is
++         * not already there. This is also the shape the real thing takes,
++         * where the user supplies media into the container rather than it
++         * riding along in the bundle.
++         */
++        if (home) {
++            g_autofree char *hdd_dst =
++                g_strdup_printf("%s/Documents/xbox_hdd.qcow2", home);
++            g_autofree char *hdd_src =
++                g_strdup_printf("%s/media/xbox_hdd.qcow2", bundle);
++
++            if (!g_file_test(hdd_dst, G_FILE_TEST_EXISTS) &&
++                g_file_test(hdd_src, G_FILE_TEST_EXISTS)) {
++                fprintf(stderr, "[host] copying hdd into the container, "
++                                "this takes a moment\n");
++                /*
++                 * Streamed in chunks, deliberately. g_file_get_contents()
++                 * reads the whole file into memory first, which for a
++                 * 1.9 GB disk image means a 1.9 GB peak on a device with a
++                 * jetsam limit. It completed and then the process died a
++                 * few hundred milliseconds later inside Vulkan init.
++                 */
++                FILE *in = fopen(hdd_src, "rb");
++                FILE *out = in ? fopen(hdd_dst, "wb") : NULL;
++                if (in && out) {
++                    enum { CHUNK = 4 * 1024 * 1024 };
++                    g_autofree char *buf = g_malloc(CHUNK);
++                    size_t n, total = 0;
++                    bool ok = true;
++                    while ((n = fread(buf, 1, CHUNK, in)) > 0) {
++                        if (fwrite(buf, 1, n, out) != n) { ok = false; break; }
++                        total += n;
++                    }
++                    ok = ok && (fflush(out) == 0);
++                    fprintf(stderr, "[host] hdd %s, %.1f MB\n",
++                            ok ? "copied" : "COPY FAILED", total / 1048576.0);
++                } else {
++                    fprintf(stderr, "[host] hdd copy could not open files\n");
++                }
++                if (out) fclose(out);
++                if (in) fclose(in);
++            }
++            if (g_file_test(hdd_dst, G_FILE_TEST_EXISTS)) {
++                footprint("after hdd copy");
++                xemu_settings_set_string(&g_config.sys.files.hdd_path,
++                                         g_strdup(hdd_dst));
++                fprintf(stderr, "[host] hdd      %s\n", hdd_dst);
++            }
++        }
++        if (home) {
++            xemu_settings_set_string(&g_config.sys.files.eeprom_path,
++                g_strdup_printf("%s/Documents/eeprom.bin", home));
++        }
++
++        /*
++         * The same trap that cost a boot on macOS: while show_welcome is
++         * true, system/vl.c skips adding -bios entirely and the machine
++         * starts with no BIOS, reporting a null filename while the path sits
++         * correctly in the config. There is no welcome screen here to dismiss.
++         */
++        g_config.general.show_welcome = false;
++
++        /*
++         * The config default is OPENGL, and there is no GL backend in this
++         * build, so a fresh install configures a renderer that does not
++         * exist. xemu logs "Configured renderer not available" and carries
++         * on with none, and the first thing NV2A asks of it ends the
++         * process with no message at all.
++         */
++        g_config.display.renderer = CONFIG_DISPLAY_RENDERER_VULKAN;
++        fprintf(stderr, "[host] renderer forced to Vulkan\n");
++        fprintf(stderr, "[host] bootrom  %s\n", g_config.sys.files.bootrom_path);
++        fprintf(stderr, "[host] flashrom %s\n", g_config.sys.files.flashrom_path);
++    }
++#endif
++
++#if TARGET_OS_VISION || TARGET_OS_IOS
++    if (xemu_host_stage < 1) {
++        fprintf(stderr, "[host] stopping before qemu_init (stage %d)\n",
++                xemu_host_stage);
++        return 0;
++    }
++#endif
++
++    qemu_sem_init(&display_init_sem, 0);
++    qemu_thread_create(&thread, "qemu_main", qemu_main_thread, NULL,
++                       QEMU_THREAD_JOINABLE);
++    qemu_sem_wait(&display_init_sem);
++
++    /* Inherited from ui/xemu.c: this thread touches TCG and AIO state. */
++    tcg_register_init_ctx();
++    qemu_set_current_aio_context(qemu_get_aio_context());
++    /* On the headset this is a raw pthread, so nothing did this for us. */
++    rcu_register_thread();
++
++    /*
++     * Headless run: let the guest get somewhere, then write one frame out.
++     * XEMU_HOST_SHOT names the file and XEMU_HOST_SHOT_AFTER is how many
++     * seconds to wait first. Without the former this just runs.
++     */
++    const char *shot = getenv("XEMU_HOST_SHOT");
++
++    int after = getenv("XEMU_HOST_SHOT_AFTER")
++                    ? atoi(getenv("XEMU_HOST_SHOT_AFTER")) : 10;
++
++#if TARGET_OS_VISION || TARGET_OS_IOS
++    /*
++     * Environment variables do not reach an app launched the ordinary way,
++     * so on the headset default to writing into the app's own Documents,
++     * which is where a Files-visible container puts things and where
++     * `devicectl device copy from` can fetch them.
++     */
++    g_autofree char *doc_shot = NULL;
++    if (!shot) {
++        const char *home = getenv("HOME");
++        doc_shot = g_strdup_printf("%s/Documents/frame.png", home ? home : ".");
++        shot = doc_shot;
++    }
++#endif
++
++    for (int elapsed = 0; !qatomic_read(&qemu_exiting); elapsed++) {
++        /* Thirty grabs a second; the bookkeeping below runs once a second. */
++        for (int i = 0; i < 30 && !qatomic_read(&qemu_exiting); i++) {
++            g_usleep(33 * 1000);
++            if (elapsed >= 2 && frame_count > 0) {
++                grab_frame();
++            }
++        }
++
++        /*
++         * Poll rather than ask once. Ten seconds was a guess, and a guess
++         * that fails tells you nothing about whether the machine is slow,
++         * stuck, or never going to scan out at all.
++         */
++        if (elapsed % 5 == 0) {
++            /*
++             * runstate is the cheapest honest signal about whether the
++             * machine is actually executing. "running" with no frames
++             * means a CPU that is advancing and not drawing; anything else
++             * means it never started or stopped itself.
++             */
++            /*
++             * runstate only says "not paused". A CPU spinning in a loop
++             * and a CPU halted waiting for an interrupt that never comes
++             * both report running, and they are different problems.
++             * halted distinguishes them, and it is a plain field read.
++             */
++            CPUState *cpu = first_cpu;
++            /*
++             * The PC is the one number that separates every remaining
++             * hypothesis. Changing: the guest advances and the problem is
++             * downstream. Constant: a tight poll, and the address says on
++             * what. Read racily from another thread, which is fine for a
++             * number printed every ten seconds.
++             */
++            vaddr pc = 0;
++            if (cpu && CPU_GET_CLASS(cpu)->get_pc) {
++                pc = CPU_GET_CLASS(cpu)->get_pc(cpu);
++            }
++            fprintf(stderr, "[host] t=%3ds, %" PRIu64 " guest frames "
++                            "(published nv2a %" PRIu64 " vga %" PRIu64 "), "
++                            "runstate %s, cpu %s%s, pc 0x%08" PRIx64
++                            ", exiting %d\n",
++                    elapsed, frame_count, g_frames_nv2a, g_frames_vga,
++                    RunState_str(runstate_get()),
++                    cpu ? (cpu->halted ? "HALTED" : "executing") : "none",
++                    cpu && cpu->stopped ? " stopped" : "",
++                    (uint64_t)pc, (int)qatomic_read(&qemu_exiting));
++            if (cpu) {
++                /*
++                 * running is true only while the vCPU is inside cpu_exec.
++                 * Not halted plus never running means the thread exists
++                 * and is not executing guest code, which is a lock or a
++                 * missing kick, not a guest problem.
++                 */
++                fprintf(stderr, "[host]   vcpu: created=%d running=%d "
++                                "thread=%d stop=%d exit_req=%d irq_req=0x%x, "
++                                "host holds bql=%d\n",
++                        (int)cpu->created, (int)cpu->running,
++                        cpu->thread_id, (int)cpu->stop,
++                        (int)qatomic_read(&cpu->exit_request),
++                        (unsigned)qatomic_read(&cpu->interrupt_request),
++                        (int)bql_locked());
++            }
++            {
++                /*
++                 * The guest's own speed. Presses reach its report and it
++                 * misses them unless they are held, which is what a guest
++                 * sampling input at a few frames a second would do.
++                 */
++                static int last_flips;
++                static unsigned long last_blocks;
++                int flips = nv2a_get_frame_count();
++                unsigned long blocks = xemu_host_blocks_executed;
++                fprintf(stderr, "[host]   guest: %d flips in 5 s, %lu blocks/s, "
++                                "%zu TBs, %u flushes\n",
++                        flips - last_flips, (blocks - last_blocks) / 5,
++                        tcg_nb_tbs(), xemu_host_tb_flush_count());
++                last_flips = flips;
++                last_blocks = blocks;
++            }
++            {
++                size_t where = 0;
++                int same = tcg_splitwx_views_match(64 * 1024, &where);
++                fprintf(stderr, "[host]   splitwx views: %s%s\n",
++                        same == 1 ? "MATCH" : same == 0 ? "DIVERGED" : "n/a",
++                        same == 0 ? "" : "");
++                if (same == 0) {
++                    fprintf(stderr, "[host]   first difference at byte %zu\n",
++                            where);
++                }
++            }
++        }
++
++        /*
++         * Take a frame from here, with no BQL, the way the desktop shell's
++         * window thread does. Get, copy the pixels out, release, and only
++         * then encode: the pointer is valid until the guest draws again,
++         * and a second get without a release trips an assert in pgraph
++         * (that was the signal 6 of 2026-10-26).
++         */
++        /*
++         * The thread dump and the execute probe that lived here at 20 to
++         * 23 seconds found the JIT answer and are retired: suspending
++         * every thread, the main one included, is also exactly when the
++         * immersive space was lost in two runs (2026-10-29).
++         */
++
++        if (shot && elapsed == after) {
++            nv2a_get_framebuffer_surface();
++            NV2ACpuFramebuffer fb;
++            bool have = nv2a_get_cpu_framebuffer(&fb);
++            uint8_t *copy = NULL;
++            if (have && fb.width > 0 && fb.height > 0 && fb.data) {
++                size_t row = (size_t)fb.width * 4;
++                copy = g_malloc(row * fb.height);
++                for (int y = 0; y < fb.height; y++) {
++                    memcpy(copy + y * row,
++                           (const uint8_t *)fb.data + (size_t)y * fb.stride,
++                           row);
++                }
++                fb.data = copy;
++                fb.stride = (int)row;
++            }
++            nv2a_release_framebuffer_surface();
++
++            if (!copy) {
++                fprintf(stderr, "[host] t=%3ds frame: nothing published\n",
++                        elapsed);
++            } else if (write_framebuffer_png(&fb, shot)) {
++                fprintf(stderr, "[host] t=%3ds frame: wrote %dx%d\n",
++                        elapsed, fb.width, fb.height);
++            } else {
++                fprintf(stderr, "[host] t=%3ds frame: %dx%d, PNG write "
++                                "FAILED\n", elapsed, fb.width, fb.height);
++            }
++            g_free(copy);
++        }
++    }
++
++    fprintf(stderr, "[host] xemu_host_run: loop ended, exiting=%d, "
++                    "joining qemu thread\n",
++            (int)qatomic_read(&qemu_exiting));
++    qemu_thread_join(&thread);
++    fprintf(stderr, "[host] xemu_host_run: qemu thread joined, status %d\n",
++            exit_status);
++    return exit_status;
++}
+diff --git a/ui/xemu-input.c b/ui/xemu-input.c
+index 4fbc863147..f3cff5b7cd 100644
+--- a/ui/xemu-input.c
++++ b/ui/xemu-input.c
+@@ -516,6 +516,8 @@ void xemu_input_update_controller(ControllerState *state)
+         xemu_input_update_sdl_kbd_controller_state(state);
+     } else if (state->type == INPUT_DEVICE_SDL_GAMEPAD) {
+         xemu_input_update_sdl_controller_state(state);
++    } else if (state->type == INPUT_DEVICE_HOST) {
++        /* The host wrote buttons and axis already; nothing to poll. */
+     }
+ 
+     state->last_input_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+@@ -676,6 +678,23 @@ ControllerState *xemu_input_get_bound(int index)
+     return bound_controllers[index];
+ }
+ 
++ControllerState *xemu_input_bind_host_pad(int port, const char *name)
++{
++    assert(port >= 0 && port <= 3);
++    bound_drivers[port] = get_bound_driver(port);
++
++    ControllerState *state = g_malloc0(sizeof(ControllerState));
++    state->type = INPUT_DEVICE_HOST;
++    state->name = name;
++    state->bound = -1;
++    state->peripheral_types[0] = PERIPHERAL_NONE;
++    state->peripheral_types[1] = PERIPHERAL_NONE;
++
++    xemu_input_bind(port, state, 0);
++    QTAILQ_INSERT_TAIL(&available_controllers, state, entry);
++    return state;
++}
++
+ void xemu_input_bind(int index, ControllerState *state, int save)
+ {
+     // FIXME: Attempt to disable rumble when unbinding so it's not left
+diff --git a/ui/xemu-input.h b/ui/xemu-input.h
+index 7023e30e23..d805f3500e 100644
+--- a/ui/xemu-input.h
++++ b/ui/xemu-input.h
+@@ -71,6 +71,8 @@ enum controller_state_axis_index {
+ enum controller_input_device_type {
+     INPUT_DEVICE_SDL_KEYBOARD,
+     INPUT_DEVICE_SDL_GAMEPAD,
++    /* State written directly by the host shell, no SDL in between. */
++    INPUT_DEVICE_HOST,
+ };
+ 
+ enum peripheral_type { PERIPHERAL_NONE, PERIPHERAL_XMU, PERIPHERAL_TYPE_COUNT };
+@@ -132,6 +134,12 @@ void xemu_input_update_sdl_kbd_controller_state(ControllerState *state);
+ void xemu_input_update_sdl_controller_state(ControllerState *state);
+ void xemu_input_update_rumble(ControllerState *state);
+ ControllerState *xemu_input_get_bound(int index);
++/*
++ * A controller the host fills in itself. Creates the state, binds it to
++ * the port (which plugs the USB hub and XID device, so the BQL must be
++ * held), and returns it for the host to write buttons and axes into.
++ */
++ControllerState *xemu_input_bind_host_pad(int port, const char *name);
+ void xemu_input_bind(int index, ControllerState *state, int save);
+ bool xemu_input_bind_xmu(int player_index, int peripheral_port_index,
+                          const char *filename, bool is_rebind);
+diff --git a/ui/xemu-settings.cc b/ui/xemu-settings.cc
+index 5f9148af8a..0189082edc 100644
+--- a/ui/xemu-settings.cc
++++ b/ui/xemu-settings.cc
+@@ -19,7 +19,17 @@
+ 
+ #include "qemu/osdep.h"
+ #include <stdlib.h>
+-#include <SDL3/SDL_filesystem.h>
++/* SDL only ever supplied the executable's directory here. */
++#include <glib.h>
++
++static const char *host_base_path(void)
++{
++    static char *cached;
++    if (!cached) {
++        cached = g_strdup_printf("%s/", g_get_current_dir());
++    }
++    return cached;
++}
+ #include <string.h>
+ #include <stddef.h>
+ #include <stdbool.h>
+@@ -51,7 +61,7 @@ const char *xemu_settings_get_error_message(void)
+ static bool xemu_settings_detect_portable_mode(void)
+ {
+     bool val = false;
+-    char *portable_path = g_strdup_printf("%s%s", SDL_GetBasePath(), filename);
++    char *portable_path = g_strdup_printf("%s%s", host_base_path(), filename);
+     FILE *tmpfile;
+     if ((tmpfile = qemu_fopen(portable_path, "r"))) {
+         fclose(tmpfile);
+@@ -78,7 +88,7 @@ const char *xemu_settings_get_base_path(void)
+     }
+ 
+     if (xemu_settings_detect_portable_mode()) {
+-        const char *base = SDL_GetBasePath();
++        const char *base = host_base_path();
+         assert(base != NULL);
+         base_path = g_strdup(base);
+     } else {
+diff --git a/ui/xemu-snapshots.c b/ui/xemu-snapshots.c
+index 9d40864e66..0ae2f91c1c 100644
+--- a/ui/xemu-snapshots.c
++++ b/ui/xemu-snapshots.c
+@@ -22,7 +22,6 @@
+ #include "xemu-xbe.h"
+ 
+ #include <SDL3/SDL.h>
+-#include <epoxy/gl.h>
+ 
+ #include "block/aio.h"
+ #include "block/block_int.h"
+@@ -115,15 +114,12 @@ static void xemu_snapshots_load_data(BlockDriverState *bs_ro,
+     offset += 4;
+ 
+     if (thumbnail_size) {
+-        GLuint thumbnail;
+-        glGenTextures(1, &thumbnail);
++        /*
++         * The thumbnail is still in the save file and is still skipped over
++         * correctly. Decoding it needed a GL texture and a panel to show it
++         * in, and there is neither now.
++         */
+         assert(size >= (offset + thumbnail_size));
+-        if (xemu_snapshots_load_png_to_texture(thumbnail, &buf[offset],
+-                                               thumbnail_size)) {
+-            data->gl_thumbnail = thumbnail;
+-        } else {
+-            glDeleteTextures(1, &thumbnail);
+-        }
+         offset += thumbnail_size;
+     }
+ 
+@@ -142,9 +138,6 @@ static void xemu_snapshots_all_load_data(QEMUSnapshotInfo **info,
+     if (*data) {
+         for (int i = 0; i < xemu_snapshots_len; ++i) {
+             g_free((*data)[i].xbe_title_name);
+-            if ((*data)[i].gl_thumbnail) {
+-                glDeleteTextures(1, &((*data)[i].gl_thumbnail));
+-            }
+         }
+         g_free(*data);
+     }
+diff --git a/ui/xemu-snapshots.h b/ui/xemu-snapshots.h
+index 9d793f0ced..33b7440f77 100644
+--- a/ui/xemu-snapshots.h
++++ b/ui/xemu-snapshots.h
+@@ -27,7 +27,6 @@ extern "C" {
+ #endif
+ 
+ #include "block/snapshot.h"
+-#include <epoxy/gl.h>
+ 
+ #define XEMU_SNAPSHOT_DATA_MAGIC 0x78656d75 // 'xemu'
+ #define XEMU_SNAPSHOT_DATA_VERSION 1
+@@ -40,7 +39,7 @@ extern const char **g_snapshot_shortcut_index_key_map[];
+ typedef struct XemuSnapshotData {
+     char *disc_path;
+     char *xbe_title_name;
+-    GLuint gl_thumbnail;
++    unsigned int gl_thumbnail;
+ } XemuSnapshotData;
+ 
+ // Implemented in xemu-snapshots.c
+@@ -56,8 +55,9 @@ bool xemu_snapshots_offset_extra_data(QEMUFile *f);
+ void xemu_snapshots_mark_dirty(void);
+ 
+ // Implemented in xemu-thumbnail.cc
+-void xemu_snapshots_set_framebuffer_texture(GLuint tex, bool flip);
+-bool xemu_snapshots_load_png_to_texture(GLuint tex, void *buf, size_t size);
++void xemu_snapshots_set_framebuffer_texture(unsigned int tex, bool flip);
++/* was GLuint; it is unsigned int, and saying so removes a GL include */
++bool xemu_snapshots_load_png_to_texture(unsigned int tex, void *buf, size_t size);
+ void *xemu_snapshots_create_framebuffer_thumbnail_png(size_t *size);
+ 
+ #ifdef __cplusplus
+diff --git a/util/osdep.c b/util/osdep.c
+index 9602b9d757..a4175ad05d 100644
+--- a/util/osdep.c
++++ b/util/osdep.c
+@@ -34,8 +34,10 @@
+ static const char *hw_version = QEMU_HW_VERSION;
+ 
+ #ifdef __APPLE__
++#if QEMU_HAVE_JIT_WRITE_PROTECT
+ __thread int8_t qemu_jit_execute_state = -1;
+ #endif
++#endif
+ 
+ int socket_set_cork(int fd, int v)
+ {

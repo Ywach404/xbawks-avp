@@ -1,0 +1,22 @@
+# Applied in order to the upstream commit pinned in UPSTREAM.md.
+#
+# Keep this honest: one file per logical change, smallest first, and every
+# one of them explained in UPSTREAM.md. The whole point of a patch series
+# over a vendored tree is that what is ours stays visible, so a patch that
+# does six unrelated things defeats the format.
+
+# Not ours. github.com/zlixas/xemu @ 99db5507, one commit, GPL-2.0.
+# Vulkan via MoltenVK, IOSurface display path, fixed-function fast depth
+# replacing geometry shaders, quad to indexed triangle conversion, NEON
+# packed SSE, Xbox kernel idle-loop halt, poll-loop sleep detection.
+# 56 files, +2270 -142. Splitting it into its ~8 separable parts is
+# possible and is deferred until something in it needs changing.
+0001-apple-silicon-fork.patch
+
+# Ours. The desktop shell removed and replaced with a headless display
+# backend. Deletes ui/xemu.c (SDL3 window plus GL context plus main) and
+# ui/xui/ (50 files of ImGui), disables the GL pgraph backend, and defaults
+# the renderer to Vulkan. Four stub functions cover everything the rest of
+# the tree asked of the shell; that number was measured with
+# tools/ui-symbols.sh, not guessed.
+0002-headless-host.patch

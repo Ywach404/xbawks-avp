@@ -1,0 +1,74 @@
+# XcodeGen is the source of truth; the .xcodeproj is generated and disposable.
+name: JITProbe
+options:
+  bundleIdPrefix: local.jitprobe
+  createIntermediateGroups: true
+  deploymentTarget:
+    visionOS: "26.0"
+
+targets:
+  JITProbe:
+    type: application
+    platform: visionOS
+    sources:
+      - Sources
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: JITProbe
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        # The journal is the only record that survives the process being
+        # killed mid probe, so it has to be reachable without the app.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: local.jitprobe.s0
+        TARGETED_DEVICE_FAMILY: "7"
+        SWIFT_VERSION: "5.0"   # Swift 5 language mode: this is a spike, not a codebase
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_STYLE: Automatic
+        # Expanded by XcodeGen from the environment at generate time, so the
+        # value reaches the generated project (which Xcode's Run button needs)
+        # without the id ever being written into this file. Empty if unset,
+        # which is the same as picking no team by hand.
+        DEVELOPMENT_TEAM: ${DEV_TEAM}
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/JITProbe-Bridging-Header.h
+        # Xcode 16+ launches debug builds through a separate debug dylib and a
+        # preview stub executor. On visionOS that indirection can leave the app
+        # sitting at the loading splash forever under the debugger, which looks
+        # like the app hanging and is actually the launch path. The probe needs
+        # a debugger attached to be worth running at all, so the indirection
+        # goes rather than the debugger.
+        ENABLE_DEBUG_DYLIB: NO
+        # The probe hand-assembles arm64 and jumps to it. Pointer
+        # authentication would require signing that address, so stay off
+        # arm64e. Third-party apps get arm64 anyway; this pins it.
+        ARCHS: arm64
+        # DEVELOPMENT_TEAM is deliberately absent: it is passed on the command
+        # line (DEV_TEAM=... make run) so a personal team id stays out of the file.
+
+schemes:
+  # Mode 1. No debugger, so what it measures is the ordinary sideload.
+  JITProbe:
+    build:
+      targets:
+        JITProbe: all
+    run:
+      config: Debug
+      debugEnabled: false
+
+  # Modes 2 and 3. Unlike the immersive probes, this one WANTS a debugger:
+  # an attached-then-detached launch is the mode the project rests on, and
+  # Xcode's Run button is the one path that reliably ptraces a process on a
+  # headset. Pick this scheme in Xcode, Run, then Debug > Detach.
+  JITProbe-Attached:
+    build:
+      targets:
+        JITProbe: all
+    run:
+      config: Debug
+      debugEnabled: true

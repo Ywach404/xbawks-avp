@@ -1,0 +1,49 @@
+== jitprobe, pid 796 ==
+CS_DEBUGGED: YES, a debugger has touched this process
+code signing status: 0x32003005 VALID GET_TASK_ALLOW ENFORCEMENT
+pthread_jit_write_protect_np: NOT RESOLVABLE
+pthread_jit_write_protect_supported_np: not resolvable (expected, the SDK marks it unavailable on visionOS)
+
+D  (plain RWX, as the iOS emulators do it): mmap RWX, no MAP_JIT, 16384 bytes
+D  (plain RWX, as the iOS emulators do it): mapped at 0x10291c000
+D  (plain RWX, as the iOS emulators do it): wrote 8 bytes
+D  (plain RWX, as the iOS emulators do it): calling the page
+== jitprobe, pid 802 ==
+CS_DEBUGGED: YES, a debugger has touched this process
+code signing status: 0x32003005 VALID GET_TASK_ALLOW ENFORCEMENT
+pthread_jit_write_protect_np: NOT RESOLVABLE
+pthread_jit_write_protect_supported_np: not resolvable (expected, the SDK marks it unavailable on visionOS)
+
+resuming at path 1: a previous launch did not survive the one before it
+A  (MAP_JIT + toggle): mmap RWX + MAP_JIT, 16384 bytes
+A  (MAP_JIT + toggle): FAILED at mmap, errno 1 (Operation not permitted)
+
+A' (MAP_JIT, no toggle): mmap RWX + MAP_JIT, 16384 bytes
+A' (MAP_JIT, no toggle): FAILED at mmap, errno 1 (Operation not permitted)
+
+B  (plain RW then mprotect RX): mmap RW, 16384 bytes
+B  (plain RW then mprotect RX): mapped at 0x1042e0000
+B  (plain RW then mprotect RX): wrote 8 bytes
+B  (plain RW then mprotect RX): mprotect to R+X
+B  (plain RW then mprotect RX): calling the page
+== jitprobe, pid 820 ==
+CS_DEBUGGED: YES, a debugger has touched this process
+code signing status: 0x32003005 VALID GET_TASK_ALLOW ENFORCEMENT
+pthread_jit_write_protect_np: NOT RESOLVABLE
+pthread_jit_write_protect_supported_np: not resolvable (expected, the SDK marks it unavailable on visionOS)
+
+resuming at path 4: a previous launch did not survive the one before it
+C  (MAP_JIT RW then mprotect RX): mmap RW, 16384 bytes
+C  (MAP_JIT RW then mprotect RX): FAILED at mmap, errno 1 (Operation not permitted)
+
+== 0 of 1 attempted paths executed this launch, CS_DEBUGGED yes ==
+== jitprobe, pid 820 ==
+CS_DEBUGGED: YES, a debugger has touched this process
+code signing status: 0x32003005 VALID GET_TASK_ALLOW ENFORCEMENT
+pthread_jit_write_protect_np: NOT RESOLVABLE
+pthread_jit_write_protect_supported_np: not resolvable (expected, the SDK marks it unavailable on visionOS)
+
+D  (plain RWX, as the iOS emulators do it): mmap RWX, no MAP_JIT, 16384 bytes
+D  (plain RWX, as the iOS emulators do it): mapped at 0x1053e8000
+D  (plain RWX, as the iOS emulators do it): wrote 8 bytes
+D  (plain RWX, as the iOS emulators do it): calling the page

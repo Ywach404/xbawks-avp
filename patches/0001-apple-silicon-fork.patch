@@ -1,0 +1,3942 @@
+From 99db55071ad8c4ac02fcdd65eb159abe68b4ae37 Mon Sep 17 00:00:00 2001
+From: Berkay Dokuyucu <berkaydokuyucu05@gmail.com>
+Date: Sat, 3 Oct 2026 21:43:06 +0300
+Subject: Apple Silicon performance fork: fast depth, Vulkan via MoltenVK, TCG
+ tuning
+
+Graphics:
+- Fast depth option (default on): fixed-function depth and polygon offset
+  instead of geometry-shader depth, consistent across all primitives
+- Quads/quad strips drawn as indexed triangles instead of geometry shaders
+- Vulkan renderer on macOS via MoltenVK: optional geometry shaders,
+  IOSurface display interop with the GL UI, portability extensions
+- GL capability cache, uniform dirty tracking (GL and Vulkan), GL fences
+  for display hand-off, skip rendering while the window is hidden
+
+CPU emulation:
+- Sleep in guest polling loops (store-free self loops) until devices make
+  progress or the vCPU is kicked
+- Halt in the Xbox kernel idle loop
+- NEON fast path for packed single-precision add/sub/mul
+- Softfloat hardfloat fix for exact zero results, larger TB jump cache,
+  fewer MAP_JIT write-protect toggles
+
+macOS: USER_INTERACTIVE QoS for emulation threads, kqueue NOTE_CRITICAL
+timers, audio workers sized to performance cores, -O3/ThinLTO with
+-mcpu=apple-m1 by default.
+
+Diagnostics (env-gated): XEMU_PERF_LOG, XEMU_TCG_STATS, XEMU_AUTO_SCREENSHOT.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ README.md                            | 138 ++++++++++++
+ accel/tcg/cpu-exec.c                 | 309 +++++++++++++++++++++++++++
+ accel/tcg/tb-jmp-cache.h             |   2 +-
+ accel/tcg/tcg-accel-ops-mttcg.c      |   1 +
+ accel/tcg/tcg-accel-ops-rr.c         |   1 +
+ build.sh                             |   8 +
+ config_spec.yml                      |   3 +
+ fpu/softfloat.c                      |  50 ++++-
+ hw/xbox/mcpx/apu/vp/vp.c             |  23 +-
+ hw/xbox/nv2a/pfifo.c                 |   5 +
+ hw/xbox/nv2a/pgraph/gl/display.c     |  65 +++++-
+ hw/xbox/nv2a/pgraph/gl/draw.c        | 217 ++++++++++++++-----
+ hw/xbox/nv2a/pgraph/gl/renderer.c    |   2 +
+ hw/xbox/nv2a/pgraph/gl/renderer.h    |  77 +++++++
+ hw/xbox/nv2a/pgraph/gl/shaders.c     |  67 +++++-
+ hw/xbox/nv2a/pgraph/gl/surface.c     |  12 +-
+ hw/xbox/nv2a/pgraph/gl/vertex.c      |   4 +
+ hw/xbox/nv2a/pgraph/glsl/geom.c      |  91 ++++++++
+ hw/xbox/nv2a/pgraph/glsl/geom.h      |  27 +++
+ hw/xbox/nv2a/pgraph/glsl/psh.c       |  34 ++-
+ hw/xbox/nv2a/pgraph/glsl/psh.h       |   1 +
+ hw/xbox/nv2a/pgraph/glsl/shaders.c   |  41 +++-
+ hw/xbox/nv2a/pgraph/glsl/shaders.h   |   2 +
+ hw/xbox/nv2a/pgraph/pgraph.c         |  12 ++
+ hw/xbox/nv2a/pgraph/pgraph.h         |   3 +
+ hw/xbox/nv2a/pgraph/profile.c        |  44 ++++
+ hw/xbox/nv2a/pgraph/vk/display.c     |  74 ++++++-
+ hw/xbox/nv2a/pgraph/vk/draw.c        | 163 ++++++++++++--
+ hw/xbox/nv2a/pgraph/vk/glsl.h        |  42 ++++
+ hw/xbox/nv2a/pgraph/vk/gpuprops.c    |   8 +
+ hw/xbox/nv2a/pgraph/vk/instance.c    |  70 ++++++
+ hw/xbox/nv2a/pgraph/vk/iosurface.c   |  54 +++++
+ hw/xbox/nv2a/pgraph/vk/iosurface.h   |  26 +++
+ hw/xbox/nv2a/pgraph/vk/meson.build   |   6 +
+ hw/xbox/nv2a/pgraph/vk/renderer.c    |   8 +-
+ hw/xbox/nv2a/pgraph/vk/renderer.h    |  21 +-
+ hw/xbox/nv2a/pgraph/vk/shaders.c     |  37 ++--
+ include/qemu/osdep.h                 |  17 +-
+ include/qemu/thread.h                |  13 ++
+ include/qemu/xbox-poll.h             |  20 ++
+ meson.build                          |  20 ++
+ scripts/download-macos-libs.py       |   8 +-
+ system/cpus.c                        |   5 +
+ target/i386/helper.h                 |   4 +
+ target/i386/ops_sse.h                |   3 +
+ target/i386/tcg/fpu_helper.c         |  15 ++
+ target/i386/tcg/sse-fast.h           | 134 ++++++++++++
+ target/i386/tcg/system/misc_helper.c |  80 +++++++
+ target/i386/tcg/translate.c          | 209 ++++++++++++++++++
+ ui/xemu.c                            |  20 ++
+ ui/xui/main-menu.cc                  |   4 +
+ ui/xui/main.cc                       |  13 ++
+ util/meson.build                     |   1 +
+ util/osdep.c                         |   4 +
+ util/qemu-timer.c                    |  39 ++++
+ util/xbox-poll.c                     |  55 +++++
+ 56 files changed, 2270 insertions(+), 142 deletions(-)
+ create mode 100644 hw/xbox/nv2a/pgraph/vk/iosurface.c
+ create mode 100644 hw/xbox/nv2a/pgraph/vk/iosurface.h
+ create mode 100644 include/qemu/xbox-poll.h
+ create mode 100644 target/i386/tcg/sse-fast.h
+ create mode 100644 util/xbox-poll.c
+
+diff --git a/README.md b/README.md
+index 776bbfa45c..9ee89f8436 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1,139 @@
++# xemu for Apple Silicon (unofficial performance fork)
++
++An **unofficial** fork of [xemu](https://xemu.app), the original Xbox emulator,
++tuned for Apple Silicon Macs (M1, M2, M3, M4, M5), especially fanless MacBook
++Airs. It focuses on reaching full speed and using less battery.
++
++> This is not an official xemu release and is not affiliated with the xemu
++> project. Bugs found in this build should be reported here, not upstream.
++
++## Results
++
++Measured on a **MacBook Air M4** (macOS 26, 60 Hz display, VSync on), using the
++*Crash Twinsanity* title screen and intro. CPU figures are host cores in use, sampled with
++macOS `sample` and `ps`.
++
++### Frame rate
++
++| Build | FPS |
++|---|---|
++| Upstream xemu 0.8 (precise depth through geometry shaders) | **18.3** |
++| This fork | **60** (VSync locked) |
++
++On Apple's OpenGL, geometry shaders are emulated by the driver. Upstream
++v0.8.x sends every triangle through one for depth precision, which is why
++v0.8 can be unplayable on Macs that ran v0.7 fine.
++
++### CPU use at 60 FPS (normal power mode)
++
++| Step | Process CPU | Emulated CPU thread |
++|---|---|---|
++| Timer, JIT and audio fixes | 1.30 cores | 97% |
++| + Xbox kernel idle loop halts instead of spinning | 0.97 | 42% |
++| + float, uniform cache, NEON SSE, bigger jump cache | **0.90** | **32%** |
++
++Main emulation loop exits: **67 million/s → 73 thousand/s**. Jump cache
++misses: **680k/s → 287k/s**. Time spent in software float: **−49%**.
++
++### CPU use at 60 FPS (battery, Low Power Mode)
++
++| | Before | After |
++|---|---|---|
++| Whole process | 1.36 cores | **1.10 cores** (0.80 average over 3 min) |
++| Emulated CPU thread | 81% | **38%** |
++| GPU thread, OpenGL | 39.5% | **32%** |
++| GPU thread, Vulkan (new on macOS) | — | **18–22%** |
++
++Less CPU means a cooler MacBook Air, longer battery life, and more headroom
++before the chip has to throttle.
++
++## What changed
++
++**Graphics (NV2A)**
++- **Fast depth** (Settings → Display → *Fast depth*, on by default). Uses
++  fixed-function depth plus polygon offset instead of geometry-shader
++  depth. Every primitive uses the same depth path, so multi-pass effects don't
++  z-fight or flicker. Early-Z and hidden-surface removal stay enabled on Apple's
++  tile-based GPUs.
++- **Quads become indexed triangles**, so HUDs, text, sprites and particles
++  skip the geometry shader entirely.
++- **Vulkan renderer on macOS** through MoltenVK (bundled). It works without
++  geometry shaders, and frames reach the UI with no copy through an IOSurface
++  shared with OpenGL. Its GPU thread uses about 30% less CPU than OpenGL.
++- OpenGL state cache (no redundant `glEnable`/`glDisable` calls), shader uniform
++  dirty tracking, and GPU fences instead of `glFinish` for display hand-off.
++- Rendering stops while the window is hidden or minimized.
++
++**CPU emulation (TCG, x86 → arm64)**
++- **Polling-loop sleep**: games spin on memory the GPU writes, for example the
++  Direct3D push-buffer fence wait. The translator detects these store-free loops
++  and they sleep until the emulated GPU makes progress or an interrupt arrives.
++  This cut emulated CPU time roughly in half in GPU-bound scenes.
++- **Idle loop halt**: the Xbox kernel's idle loop halts the virtual CPU
++  until the next interrupt.
++- **NEON packed SSE**: `addps`, `subps` and `mulps` run as one ARM vector instruction. Results and
++  exception flags match QEMU's softfloat bit for bit (6.2 million test vectors).
++- Fixed the softfloat hardware-float fast path rejecting exact-zero results (24
++  million test cases verified), and enlarged the jump cache to 16K entries.
++- Fewer redundant MAP_JIT write-protect toggles.
++
++**macOS integration**
++- Emulation threads run at the `USER_INTERACTIVE` QoS class (performance cores).
++- Precise kqueue `NOTE_CRITICAL` timers: about 12 µs late, versus about 110 µs for `nanosleep`.
++- Audio voice workers are sized to the Mac's number of performance cores.
++- Builds with `-O3`, ThinLTO and `-mcpu=apple-m1`, so one binary runs on every
++  M-series chip. `-ffast-math` is deliberately not used, because guest floats need IEEE
++  semantics.
++
++## Install
++
++1. Download `xemu-apple-silicon.zip` from
++   [Releases](../../releases), unzip it, and move `xemu.app` to Applications.
++2. The app is ad-hoc signed, not notarized, so remove the quarantine flag
++   once:
++   ```sh
++   xattr -dr com.apple.quarantine /Applications/xemu.app
++   ```
++3. Provide your own MCPX boot ROM, BIOS and HDD image as with upstream xemu
++   (see the [xemu setup guide](https://xemu.app/docs/required-files/)). None
++   are included.
++
++Requires an Apple Silicon Mac running macOS 14 Sonoma or later. Intel Macs are not supported.
++
++**Tips**
++- Keep *Fast depth* on. Turn it off only if a game shows depth artifacts. It is
++  then much slower on Macs, as in upstream.
++- Try *Renderer → Vulkan* for lower CPU use. OpenGL stays the default because
++  it has had more testing.
++
++## Known limitations
++
++- Most testing so far has been on one game's title screen and intro on an M4.
++  Real gameplay across many titles still needs testing; reports are welcome.
++- Fast depth can cause depth artifacts in a few games that rely on exact NV2A depth precision.
++- Vulkan on macOS has no wide lines or logic ops, and flat-shaded geometry
++  that uses the "last vertex" convention may show wrong colors.
++- Not checked on M1, M2, M3 or M5 hardware yet. The binary targets the baseline M1 instruction set.
++
++## Building
++
++```sh
++brew install ninja pkgconf meson molten-vk vulkan-headers dylibbundler
++./build.sh                      # portable build (-mcpu=apple-m1)
++XEMU_MCPU=native ./build.sh     # tuned for your own chip only
++```
++
++Debug aids (environment variables):
++- `XEMU_PERF_LOG=1` prints FPS and renderer counters every second.
++- `XEMU_TCG_STATS=1` (or `=prof`) prints CPU-emulator statistics and finds hot guest loops.
++- `XEMU_AUTO_SCREENSHOT=<seconds>` saves one screenshot after that many seconds.
++
++## License
++
++xemu is GPL-2.0 (see [LICENSE](LICENSE)); this fork is under the same license.
++The bundled MoltenVK is Apache-2.0. All credit for xemu goes to the xemu
++project and its contributors.
++
++---
++
+ Please visit [https://xemu.app](https://xemu.app) for more information.
+diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+index d93cd1734d..1433c0df5a 100644
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -953,21 +953,316 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
+ 
+ /* main execution loop */
+ 
++/*
++ * XEMU_TCG_STATS diagnostics: per second, count main loop iterations and why
++ * execution left translated code, plus the guest PCs most often resumed at
++ * after an unchainable exit (with surrounding code bytes).
++ */
++#define TCG_STATS_SLOTS 1024
++static struct {
++    int enabled;
++    int64_t ts;
++    uint64_t iters, gen, null_exit, add_jump, page2, irq, exc;
++    struct { vaddr pc; uint32_t count; } pcs[TCG_STATS_SLOTS];
++} tcg_stats = { .enabled = -1 };
++
++static void tcg_stats_record_pc(vaddr pc)
++{
++    unsigned h = (pc * 0x9E3779B1u) % TCG_STATS_SLOTS;
++    for (int i = 0; i < 8; i++) {
++        unsigned j = (h + i) % TCG_STATS_SLOTS;
++        if (tcg_stats.pcs[j].pc == pc || !tcg_stats.pcs[j].count) {
++            tcg_stats.pcs[j].pc = pc;
++            tcg_stats.pcs[j].count++;
++            return;
++        }
++    }
++}
++
++#if defined(__APPLE__) && defined(__aarch64__)
++/*
++ * With XEMU_TCG_STATS=prof, sample the host PC of the vCPU thread on SIGPROF
++ * to find guest code that loops inside chained translated code, which never
++ * shows up as a main loop iteration.
++ */
++#include <signal.h>
++#include <sys/time.h>
++#include <sys/ucontext.h>
++#include <dlfcn.h>
++#include "system/memory.h"
++#define TCG_PROF_SLOTS 4096
++static uintptr_t tcg_prof_pcs[TCG_PROF_SLOTS];
++static uint32_t tcg_prof_regs[TCG_PROF_SLOTS][8];
++static unsigned tcg_prof_n;
++static pthread_t tcg_prof_thread;
++
++static void tcg_prof_handler(int sig, siginfo_t *info, void *uc_)
++{
++    ucontext_t *uc = uc_;
++    if (!pthread_equal(pthread_self(), tcg_prof_thread)) {
++        return;
++    }
++    unsigned n = qatomic_read(&tcg_prof_n);
++    if (n < TCG_PROF_SLOTS) {
++        tcg_prof_pcs[n] = uc->uc_mcontext->__ss.__pc;
++        if (current_cpu) {
++            CPUArchState *env = cpu_env(current_cpu);
++            for (int i = 0; i < 8; i++) {
++                tcg_prof_regs[n][i] = ((uint32_t *)env)[i]; /* i386: regs[] first */
++            }
++        }
++        qatomic_set(&tcg_prof_n, n + 1);
++    }
++}
++
++static void *tcg_prof_kicker(void *opaque)
++{
++    for (;;) {
++        g_usleep(1000);
++        pthread_kill(tcg_prof_thread, SIGPROF);
++    }
++    return NULL;
++}
++
++static void tcg_prof_start(void)
++{
++    struct sigaction sa = { .sa_sigaction = tcg_prof_handler,
++                            .sa_flags = SA_SIGINFO | SA_RESTART };
++    sigset_t set;
++    pthread_t kicker;
++
++    tcg_prof_thread = pthread_self();
++    sigaction(SIGPROF, &sa, NULL);
++    sigemptyset(&set);
++    sigaddset(&set, SIGPROF);
++    pthread_sigmask(SIG_UNBLOCK, &set, NULL);
++    pthread_create(&kicker, NULL, tcg_prof_kicker, NULL);
++}
++
++static int tcg_prof_cmp(const void *a, const void *b)
++{
++    const TranslationBlock *x = *(TranslationBlock * const *)a;
++    const TranslationBlock *y = *(TranslationBlock * const *)b;
++    return x < y ? -1 : x > y;
++}
++
++static void tcg_prof_report(CPUState *cpu)
++{
++    unsigned n = qatomic_read(&tcg_prof_n);
++    TranslationBlock *tbs[TCG_PROF_SLOTS];
++    unsigned in_jit = 0;
++    for (unsigned i = 0; i < n; i++) {
++        tbs[i] = tcg_tb_lookup(tcg_prof_pcs[i]);
++        in_jit += tbs[i] != NULL;
++    }
++    /* Group samples outside translation blocks by host symbol */
++    {
++        struct { const char *sym; unsigned count; } syms[64];
++        int nsyms = 0;
++        for (unsigned i = 0; i < n; i++) {
++            if (tbs[i]) {
++                continue;
++            }
++            Dl_info dli;
++            const char *sym = "?";
++            if (dladdr((void *)tcg_prof_pcs[i], &dli) && dli.dli_sname) {
++                sym = dli.dli_sname;
++            } else if (in_code_gen_buffer((void *)tcg_prof_pcs[i])) {
++                sym = "<jit, no tb>";
++            }
++            int k;
++            for (k = 0; k < nsyms && strcmp(syms[k].sym, sym); k++) {
++            }
++            if (k == nsyms && nsyms < ARRAY_SIZE(syms)) {
++                syms[nsyms].sym = sym;
++                syms[nsyms++].count = 0;
++            }
++            if (k < nsyms) {
++                syms[k].count++;
++            }
++        }
++        for (int t = 0; t < 12; t++) {
++            int best = -1;
++            for (int k = 0; k < nsyms; k++) {
++                if (syms[k].count && (best < 0 || syms[k].count > syms[best].count)) {
++                    best = k;
++                }
++            }
++            if (best < 0) {
++                break;
++            }
++            fprintf(stderr, "tcgprof:   host %4.1f%% %s\n",
++                    syms[best].count * 100.0 / n, syms[best].sym);
++            syms[best].count = 0;
++        }
++    }
++    /* Hottest raw host PCs, with their TB if any */
++    {
++        uintptr_t pcs[TCG_PROF_SLOTS];
++        memcpy(pcs, tcg_prof_pcs, n * sizeof(pcs[0]));
++        qsort(pcs, n, sizeof(pcs[0]), tcg_prof_cmp);
++        for (int t = 0; t < 4; t++) {
++            uintptr_t bestpc = 0;
++            unsigned bestc = 0;
++            for (unsigned i = 0; i < n;) {
++                unsigned j = i;
++                while (j < n && pcs[j] == pcs[i]) {
++                    j++;
++                }
++                if (pcs[i] && j - i > bestc) {
++                    bestc = j - i;
++                    bestpc = pcs[i];
++                }
++                i = j;
++            }
++            if (!bestc) {
++                break;
++            }
++            TranslationBlock *tb = tcg_tb_lookup(bestpc);
++            fprintf(stderr, "tcgprof:   hostpc %lx %4.1f%% tb=%p jit=%d\n",
++                    (unsigned long)bestpc, bestc * 100.0 / n, tb,
++                    in_code_gen_buffer((void *)bestpc));
++            for (unsigned i = 0; i < n; i++) {
++                if (pcs[i] == bestpc) {
++                    pcs[i] = 0;
++                }
++            }
++        }
++    }
++    qsort(tbs, n, sizeof(tbs[0]), tcg_prof_cmp);
++    fprintf(stderr, "tcgprof: %u samples, %u in translated code\n", n, in_jit);
++    for (int k = 0; k < 6; k++) {
++        TranslationBlock *best = NULL;
++        unsigned best_count = 0;
++        for (unsigned i = 0; i < n;) {
++            unsigned j = i;
++            while (j < n && tbs[j] == tbs[i]) {
++                j++;
++            }
++            if (tbs[i] && j - i > best_count) {
++                best = tbs[i];
++                best_count = j - i;
++            }
++            i = j;
++        }
++        if (!best) {
++            break;
++        }
++        uint8_t code[48];
++        tb_page_addr_t phys = tb_page_addr0(best);
++        fprintf(stderr, "tcgprof:   %4.1f%% tb phys=%08" PRIx64 " size=%u icount=%u flags=%x bytes=",
++                best_count * 100.0 / n, (uint64_t)phys, best->size,
++                tb_cflags(best) & CF_COUNT_MASK, best->flags);
++        memcpy(code, qemu_map_ram_ptr(NULL, phys), MIN(sizeof(code), best->size));
++        for (int i = 0; i < (int)MIN(sizeof(code), best->size); i++) {
++            fprintf(stderr, "%02x", code[i]);
++        }
++        fprintf(stderr, "\n");
++        for (unsigned i = 0; i < n; i++) {
++            if (tcg_tb_lookup(tcg_prof_pcs[i]) == best) {
++                uint32_t *rg = tcg_prof_regs[i];
++                uint32_t mem = 0;
++                cpu_memory_rw_debug(cpu, rg[2], &mem, 4, false);
++                fprintf(stderr, "tcgprof:     eax=%08x ecx=%08x edx=%08x ebx=%08x esp=%08x ebp=%08x esi=%08x edi=%08x [edx]=%08x\n",
++                        rg[0], rg[1], rg[2], rg[3], rg[4], rg[5], rg[6], rg[7], mem);
++                break;
++            }
++        }
++        for (unsigned i = 0; i < n; i++) {
++            if (tbs[i] == best) {
++                tbs[i] = NULL;
++            }
++        }
++    }
++    qatomic_set(&tcg_prof_n, 0);
++}
++#else
++static void tcg_prof_start(void) {}
++static void tcg_prof_report(CPUState *cpu) {}
++#endif
++
++static void tcg_stats_report(CPUState *cpu)
++{
++    int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
++    double secs = (now - tcg_stats.ts) / 1e6;
++    if (secs < 1.0) {
++        return;
++    }
++    tcg_prof_report(cpu);
++    fprintf(stderr, "tcg: iters=%.0f/s gen=%.0f/s null_exit=%.0f/s "
++            "add_jump=%.0f/s page2=%.0f/s irq=%.0f/s exc=%.0f/s\n",
++            tcg_stats.iters / secs, tcg_stats.gen / secs,
++            tcg_stats.null_exit / secs, tcg_stats.add_jump / secs,
++            tcg_stats.page2 / secs, tcg_stats.irq / secs,
++            tcg_stats.exc / secs);
++    for (int n = 0; n < 6; n++) {
++        int best = -1;
++        for (int i = 0; i < TCG_STATS_SLOTS; i++) {
++            if (tcg_stats.pcs[i].count &&
++                (best < 0 || tcg_stats.pcs[i].count > tcg_stats.pcs[best].count)) {
++                best = i;
++            }
++        }
++        if (best < 0) {
++            break;
++        }
++        uint8_t code[32];
++        vaddr pc = tcg_stats.pcs[best].pc;
++        fprintf(stderr, "tcg:   resume pc=%08" VADDR_PRIx " %.0f/s bytes[-24..+8]=",
++                pc, tcg_stats.pcs[best].count / secs);
++        if (cpu_memory_rw_debug(cpu, pc - 24, code, sizeof(code), false) == 0) {
++            for (int i = 0; i < (int)sizeof(code); i++) {
++                fprintf(stderr, "%02x", code[i]);
++            }
++        }
++        fprintf(stderr, "\n");
++        tcg_stats.pcs[best].count = 0;
++    }
++    memset(tcg_stats.pcs, 0, sizeof(tcg_stats.pcs));
++    tcg_stats.iters = tcg_stats.gen = tcg_stats.null_exit = 0;
++    tcg_stats.add_jump = tcg_stats.page2 = tcg_stats.irq = tcg_stats.exc = 0;
++    tcg_stats.ts = now;
++}
++
+ static int __attribute__((noinline))
+ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+ {
+     int ret;
+ 
++    if (tcg_stats.enabled < 0) {
++        const char *env = getenv("XEMU_TCG_STATS");
++        tcg_stats.enabled = env != NULL;
++        tcg_stats.ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
++        if (env && !strcmp(env, "prof")) {
++            tcg_prof_start();
++        }
++    }
++
+     /* if an exception is pending, we execute it here */
+     while (!cpu_handle_exception(cpu, &ret)) {
+         TranslationBlock *last_tb = NULL;
+         int tb_exit = 0;
++        bool stats = tcg_stats.enabled;
++        bool prev_null_exit = false;
++
++        if (stats) {
++            tcg_stats.exc++;
++        }
+ 
+         while (!cpu_handle_interrupt(cpu, &last_tb)) {
+             TranslationBlock *tb;
+             TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
+             s.cflags = cpu->cflags_next_tb;
+ 
++            if (stats) {
++                if ((++tcg_stats.iters & 0xFFFF) == 0) {
++                    tcg_stats_report(cpu);
++                }
++                if (prev_null_exit) {
++                    tcg_stats_record_pc(s.pc);
++                }
++            }
++
+             /*
+              * When requested, use an exact setting for cflags for the next
+              * execution.  This is used for icount, precise smc, and stop-
+@@ -993,6 +1288,9 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+                 mmap_lock();
+                 tb = tb_gen_code(cpu, s);
+                 mmap_unlock();
++                if (stats) {
++                    tcg_stats.gen++;
++                }
+ 
+                 /*
+                  * We add the TB in the virtual pc hash table
+@@ -1012,16 +1310,27 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+              * for the second page can change.
+              */
+             if (tb_page_addr1(tb) != -1) {
++                if (stats && last_tb) {
++                    tcg_stats.page2++;
++                }
+                 last_tb = NULL;
+             }
+ #endif
+             /* See if we can patch the calling TB. */
+             if (last_tb) {
++                if (stats) {
++                    tcg_stats.add_jump++;
++                }
+                 tb_add_jump(last_tb, tb_exit, tb);
+             }
+ 
+             cpu_loop_exec_tb(cpu, tb, s.pc, &last_tb, &tb_exit);
+ 
++            if (stats) {
++                prev_null_exit = last_tb == NULL;
++                tcg_stats.null_exit += prev_null_exit;
++            }
++
+             /* Try to align the host and virtual clocks
+                if the guest is in advance */
+             align_clocks(sc, cpu);
+diff --git a/accel/tcg/tb-jmp-cache.h b/accel/tcg/tb-jmp-cache.h
+index c3a505e394..9aacc66e76 100644
+--- a/accel/tcg/tb-jmp-cache.h
++++ b/accel/tcg/tb-jmp-cache.h
+@@ -12,7 +12,7 @@
+ #include "qemu/rcu.h"
+ #include "exec/cpu-common.h"
+ 
+-#define TB_JMP_CACHE_BITS 12
++#define TB_JMP_CACHE_BITS 14
+ #define TB_JMP_CACHE_SIZE (1 << TB_JMP_CACHE_BITS)
+ 
+ /*
+diff --git a/accel/tcg/tcg-accel-ops-mttcg.c b/accel/tcg/tcg-accel-ops-mttcg.c
+index cf1ee7ac25..25dbb198ff 100644
+--- a/accel/tcg/tcg-accel-ops-mttcg.c
++++ b/accel/tcg/tcg-accel-ops-mttcg.c
+@@ -70,6 +70,7 @@ static void *mttcg_cpu_thread_fn(void *arg)
+     g_assert(!icount_enabled());
+ 
+     rcu_register_thread();
++    qemu_thread_set_latency_critical();
+     force_rcu.notifier.notify = mttcg_force_rcu;
+     force_rcu.cpu = cpu;
+     rcu_add_force_rcu_notifier(&force_rcu.notifier);
+diff --git a/accel/tcg/tcg-accel-ops-rr.c b/accel/tcg/tcg-accel-ops-rr.c
+index f84342e044..a4bf4bdd5e 100644
+--- a/accel/tcg/tcg-accel-ops-rr.c
++++ b/accel/tcg/tcg-accel-ops-rr.c
+@@ -184,6 +184,7 @@ static void *rr_cpu_thread_fn(void *arg)
+ 
+     assert(tcg_enabled());
+     rcu_register_thread();
++    qemu_thread_set_latency_critical();
+     force_rcu.notify = rr_force_rcu;
+     rcu_add_force_rcu_notifier(&force_rcu);
+     tcg_register_thread();
+diff --git a/build.sh b/build.sh
+index 312f36c4f5..2bd0ebb957 100755
+--- a/build.sh
++++ b/build.sh
+@@ -228,6 +228,14 @@ case "$platform" in # Adjust compilation options based on platform
+                         -arch ${target_arch} \
+                         -isysroot ${sdk}"
+         sys_ldflags='-headerpad_max_install_names'
++        if [ "$target_arch" == "arm64" ] && [ -z "$debug" ]; then
++            # Target the baseline Apple Silicon core so one binary runs on every
++            # M-series Mac (set XEMU_MCPU=native to tune for the build host).
++            # -ffast-math is deliberately not used: guest FPU and NV2A shader
++            # emulation rely on IEEE NaN/Inf/signed-zero semantics.
++            build_cflags="${build_cflags} -mcpu=${XEMU_MCPU:-apple-m1}"
++            opts="$opts -Doptimization=3 -Db_lto=true -Db_lto_mode=thin"
++        fi
+         export PKG_CONFIG_LIBDIR="${lib_prefix}/lib/pkgconfig"
+         opts="$opts --disable-cocoa --cross-prefix="
+         postbuild='package_macos'
+diff --git a/config_spec.yml b/config_spec.yml
+index c933b54daf..25294fed92 100644
+--- a/config_spec.yml
++++ b/config_spec.yml
+@@ -237,6 +237,9 @@ display:
+     surface_scale:
+       type: integer
+       default: 1
++    fast_depth:
++      type: bool
++      default: true
+   filtering:
+     type: enum
+     values: [linear, nearest]
+diff --git a/fpu/softfloat.c b/fpu/softfloat.c
+index 8094358c2e..428a19b1a7 100644
+--- a/fpu/softfloat.c
++++ b/fpu/softfloat.c
+@@ -334,10 +334,17 @@ static inline bool f64_is_inf(union_float64 a)
+     return float64_is_infinity(a.s);
+ }
+ 
++/*
++ * zero_exact: an exactly zero hardware result needs no soft fallback. True for
++ * add/sub, where a zero result from zero-or-normal inputs can only come from
++ * exact cancellation (+0 under round-to-nearest-even, which can_use_fpu
++ * guarantees). Tiny non-zero results still go soft for underflow and
++ * flush-to-zero handling.
++ */
+ static inline float32
+ float32_gen2(float32 xa, float32 xb, float_status *s,
+              hard_f32_op2_fn hard, soft_f32_op2_fn soft,
+-             f32_check_fn pre, f32_check_fn post)
++             f32_check_fn pre, f32_check_fn post, bool zero_exact)
+ {
+     union_float32 ua, ub, ur;
+ 
+@@ -356,7 +363,8 @@ float32_gen2(float32 xa, float32 xb, float_status *s,
+     ur.h = hard(ua.h, ub.h);
+     if (unlikely(f32_is_inf(ur))) {
+         float_raise(float_flag_overflow, s);
+-    } else if (unlikely(fabsf(ur.h) <= FLT_MIN) && post(ua, ub)) {
++    } else if (unlikely(fabsf(ur.h) <= FLT_MIN) &&
++               !(zero_exact && ur.h == 0) && post(ua, ub)) {
+         goto soft;
+     }
+     return ur.s;
+@@ -368,7 +376,7 @@ float32_gen2(float32 xa, float32 xb, float_status *s,
+ static inline float64
+ float64_gen2(float64 xa, float64 xb, float_status *s,
+              hard_f64_op2_fn hard, soft_f64_op2_fn soft,
+-             f64_check_fn pre, f64_check_fn post)
++             f64_check_fn pre, f64_check_fn post, bool zero_exact)
+ {
+     union_float64 ua, ub, ur;
+ 
+@@ -387,7 +395,8 @@ float64_gen2(float64 xa, float64 xb, float_status *s,
+     ur.h = hard(ua.h, ub.h);
+     if (unlikely(f64_is_inf(ur))) {
+         float_raise(float_flag_overflow, s);
+-    } else if (unlikely(fabs(ur.h) <= DBL_MIN) && post(ua, ub)) {
++    } else if (unlikely(fabs(ur.h) <= DBL_MIN) &&
++               !(zero_exact && ur.h == 0) && post(ua, ub)) {
+         goto soft;
+     }
+     return ur.s;
+@@ -1980,6 +1989,27 @@ static bool f32_addsubmul_post(union_float32 a, union_float32 b)
+     return !(float32_is_zero(a.s) && float32_is_zero(b.s));
+ }
+ 
++/*
++ * Multiplication: with zero-or-normal inputs, a zero input gives an exact
++ * signed zero product. Only tiny products of two non-zero inputs (underflow)
++ * need the soft fallback.
++ */
++static bool f32_mul_post(union_float32 a, union_float32 b)
++{
++    if (QEMU_HARDFLOAT_2F32_USE_FP) {
++        return !(fpclassify(a.h) == FP_ZERO || fpclassify(b.h) == FP_ZERO);
++    }
++    return !(float32_is_zero(a.s) || float32_is_zero(b.s));
++}
++
++static bool f64_mul_post(union_float64 a, union_float64 b)
++{
++    if (QEMU_HARDFLOAT_2F64_USE_FP) {
++        return !(fpclassify(a.h) == FP_ZERO || fpclassify(b.h) == FP_ZERO);
++    }
++    return !(float64_is_zero(a.s) || float64_is_zero(b.s));
++}
++
+ static bool f64_addsubmul_post(union_float64 a, union_float64 b)
+ {
+     if (QEMU_HARDFLOAT_2F64_USE_FP) {
+@@ -1993,14 +2023,14 @@ static float32 float32_addsub(float32 a, float32 b, float_status *s,
+                               hard_f32_op2_fn hard, soft_f32_op2_fn soft)
+ {
+     return float32_gen2(a, b, s, hard, soft,
+-                        f32_is_zon2, f32_addsubmul_post);
++                        f32_is_zon2, f32_addsubmul_post, true);
+ }
+ 
+ static float64 float64_addsub(float64 a, float64 b, float_status *s,
+                               hard_f64_op2_fn hard, soft_f64_op2_fn soft)
+ {
+     return float64_gen2(a, b, s, hard, soft,
+-                        f64_is_zon2, f64_addsubmul_post);
++                        f64_is_zon2, f64_addsubmul_post, true);
+ }
+ 
+ float32 QEMU_FLATTEN
+@@ -2170,14 +2200,14 @@ float32 QEMU_FLATTEN
+ float32_mul(float32 a, float32 b, float_status *s)
+ {
+     return float32_gen2(a, b, s, hard_f32_mul, soft_f32_mul,
+-                        f32_is_zon2, f32_addsubmul_post);
++                        f32_is_zon2, f32_mul_post, false);
+ }
+ 
+ float64 QEMU_FLATTEN
+ float64_mul(float64 a, float64 b, float_status *s)
+ {
+     return float64_gen2(a, b, s, hard_f64_mul, soft_f64_mul,
+-                        f64_is_zon2, f64_addsubmul_post);
++                        f64_is_zon2, f64_mul_post, false);
+ }
+ 
+ float64 float64r32_mul(float64 a, float64 b, float_status *status)
+@@ -2578,14 +2608,14 @@ float32 QEMU_FLATTEN
+ float32_div(float32 a, float32 b, float_status *s)
+ {
+     return float32_gen2(a, b, s, hard_f32_div, soft_f32_div,
+-                        f32_div_pre, f32_div_post);
++                        f32_div_pre, f32_div_post, false);
+ }
+ 
+ float64 QEMU_FLATTEN
+ float64_div(float64 a, float64 b, float_status *s)
+ {
+     return float64_gen2(a, b, s, hard_f64_div, soft_f64_div,
+-                        f64_div_pre, f64_div_post);
++                        f64_div_pre, f64_div_post, false);
+ }
+ 
+ float64 float64r32_div(float64 a, float64 b, float_status *status)
+diff --git a/hw/xbox/mcpx/apu/vp/vp.c b/hw/xbox/mcpx/apu/vp/vp.c
+index c57ecb634f..533ca78efe 100644
+--- a/hw/xbox/mcpx/apu/vp/vp.c
++++ b/hw/xbox/mcpx/apu/vp/vp.c
+@@ -20,6 +20,10 @@
+  */
+ 
+ #include "hw/xbox/mcpx/apu/apu_int.h"
++
++#ifdef __APPLE__
++#include <sys/sysctl.h>
++#endif
+ #include "adpcm.h"
+ 
+ static const struct {
+@@ -1764,11 +1768,28 @@ voice_work_dispatch(MCPXAPUState *d,
+     qemu_mutex_unlock(&vwd->lock);
+ }
+ 
++static int default_num_voice_workers(void)
++{
++#ifdef __APPLE__
++    /* Voices are dispatched to every worker each 32-sample frame (1500 Hz).
++     * Using all cores, efficiency cores included, mostly adds wakeups and
++     * waiting on the slowest worker; half the performance cores is enough.
++     */
++    int perf_cores = 0;
++    size_t len = sizeof(perf_cores);
++    if (sysctlbyname("hw.perflevel0.logicalcpu", &perf_cores, &len, NULL, 0) == 0 &&
++        perf_cores > 0) {
++        return MAX(2, perf_cores / 2);
++    }
++#endif
++    return SDL_GetNumLogicalCPUCores();
++}
++
+ static void voice_work_init(MCPXAPUState *d)
+ {
+     VoiceWorkDispatch *vwd = &d->vp.voice_work_dispatch;
+ 
+-    int num_workers = g_config.audio.vp.num_workers ?: SDL_GetNumLogicalCPUCores();
++    int num_workers = g_config.audio.vp.num_workers ?: default_num_voice_workers();
+     vwd->num_workers = MAX(1, MIN(num_workers, MAX_VOICE_WORKERS));
+     vwd->workers = g_malloc0_n(vwd->num_workers, sizeof(VoiceWorker));
+     vwd->workers_should_exit = false;
+diff --git a/hw/xbox/nv2a/pfifo.c b/hw/xbox/nv2a/pfifo.c
+index ff4625c258..fe3ca12206 100644
+--- a/hw/xbox/nv2a/pfifo.c
++++ b/hw/xbox/nv2a/pfifo.c
+@@ -20,6 +20,7 @@
+  */
+ 
+ #include "nv2a_int.h"
++#include "qemu/xbox-poll.h"
+ 
+ typedef struct RAMHTEntry {
+     uint32_t handle;
+@@ -456,6 +457,7 @@ void *pfifo_thread(void *arg)
+     pgraph_init_thread(d);
+ 
+     rcu_register_thread();
++    qemu_thread_set_latency_critical();
+ 
+     qemu_mutex_lock(&d->pfifo.lock);
+     while (true) {
+@@ -469,6 +471,9 @@ void *pfifo_thread(void *arg)
+ 
+         pgraph_process_pending_reports(d);
+ 
++        /* The guest may be polling for push buffer progress */
++        xbox_poll_notify();
++
+         if (!d->pfifo.fifo_kick) {
+             qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
+ 
+diff --git a/hw/xbox/nv2a/pgraph/gl/display.c b/hw/xbox/nv2a/pgraph/gl/display.c
+index fafcd72061..7bb5a77546 100644
+--- a/hw/xbox/nv2a/pgraph/gl/display.c
++++ b/hw/xbox/nv2a/pgraph/gl/display.c
+@@ -114,6 +114,15 @@ void pgraph_gl_finalize_display(PGRAPHState *pg)
+ 
+     glo_set_current(g_nv2a_context_display);
+ 
++    if (r->display_fence) {
++        glDeleteSync(r->display_fence);
++        r->display_fence = 0;
++    }
++    if (r->ui_fence) {
++        glDeleteSync(r->ui_fence);
++        r->ui_fence = 0;
++    }
++
+     glDeleteTextures(1, &r->gl_display_buffer);
+     r->gl_display_buffer = 0;
+ 
+@@ -363,13 +372,30 @@ static void render_display(NV2AState *d, SurfaceBinding *surface)
+         GL_TEXTURE_2D, 0, 0);
+ }
+ 
+-static void gl_fence(void)
++/*
++ * Contexts sharing the display buffer are ordered with GPU-side waits instead
++ * of CPU fences, so neither the NV2A thread nor the UI thread stalls on GPU
++ * completion every frame:
++ *
++ *   render ctx:  upload surface -> fence U
++ *   display ctx: wait U, wait UI fence -> render display buffer -> fence D
++ *   render ctx:  wait D (later draws can't overwrite the surface early)
++ *   UI ctx:      wait D -> composite display buffer -> UI fence
++ */
++static GLsync gl_fence_flush(void)
+ {
+     GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+-    int result = glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT,
+-                                         (GLuint64)(5000000000));
+-    assert(result == GL_CONDITION_SATISFIED || result == GL_ALREADY_SIGNALED);
+-    glDeleteSync(fence);
++    glFlush();
++    return fence;
++}
++
++static void gl_wait_and_delete(GLsync *fence)
++{
++    if (*fence) {
++        glWaitSync(*fence, 0, GL_TIMEOUT_IGNORED);
++        glDeleteSync(*fence);
++        *fence = 0;
++    }
+ }
+ 
+ void pgraph_gl_sync(NV2AState *d)
+@@ -385,19 +411,26 @@ void pgraph_gl_sync(NV2AState *d)
+ 
+     /* FIXME: Sanity check surface dimensions */
+ 
+-    /* Wait for queued commands to complete */
++    PGRAPHGLState *r = d->pgraph.gl_renderer_state;
++
++    /* Order display rendering after queued surface commands */
+     pgraph_gl_upload_surface_data(d, surface, !tcg_enabled());
+-    gl_fence();
++    GLsync upload_fence = gl_fence_flush();
+     assert(glGetError() == GL_NO_ERROR);
+ 
+     /* Render framebuffer in display context */
+     glo_set_current(g_nv2a_context_display);
++    gl_wait_and_delete(&upload_fence);
++    gl_wait_and_delete(&r->ui_fence);
+     render_display(d, surface);
+-    gl_fence();
++    GLsync display_fence = gl_fence_flush();
+     assert(glGetError() == GL_NO_ERROR);
+ 
+     /* Switch back to original context */
+     glo_set_current(g_nv2a_context_render);
++    glWaitSync(display_fence, 0, GL_TIMEOUT_IGNORED);
++    assert(r->display_fence == 0);
++    r->display_fence = display_fence;
+ 
+     qatomic_set(&d->pgraph.sync_pending, false);
+     qemu_event_set(&d->pgraph.sync_complete);
+@@ -436,5 +469,21 @@ int pgraph_gl_get_framebuffer_surface(NV2AState *d)
+     qemu_mutex_unlock(&d->pfifo.lock);
+     qemu_event_wait(&d->pgraph.sync_complete);
+ 
++    /* Make the caller's context wait for the display buffer on the GPU */
++    gl_wait_and_delete(&r->display_fence);
++
+     return r->gl_display_buffer;
+ }
++
++void pgraph_gl_release_framebuffer_surface(NV2AState *d)
++{
++    PGRAPHGLState *r = d->pgraph.gl_renderer_state;
++
++    /* Next display render must not overwrite the buffer while the caller's
++     * context may still be sampling it.
++     */
++    if (r->ui_fence) {
++        glDeleteSync(r->ui_fence);
++    }
++    r->ui_fence = gl_fence_flush();
++}
+diff --git a/hw/xbox/nv2a/pgraph/gl/draw.c b/hw/xbox/nv2a/pgraph/gl/draw.c
+index c56934187e..c9ae7e36a1 100644
+--- a/hw/xbox/nv2a/pgraph/gl/draw.c
++++ b/hw/xbox/nv2a/pgraph/gl/draw.c
+@@ -104,20 +104,20 @@ void pgraph_gl_clear_surface(NV2AState *d, uint32_t parameter)
+     pgraph_apply_scaling_factor(pg, &scissor_width, &scissor_height);
+ 
+     /* FIXME: Respect window clip?!?! */
+-    glEnable(GL_SCISSOR_TEST);
++    pgraph_gl_set_cap(r, SCISSOR_TEST, true);
+     glScissor(xmin, ymin, scissor_width, scissor_height);
+ 
+     /* Dither */
+     /* FIXME: Maybe also disable it here? + GL implementation dependent */
+     if (pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0) & NV_PGRAPH_CONTROL_0_DITHERENABLE) {
+-        glEnable(GL_DITHER);
++        pgraph_gl_set_cap(r, DITHER, true);
+     } else {
+-        glDisable(GL_DITHER);
++        pgraph_gl_set_cap(r, DITHER, false);
+     }
+ 
+     glClear(gl_mask);
+ 
+-    glDisable(GL_SCISSOR_TEST);
++    pgraph_gl_set_cap(r, SCISSOR_TEST, false);
+ 
+     pgraph_gl_set_surface_dirty(pg, write_color, write_zeta);
+ 
+@@ -166,7 +166,7 @@ void pgraph_gl_draw_begin(NV2AState *d)
+                            NV_PGRAPH_CONTROL_1_STENCIL_MASK_WRITE));
+ 
+     if (pgraph_reg_r(pg, NV_PGRAPH_BLEND) & NV_PGRAPH_BLEND_EN) {
+-        glEnable(GL_BLEND);
++        pgraph_gl_set_cap(r, BLEND, true);
+         uint32_t sfactor = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_BLEND),
+                                     NV_PGRAPH_BLEND_SFACTOR);
+         uint32_t dfactor = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_BLEND),
+@@ -187,7 +187,7 @@ void pgraph_gl_draw_begin(NV2AState *d)
+         glBlendColor(gl_blend_color[0], gl_blend_color[1], gl_blend_color[2],
+                      gl_blend_color[3]);
+     } else {
+-        glDisable(GL_BLEND);
++        pgraph_gl_set_cap(r, BLEND, false);
+     }
+ 
+     /* Face culling */
+@@ -197,9 +197,9 @@ void pgraph_gl_draw_begin(NV2AState *d)
+                                       NV_PGRAPH_SETUPRASTER_CULLCTRL);
+         assert(cull_face < ARRAY_SIZE(pgraph_cull_face_gl_map));
+         glCullFace(pgraph_cull_face_gl_map[cull_face]);
+-        glEnable(GL_CULL_FACE);
++        pgraph_gl_set_cap(r, CULL_FACE, true);
+     } else {
+-        glDisable(GL_CULL_FACE);
++        pgraph_gl_set_cap(r, CULL_FACE, false);
+     }
+ 
+     /* Front-face select */
+@@ -208,30 +208,63 @@ void pgraph_gl_draw_begin(NV2AState *d)
+                     & NV_PGRAPH_SETUPRASTER_FRONTFACE
+                         ? GL_CW : GL_CCW);
+ 
+-    /* Polygon offset is handled in geometry and fragment shaders explicitly */
+-    glDisable(GL_POLYGON_OFFSET_FILL);
+-    glDisable(GL_POLYGON_OFFSET_LINE);
+-    glDisable(GL_POLYGON_OFFSET_POINT);
++    const ShaderState *shader_state = &r->shader_binding->state;
++    bool fixed_function_depth =
++        shader_state->psh.fast_depth && !shader_state->psh.z_perspective;
++
++    if (fixed_function_depth) {
++        /* Fast depth path: depth is interpolated by fixed function, so apply
++         * polygon offset through GL.
++         * FIXME: GL implementation-specific, e.g. Mesa needs zbias * 0.5 to
++         * match Xbox.
++         */
++        uint32_t setupraster = pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER);
++        pgraph_gl_set_cap(r, POLYGON_OFFSET_FILL,
++                          setupraster & NV_PGRAPH_SETUPRASTER_POFFSETFILLENABLE);
++        pgraph_gl_set_cap(r, POLYGON_OFFSET_LINE,
++                          setupraster & NV_PGRAPH_SETUPRASTER_POFFSETLINEENABLE);
++        pgraph_gl_set_cap(r, POLYGON_OFFSET_POINT,
++                          setupraster & NV_PGRAPH_SETUPRASTER_POFFSETPOINTENABLE);
++        if (setupraster & (NV_PGRAPH_SETUPRASTER_POFFSETFILLENABLE |
++                           NV_PGRAPH_SETUPRASTER_POFFSETLINEENABLE |
++                           NV_PGRAPH_SETUPRASTER_POFFSETPOINTENABLE)) {
++            uint32_t zfactor_u32 = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETFACTOR);
++            uint32_t zbias_u32 = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETBIAS);
++            glPolygonOffset(*(float *)&zfactor_u32, *(float *)&zbias_u32);
++        }
++    } else {
++        /* Polygon offset is handled in geometry and fragment shaders */
++        pgraph_gl_set_cap(r, POLYGON_OFFSET_FILL, false);
++        pgraph_gl_set_cap(r, POLYGON_OFFSET_LINE, false);
++        pgraph_gl_set_cap(r, POLYGON_OFFSET_POINT, false);
++    }
+ 
+     /* Depth testing */
+     if (depth_test) {
+-        glEnable(GL_DEPTH_TEST);
++        pgraph_gl_set_cap(r, DEPTH_TEST, true);
+ 
+         uint32_t depth_func = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0),
+                                        NV_PGRAPH_CONTROL_0_ZFUNC);
+         assert(depth_func < ARRAY_SIZE(pgraph_depth_func_gl_map));
+         glDepthFunc(pgraph_depth_func_gl_map[depth_func]);
+     } else {
+-        glDisable(GL_DEPTH_TEST);
++        pgraph_gl_set_cap(r, DEPTH_TEST, false);
+     }
+ 
+-    glEnable(GL_DEPTH_CLAMP);
++    pgraph_gl_set_cap(r, DEPTH_CLAMP, true);
+ 
+-    /* Set first vertex convention to match Vulkan default */
+-    glProvokingVertex(GL_FIRST_VERTEX_CONVENTION);
++    if (shader_state->psh.fast_depth && !shader_state->geom.smooth_shading) {
++        /* No geometry shader to select the provoking vertex */
++        glProvokingVertex(shader_state->geom.first_vertex_is_provoking ?
++                              GL_FIRST_VERTEX_CONVENTION :
++                              GL_LAST_VERTEX_CONVENTION);
++    } else {
++        /* Set first vertex convention to match Vulkan default */
++        glProvokingVertex(GL_FIRST_VERTEX_CONVENTION);
++    }
+ 
+     if (stencil_test) {
+-        glEnable(GL_STENCIL_TEST);
++        pgraph_gl_set_cap(r, STENCIL_TEST, true);
+ 
+         uint32_t stencil_func = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1),
+                                     NV_PGRAPH_CONTROL_1_STENCIL_FUNC);
+@@ -262,36 +295,36 @@ void pgraph_gl_draw_begin(NV2AState *d)
+             pgraph_stencil_op_gl_map[op_zpass]);
+ 
+     } else {
+-        glDisable(GL_STENCIL_TEST);
++        pgraph_gl_set_cap(r, STENCIL_TEST, false);
+     }
+ 
+     /* Dither */
+     /* FIXME: GL implementation dependent */
+     if (pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0) &
+             NV_PGRAPH_CONTROL_0_DITHERENABLE) {
+-        glEnable(GL_DITHER);
++        pgraph_gl_set_cap(r, DITHER, true);
+     } else {
+-        glDisable(GL_DITHER);
++        pgraph_gl_set_cap(r, DITHER, false);
+     }
+ 
+-    glEnable(GL_PROGRAM_POINT_SIZE);
++    pgraph_gl_set_cap(r, PROGRAM_POINT_SIZE, true);
+ 
+     bool anti_aliasing = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_ANTIALIASING), NV_PGRAPH_ANTIALIASING_ENABLE);
+ 
+     /* Edge Antialiasing */
+     if (!anti_aliasing && pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER) &
+                               NV_PGRAPH_SETUPRASTER_LINESMOOTHENABLE) {
+-        glEnable(GL_LINE_SMOOTH);
++        pgraph_gl_set_cap(r, LINE_SMOOTH, true);
+         glLineWidth(MIN(r->supported_smooth_line_width_range[1], pg->surface_scale_factor));
+     } else {
+-        glDisable(GL_LINE_SMOOTH);
++        pgraph_gl_set_cap(r, LINE_SMOOTH, false);
+         glLineWidth(MIN(r->supported_aliased_line_width_range[1], pg->surface_scale_factor));
+     }
+     if (!anti_aliasing && pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER) &
+                               NV_PGRAPH_SETUPRASTER_POLYSMOOTHENABLE) {
+-        glEnable(GL_POLYGON_SMOOTH);
++        pgraph_gl_set_cap(r, POLYGON_SMOOTH, true);
+     } else {
+-        glDisable(GL_POLYGON_SMOOTH);
++        pgraph_gl_set_cap(r, POLYGON_SMOOTH, false);
+     }
+ 
+     unsigned int vp_width = pg->surface_binding_dim.width,
+@@ -312,7 +345,7 @@ void pgraph_gl_draw_begin(NV2AState *d)
+     pgraph_apply_scaling_factor(pg, &xmin, &ymin);
+     pgraph_apply_scaling_factor(pg, &scissor_width, &scissor_height);
+ 
+-    glEnable(GL_SCISSOR_TEST);
++    pgraph_gl_set_cap(r, SCISSOR_TEST, true);
+     glScissor(xmin, ymin, scissor_width, scissor_height);
+ 
+     /* Visibility testing */
+@@ -378,6 +411,53 @@ void pgraph_gl_draw_end(NV2AState *d)
+     NV2A_GL_DGROUP_END();
+ }
+ 
++static void draw_cached_elements(PGRAPHGLState *r, GLenum mode,
++                                 const uint32_t *indices, size_t count)
++{
++    VertexKey k;
++    memset(&k, 0, sizeof(VertexKey));
++    k.count = count;
++    k.gl_type = GL_UNSIGNED_INT;
++    k.gl_normalize = GL_FALSE;
++    k.stride = sizeof(uint32_t);
++    uint64_t h = fast_hash((uint8_t *)indices, count * 4);
++
++    LruNode *node = lru_lookup(&r->element_cache, h, &k);
++    VertexLruNode *found = container_of(node, VertexLruNode, node);
++    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, found->gl_buffer);
++    if (!found->initialized) {
++        nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_4);
++        glBufferData(GL_ELEMENT_ARRAY_BUFFER, count * 4, indices,
++                     GL_STATIC_DRAW);
++        found->initialized = true;
++    } else {
++        nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_4_NOTDIRTY);
++    }
++    glDrawElements(mode, count, GL_UNSIGNED_INT, (void *)0);
++}
++
++static uint32_t *get_quad_indices(PGRAPHGLState *r, size_t count)
++{
++    if (count > r->quad_indices_capacity) {
++        r->quad_indices_capacity = MAX(count, r->quad_indices_capacity * 2);
++        r->quad_indices = g_renew(uint32_t, r->quad_indices,
++                                  r->quad_indices_capacity);
++    }
++    return r->quad_indices;
++}
++
++/* Draw vertices first..first+count-1 as converted quad triangles */
++static void draw_quad_range(PGRAPHGLState *r, uint32_t first, size_t count)
++{
++    const GeomState *geom = &r->shader_binding->state.geom;
++    uint32_t *indices = get_quad_indices(
++        r, pgraph_quad_tri_index_count(geom->primitive_mode, count));
++    size_t n = pgraph_quads_to_triangles(geom, NULL, first, count, indices);
++    if (n) {
++        draw_cached_elements(r, GL_TRIANGLES, indices, n);
++    }
++}
++
+ void pgraph_gl_flush_draw(NV2AState *d)
+ {
+     PGRAPHState *pg = &d->pgraph;
+@@ -388,6 +468,9 @@ void pgraph_gl_flush_draw(NV2AState *d)
+     }
+     assert(r->shader_binding);
+ 
++    bool quads = r->shader_binding->quads_as_triangles;
++    const GeomState *geom = &r->shader_binding->state.geom;
++
+     if (pg->draw_arrays_length) {
+         NV2A_GL_DPRINTF(false, "Draw Arrays");
+         nv2a_profile_inc_counter(NV2A_PROF_DRAW_ARRAYS);
+@@ -399,10 +482,29 @@ void pgraph_gl_flush_draw(NV2AState *d)
+                                       pg->draw_arrays_max_count - 1,
+                                       false, 0,
+                                       pg->draw_arrays_max_count - 1);
+-        glMultiDrawArrays(r->shader_binding->gl_primitive_mode,
+-                          pg->draw_arrays_start,
+-                          pg->draw_arrays_count,
+-                          pg->draw_arrays_length);
++        if (quads) {
++            size_t total = 0;
++            for (int i = 0; i < pg->draw_arrays_length; i++) {
++                total += pgraph_quad_tri_index_count(geom->primitive_mode,
++                                                     pg->draw_arrays_count[i]);
++            }
++            uint32_t *indices = get_quad_indices(r, total);
++            size_t n = 0;
++            for (int i = 0; i < pg->draw_arrays_length; i++) {
++                n += pgraph_quads_to_triangles(geom, NULL,
++                                               pg->draw_arrays_start[i],
++                                               pg->draw_arrays_count[i],
++                                               indices + n);
++            }
++            if (n) {
++                draw_cached_elements(r, GL_TRIANGLES, indices, n);
++            }
++        } else {
++            glMultiDrawArrays(r->shader_binding->gl_primitive_mode,
++                              pg->draw_arrays_start,
++                              pg->draw_arrays_count,
++                              pg->draw_arrays_length);
++        }
+     } else if (pg->inline_elements_length) {
+         NV2A_GL_DPRINTF(false, "Inline Elements");
+         nv2a_profile_inc_counter(NV2A_PROF_INLINE_ELEMENTS);
+@@ -420,30 +522,21 @@ void pgraph_gl_flush_draw(NV2AState *d)
+                 d, min_element, max_element, false, 0,
+                 pg->inline_elements[pg->inline_elements_length - 1]);
+ 
+-        VertexKey k;
+-        memset(&k, 0, sizeof(VertexKey));
+-        k.count = pg->inline_elements_length;
+-        k.gl_type = GL_UNSIGNED_INT;
+-        k.gl_normalize = GL_FALSE;
+-        k.stride = sizeof(uint32_t);
+-        uint64_t h = fast_hash((uint8_t*)pg->inline_elements,
+-                               pg->inline_elements_length * 4);
+-
+-        LruNode *node = lru_lookup(&r->element_cache, h, &k);
+-        VertexLruNode *found = container_of(node, VertexLruNode, node);
+-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, found->gl_buffer);
+-        if (!found->initialized) {
+-            nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_4);
+-            glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+-                         pg->inline_elements_length * 4,
+-                         pg->inline_elements, GL_STATIC_DRAW);
+-            found->initialized = true;
++        if (quads) {
++            uint32_t *indices = get_quad_indices(
++                r, pgraph_quad_tri_index_count(geom->primitive_mode,
++                                               pg->inline_elements_length));
++            size_t n = pgraph_quads_to_triangles(
++                geom, pg->inline_elements, 0,
++                pg->inline_elements_length, indices);
++            if (n) {
++                draw_cached_elements(r, GL_TRIANGLES, indices, n);
++            }
+         } else {
+-            nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_4_NOTDIRTY);
++            draw_cached_elements(r, r->shader_binding->gl_primitive_mode,
++                                 pg->inline_elements,
++                                 pg->inline_elements_length);
+         }
+-        glDrawElements(r->shader_binding->gl_primitive_mode,
+-                       pg->inline_elements_length, GL_UNSIGNED_INT,
+-                       (void *)0);
+     } else if (pg->inline_buffer_length) {
+         NV2A_GL_DPRINTF(false, "Inline Buffer");
+         nv2a_profile_inc_counter(NV2A_PROF_INLINE_BUFFERS);
+@@ -452,6 +545,8 @@ void pgraph_gl_flush_draw(NV2AState *d)
+         if (pg->compressed_attrs) {
+             pg->compressed_attrs = 0;
+             pgraph_gl_bind_shaders(pg);
++            quads = r->shader_binding->quads_as_triangles;
++            geom = &r->shader_binding->state.geom;
+         }
+ 
+         for (int i = 0; i < NV2A_VERTEXSHADER_ATTRIBUTES; i++) {
+@@ -474,15 +569,23 @@ void pgraph_gl_flush_draw(NV2AState *d)
+             }
+         }
+ 
+-        glDrawArrays(r->shader_binding->gl_primitive_mode,
+-                     0, pg->inline_buffer_length);
++        if (quads) {
++            draw_quad_range(r, 0, pg->inline_buffer_length);
++        } else {
++            glDrawArrays(r->shader_binding->gl_primitive_mode,
++                         0, pg->inline_buffer_length);
++        }
+     } else if (pg->inline_array_length) {
+         NV2A_GL_DPRINTF(false, "Inline Array");
+         nv2a_profile_inc_counter(NV2A_PROF_INLINE_ARRAYS);
+ 
+         unsigned int index_count = pgraph_gl_bind_inline_array(d);
+-        glDrawArrays(r->shader_binding->gl_primitive_mode,
+-                     0, index_count);
++        if (quads) {
++            draw_quad_range(r, 0, index_count);
++        } else {
++            glDrawArrays(r->shader_binding->gl_primitive_mode,
++                         0, index_count);
++        }
+     } else {
+         NV2A_GL_DPRINTF(true, "EMPTY NV097_SET_BEGIN_END");
+         NV2A_UNCONFIRMED("EMPTY NV097_SET_BEGIN_END");
+diff --git a/hw/xbox/nv2a/pgraph/gl/renderer.c b/hw/xbox/nv2a/pgraph/gl/renderer.c
+index e9e2109779..cafb3715fc 100644
+--- a/hw/xbox/nv2a/pgraph/gl/renderer.c
++++ b/hw/xbox/nv2a/pgraph/gl/renderer.c
+@@ -51,6 +51,7 @@ static void pgraph_gl_init(NV2AState *d, Error **errp)
+ 
+     /* fire up opengl */
+     glo_set_current(g_nv2a_context_render);
++    pgraph_gl_invalidate_caps(r);
+ 
+ #if DEBUG_NV2A_GL
+     gl_debug_initialize();
+@@ -207,6 +208,7 @@ static PGRAPHRenderer pgraph_gl_renderer = {
+         .set_surface_scale_factor = pgraph_gl_set_surface_scale_factor,
+         .get_surface_scale_factor = pgraph_gl_get_surface_scale_factor,
+         .get_framebuffer_surface = pgraph_gl_get_framebuffer_surface,
++        .release_framebuffer_surface = pgraph_gl_release_framebuffer_surface,
+         .get_gpu_properties = pgraph_gl_get_gpu_properties,
+     }
+ };
+diff --git a/hw/xbox/nv2a/pgraph/gl/renderer.h b/hw/xbox/nv2a/pgraph/gl/renderer.h
+index 9b9d9bfb02..662964ca10 100644
+--- a/hw/xbox/nv2a/pgraph/gl/renderer.h
++++ b/hw/xbox/nv2a/pgraph/gl/renderer.h
+@@ -107,6 +107,12 @@ typedef struct ShaderModuleCacheEntry {
+     GLuint gl_shader;
+ } ShaderModuleCacheEntry;
+ 
++/* Uniform values last uploaded to a program, for skipping redundant uploads */
++typedef struct ShaderUniformCache {
++    VshUniformValues vsh;
++    PshUniformValues psh;
++} ShaderUniformCache;
++
+ typedef struct ShaderBinding {
+     LruNode node;
+     bool initialized;
+@@ -120,11 +126,16 @@ typedef struct ShaderBinding {
+ 
+     GLuint gl_program;
+     GLenum gl_primitive_mode;
++    /* Quads are drawn as GL_TRIANGLES via converted indices */
++    bool quads_as_triangles;
+ 
+     struct {
+         PshUniformLocs psh;
+         VshUniformLocs vsh;
+     } uniform_locs;
++
++    /* NULL until uniforms are first uploaded to gl_program */
++    ShaderUniformCache *uniform_cache;
+ } ShaderBinding;
+ 
+ typedef struct VertexKey {
+@@ -167,9 +178,41 @@ typedef struct QueryReport {
+     GLuint *queries;
+ } QueryReport;
+ 
++/*
++ * glEnable/glDisable capabilities toggled per draw in the render context.
++ * These are shadowed so that redundant toggles are not sent to the driver,
++ * which is costly on macOS where GL is layered on Metal.
++ */
++#define PGRAPH_GL_CAPS(X) \
++    X(BLEND)               \
++    X(CULL_FACE)           \
++    X(DEPTH_CLAMP)         \
++    X(DEPTH_TEST)          \
++    X(DITHER)              \
++    X(LINE_SMOOTH)         \
++    X(POLYGON_OFFSET_FILL) \
++    X(POLYGON_OFFSET_LINE) \
++    X(POLYGON_OFFSET_POINT)\
++    X(POLYGON_SMOOTH)      \
++    X(PROGRAM_POINT_SIZE)  \
++    X(SCISSOR_TEST)        \
++    X(STENCIL_TEST)
++
++enum PGRAPHGLCap {
++#define X(n) PGRAPH_GL_CAP_##n,
++    PGRAPH_GL_CAPS(X)
++#undef X
++    PGRAPH_GL_CAP__COUNT
++};
++
+ typedef struct PGRAPHGLState {
++    /* Shadowed cap state: -1 unknown, 0 disabled, 1 enabled */
++    int8_t gl_caps[PGRAPH_GL_CAP__COUNT];
++
+     GLuint gl_framebuffer;
+     GLuint gl_display_buffer;
++    GLsync display_fence; /* display buffer written, waited on by the UI */
++    GLsync ui_fence; /* UI done sampling display buffer */
+     GLint gl_display_buffer_internal_format;
+     GLsizei gl_display_buffer_width;
+     GLsizei gl_display_buffer_height;
+@@ -178,6 +221,10 @@ typedef struct PGRAPHGLState {
+ 
+     Lru element_cache;
+     VertexLruNode *element_cache_entries;
++
++    /* Scratch space for quad to triangle index conversion */
++    uint32_t *quad_indices;
++    size_t quad_indices_capacity;
+     GLuint gl_inline_array_buffer;
+     GLuint gl_memory_buffer;
+     GLuint gl_vertex_array;
+@@ -291,6 +338,36 @@ void pgraph_gl_shader_write_cache_reload_list(PGRAPHState *pg);
+ void pgraph_gl_set_surface_scale_factor(NV2AState *d, unsigned int scale);
+ unsigned int pgraph_gl_get_surface_scale_factor(NV2AState *d);
+ int pgraph_gl_get_framebuffer_surface(NV2AState *d);
++void pgraph_gl_release_framebuffer_surface(NV2AState *d);
++static inline void pgraph_gl_invalidate_caps(PGRAPHGLState *r)
++{
++    memset(r->gl_caps, -1, sizeof(r->gl_caps));
++}
++
++static inline void pgraph_gl_set_cap_idx(PGRAPHGLState *r, enum PGRAPHGLCap idx,
++                                         bool enable)
++{
++    static const GLenum caps[] = {
++#define X(n) GL_##n,
++        PGRAPH_GL_CAPS(X)
++#undef X
++    };
++
++    if (r->gl_caps[idx] == enable) {
++        return;
++    }
++    r->gl_caps[idx] = enable;
++    if (enable) {
++        glEnable(caps[idx]);
++    } else {
++        glDisable(caps[idx]);
++    }
++}
++
++/* Enable or disable a render context cap, e.g. pgraph_gl_set_cap(r, BLEND, true) */
++#define pgraph_gl_set_cap(r, name, enable) \
++    pgraph_gl_set_cap_idx((r), PGRAPH_GL_CAP_##name, (enable))
++
+ /**  Note: The caller must set up a clean GL context before invoking. */
+ void pgraph_gl_determine_gpu_properties(void);
+ GPUProperties *pgraph_gl_get_gpu_properties(void);
+diff --git a/hw/xbox/nv2a/pgraph/gl/shaders.c b/hw/xbox/nv2a/pgraph/gl/shaders.c
+index 2626cd5930..399be95b56 100644
+--- a/hw/xbox/nv2a/pgraph/gl/shaders.c
++++ b/hw/xbox/nv2a/pgraph/gl/shaders.c
+@@ -108,6 +108,10 @@ static void update_shader_uniform_locs(ShaderBinding *binding)
+ {
+     char tmp[64];
+ 
++    /* New program, nothing uploaded yet */
++    g_free(binding->uniform_cache);
++    binding->uniform_cache = NULL;
++
+     for (int i = 0; i < ARRAY_SIZE(binding->uniform_locs.vsh); i++) {
+         const char *name = VshUniformInfo[i].name;
+         if (VshUniformInfo[i].count > 1) {
+@@ -231,8 +235,12 @@ static void generate_shaders(PGRAPHGLState *r, ShaderBinding *binding)
+     glUseProgram(program);
+ 
+     binding->gl_program = program;
+-    binding->gl_primitive_mode = get_gl_primitive_mode(
+-        state->geom.polygon_front_mode, state->geom.primitive_mode);
++    binding->quads_as_triangles = pgraph_glsl_quads_as_triangles(&state->geom);
++    binding->gl_primitive_mode =
++        binding->quads_as_triangles ?
++            GL_TRIANGLES :
++            get_gl_primitive_mode(state->geom.polygon_front_mode,
++                                  state->geom.primitive_mode);
+     binding->initialized = true;
+ 
+     set_texture_sampler_uniforms(binding);
+@@ -340,9 +348,13 @@ bool pgraph_gl_shader_load_from_memory(ShaderBinding *binding)
+ 
+     binding->program = NULL;
+     binding->gl_program = gl_program;
++    binding->quads_as_triangles =
++        pgraph_glsl_quads_as_triangles(&binding->state.geom);
+     binding->gl_primitive_mode =
+-        get_gl_primitive_mode(binding->state.geom.polygon_front_mode,
+-                              binding->state.geom.primitive_mode);
++        binding->quads_as_triangles ?
++            GL_TRIANGLES :
++            get_gl_primitive_mode(binding->state.geom.polygon_front_mode,
++                                  binding->state.geom.primitive_mode);
+     binding->initialized = true;
+ 
+     set_texture_sampler_uniforms(binding);
+@@ -519,6 +531,7 @@ static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
+     binding->cached = false;
+     binding->program = NULL;
+     binding->save_thread = NULL;
++    binding->uniform_cache = NULL;
+ }
+ 
+ static void shader_cache_entry_post_evict(Lru *lru, LruNode *node)
+@@ -538,6 +551,8 @@ static void shader_cache_entry_post_evict(Lru *lru, LruNode *node)
+     binding->cached = false;
+     binding->save_thread = NULL;
+     binding->program = NULL;
++    g_free(binding->uniform_cache);
++    binding->uniform_cache = NULL;
+     memset(&binding->state, 0, sizeof(ShaderState));
+ }
+ 
+@@ -718,15 +733,30 @@ void pgraph_gl_shader_cache_to_disk(ShaderBinding *binding)
+     qemu_thread_create(binding->save_thread, name, shader_write_to_disk, binding, QEMU_THREAD_JOINABLE);
+ }
+ 
+-static void apply_uniform_updates(const UniformInfo *info, int *locs,
+-                                  void *values, size_t count)
++/*
++ * Upload uniforms whose values differ from those last uploaded (cache), or
++ * all of them if upload_all. Returns whether anything was uploaded.
++ */
++static bool apply_uniform_updates(const UniformInfo *info, int *locs,
++                                  void *values, void *cache, bool upload_all,
++                                  size_t count)
+ {
++    bool uploaded = false;
++
+     for (int i = 0; i < count; i++) {
+         if (locs[i] == -1) {
+             continue;
+         }
+ 
+         void *value = (char*)values + info[i].val_offs;
++        void *cached = (char *)cache + info[i].val_offs;
++        size_t len = info[i].size * info[i].count;
++
++        if (!upload_all && !memcmp(value, cached, len)) {
++            continue;
++        }
++        memcpy(cached, value, len);
++        uploaded = true;
+ 
+         switch (info[i].type) {
+         case UniformElementType_uint:
+@@ -762,19 +792,30 @@ static void apply_uniform_updates(const UniformInfo *info, int *locs,
+     }
+ 
+     assert(glGetError() == GL_NO_ERROR);
++    return uploaded;
+ }
+ 
+-// FIXME: Dirty tracking
+ // FIXME: Consider UBO to align with VK renderer
+ static void update_shader_uniforms(PGRAPHState *pg, ShaderBinding *binding)
+ {
+     PGRAPHGLState *r = pg->gl_renderer_state;
+ 
++    /* Program uniform values persist, so only upload what changed since
++     * this program was last drawn with. Re-uploading everything each draw
++     * (notably the 192 vertex shader constants) is costly, especially with
++     * the macOS GL-on-Metal driver.
++     */
++    bool upload_all = !binding->uniform_cache;
++    if (upload_all) {
++        binding->uniform_cache = g_malloc(sizeof(ShaderUniformCache));
++    }
++
+     VshUniformValues vsh_values;
+     pgraph_glsl_set_vsh_uniform_values(pg, &binding->state.vsh,
+                                   binding->uniform_locs.vsh, &vsh_values);
+-    apply_uniform_updates(VshUniformInfo, binding->uniform_locs.vsh,
+-                          &vsh_values, VshUniform__COUNT);
++    bool dirty = apply_uniform_updates(VshUniformInfo, binding->uniform_locs.vsh,
++                                       &vsh_values, &binding->uniform_cache->vsh,
++                                       upload_all, VshUniform__COUNT);
+ 
+     PshUniformValues psh_values;
+     pgraph_glsl_set_psh_uniform_values(pg, binding->uniform_locs.psh, &psh_values);
+@@ -785,8 +826,12 @@ static void update_shader_uniforms(PGRAPHState *pg, ShaderBinding *binding)
+             psh_values.texScale[i] = scale;
+         }
+     }
+-    apply_uniform_updates(PshUniformInfo, binding->uniform_locs.psh,
+-                          &psh_values, PshUniform__COUNT);
++    dirty |= apply_uniform_updates(PshUniformInfo, binding->uniform_locs.psh,
++                                   &psh_values, &binding->uniform_cache->psh,
++                                   upload_all, PshUniform__COUNT);
++
++    nv2a_profile_inc_counter(dirty ? NV2A_PROF_SHADER_UBO_DIRTY :
++                                     NV2A_PROF_SHADER_UBO_NOTDIRTY);
+ }
+ 
+ void pgraph_gl_bind_shaders(PGRAPHState *pg)
+diff --git a/hw/xbox/nv2a/pgraph/gl/surface.c b/hw/xbox/nv2a/pgraph/gl/surface.c
+index 714121e6bd..b2efe05274 100644
+--- a/hw/xbox/nv2a/pgraph/gl/surface.c
++++ b/hw/xbox/nv2a/pgraph/gl/surface.c
+@@ -252,12 +252,12 @@ static void render_surface_to(NV2AState *d, SurfaceBinding *surface,
+ 
+     glViewport(0, 0, width, height);
+     glColorMask(true, true, true, true);
+-    glDisable(GL_DITHER);
+-    glDisable(GL_SCISSOR_TEST);
+-    glDisable(GL_BLEND);
+-    glDisable(GL_STENCIL_TEST);
+-    glDisable(GL_CULL_FACE);
+-    glDisable(GL_DEPTH_TEST);
++    pgraph_gl_set_cap(r, DITHER, false);
++    pgraph_gl_set_cap(r, SCISSOR_TEST, false);
++    pgraph_gl_set_cap(r, BLEND, false);
++    pgraph_gl_set_cap(r, STENCIL_TEST, false);
++    pgraph_gl_set_cap(r, CULL_FACE, false);
++    pgraph_gl_set_cap(r, DEPTH_TEST, false);
+     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+     glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+     glClear(GL_COLOR_BUFFER_BIT);
+diff --git a/hw/xbox/nv2a/pgraph/gl/vertex.c b/hw/xbox/nv2a/pgraph/gl/vertex.c
+index f6ccff4e92..8ed90bce47 100644
+--- a/hw/xbox/nv2a/pgraph/gl/vertex.c
++++ b/hw/xbox/nv2a/pgraph/gl/vertex.c
+@@ -297,6 +297,10 @@ void pgraph_gl_finalize_buffers(PGRAPHState *pg)
+     g_free(r->element_cache_entries);
+     r->element_cache_entries = NULL;
+ 
++    g_free(r->quad_indices);
++    r->quad_indices = NULL;
++    r->quad_indices_capacity = 0;
++
+     glDeleteBuffers(NV2A_VERTEXSHADER_ATTRIBUTES, r->gl_inline_buffer);
+     memset(r->gl_inline_buffer, 0, sizeof(r->gl_inline_buffer));
+ 
+diff --git a/hw/xbox/nv2a/pgraph/glsl/geom.c b/hw/xbox/nv2a/pgraph/glsl/geom.c
+index df933fba50..4a87607d8d 100644
+--- a/hw/xbox/nv2a/pgraph/glsl/geom.c
++++ b/hw/xbox/nv2a/pgraph/glsl/geom.c
+@@ -86,6 +86,36 @@ bool pgraph_glsl_need_geom(const GeomState *state)
+     assert(state->polygon_front_mode == state->polygon_back_mode);
+     enum ShaderPolygonMode polygon_mode = state->polygon_front_mode;
+ 
++    if (state->no_geometry_shader) {
++        /* Best effort without geometry shaders: quads are converted to
++         * triangles and non-fill polygon modes use the pipeline polygon mode.
++         */
++        return false;
++    }
++
++    if (state->fast_depth) {
++        /* Only use the geometry shader where fixed-function GL can't draw the
++         * primitive: quads, non-fill polygon modes and flat shaded polygons.
++         */
++        switch (state->primitive_mode) {
++        case PRIM_TYPE_TRIANGLES:
++        case PRIM_TYPE_TRIANGLE_STRIP:
++        case PRIM_TYPE_TRIANGLE_FAN:
++            return polygon_mode != POLY_MODE_FILL;
++        case PRIM_TYPE_QUADS:
++        case PRIM_TYPE_QUAD_STRIP:
++            return !pgraph_glsl_quads_as_triangles(state);
++        case PRIM_TYPE_POLYGON:
++            if (polygon_mode == POLY_MODE_POINT) {
++                assert(!"POLY_MODE_POINT not supported");
++                return false;
++            }
++            return polygon_mode == POLY_MODE_FILL && !state->smooth_shading;
++        default:
++            return false;
++        }
++    }
++
+     switch (state->primitive_mode) {
+     case PRIM_TYPE_POINTS:
+         return false;
+@@ -109,6 +139,67 @@ bool pgraph_glsl_need_geom(const GeomState *state)
+     }
+ }
+ 
++bool pgraph_glsl_quads_as_triangles(const GeomState *state)
++{
++    /* Flat shading needs vertex 3 to provoke both triangles of a quad, which
++     * the 0-2 diagonal split cannot express, so it keeps the geometry shader.
++     */
++    if (state->primitive_mode != PRIM_TYPE_QUADS &&
++        state->primitive_mode != PRIM_TYPE_QUAD_STRIP) {
++        return false;
++    }
++    if (state->no_geometry_shader) {
++        return true;
++    }
++    return state->fast_depth &&
++           state->polygon_front_mode == POLY_MODE_FILL &&
++           state->smooth_shading;
++}
++
++size_t pgraph_quads_to_triangles(const GeomState *state,
++                                 const uint32_t *in, uint32_t first,
++                                 size_t count, uint32_t *out)
++{
++#define V(i) (in ? in[i] : first + (uint32_t)(i))
++    enum ShaderPrimitiveMode mode = state->primitive_mode;
++    uint32_t *o = out;
++
++    if (!state->smooth_shading) {
++        /* Flat shading without geometry shader: vertex 3 provokes the whole
++         * quad, so split along the diagonal through it and put it first
++         * (the provoking vertex on hosts like Metal), keeping the winding.
++         */
++        size_t step = mode == PRIM_TYPE_QUADS ? 4 : 2;
++        for (size_t q = 0; q + 4 <= count; q += step) {
++            uint32_t v0 = V(q), v1 = V(q + 1), v2 = V(q + 2), v3 = V(q + 3);
++            if (mode == PRIM_TYPE_QUADS) {
++                *o++ = v3; *o++ = v0; *o++ = v1;
++                *o++ = v3; *o++ = v1; *o++ = v2;
++            } else {
++                *o++ = v3; *o++ = v0; *o++ = v1;
++                *o++ = v3; *o++ = v2; *o++ = v0;
++            }
++        }
++    } else if (mode == PRIM_TYPE_QUADS) {
++        /* Matches the geometry shader: (1, 2, 0), (2, 3, 0) */
++        for (size_t q = 0; q + 4 <= count; q += 4) {
++            uint32_t v0 = V(q), v1 = V(q + 1), v2 = V(q + 2), v3 = V(q + 3);
++            *o++ = v1; *o++ = v2; *o++ = v0;
++            *o++ = v2; *o++ = v3; *o++ = v0;
++        }
++    } else {
++        assert(mode == PRIM_TYPE_QUAD_STRIP);
++        /* Matches the geometry shader: (0, 1, 2), (2, 1, 3) per pair */
++        for (size_t q = 0; q + 4 <= count; q += 2) {
++            uint32_t v0 = V(q), v1 = V(q + 1), v2 = V(q + 2), v3 = V(q + 3);
++            *o++ = v0; *o++ = v1; *o++ = v2;
++            *o++ = v2; *o++ = v1; *o++ = v3;
++        }
++    }
++#undef V
++    return o - out;
++}
++
+ MString *pgraph_glsl_gen_geom(const GeomState *state, GenGeomGlslOptions opts)
+ {
+     /* FIXME: Missing support for 2-sided-poly mode */
+diff --git a/hw/xbox/nv2a/pgraph/glsl/geom.h b/hw/xbox/nv2a/pgraph/glsl/geom.h
+index a00302f39b..bf2e094bb6 100644
+--- a/hw/xbox/nv2a/pgraph/glsl/geom.h
++++ b/hw/xbox/nv2a/pgraph/glsl/geom.h
+@@ -32,6 +32,8 @@ typedef struct {
+     bool smooth_shading;
+     bool first_vertex_is_provoking;
+     bool z_perspective;
++    bool fast_depth;
++    bool no_geometry_shader;
+     short tri_rot0;
+     short tri_rot1;
+ } GeomState;
+@@ -44,6 +46,31 @@ void pgraph_glsl_set_geom_state(PGRAPHState *pg, GeomState *geom);
+ 
+ bool pgraph_glsl_need_geom(const GeomState *state);
+ 
++/*
++ * True when quads/quad strips are drawn as indexed triangle lists instead of
++ * through the geometry shader (fast depth, fill mode, smooth shading).
++ */
++bool pgraph_glsl_quads_as_triangles(const GeomState *state);
++
++/* Upper bound of triangle list indices for count quad (strip) vertices */
++static inline size_t pgraph_quad_tri_index_count(enum ShaderPrimitiveMode mode,
++                                                 size_t count)
++{
++    if (mode == PRIM_TYPE_QUADS) {
++        return count / 4 * 6;
++    }
++    return count >= 4 ? (count - 2) / 2 * 6 : 0;
++}
++
++/*
++ * Convert count quad (strip) vertices to triangle list indices, using the
++ * same split and winding as the geometry shader. Vertex i is in[i] if in is
++ * not NULL, otherwise first + i. Returns the number of indices written.
++ */
++size_t pgraph_quads_to_triangles(const GeomState *state,
++                                 const uint32_t *in, uint32_t first,
++                                 size_t count, uint32_t *out);
++
+ MString *pgraph_glsl_gen_geom(const GeomState *state, GenGeomGlslOptions opts);
+ 
+ #endif
+diff --git a/hw/xbox/nv2a/pgraph/glsl/psh.c b/hw/xbox/nv2a/pgraph/glsl/psh.c
+index 1e12eac98a..b9c3bfaa83 100644
+--- a/hw/xbox/nv2a/pgraph/glsl/psh.c
++++ b/hw/xbox/nv2a/pgraph/glsl/psh.c
+@@ -1001,7 +1001,26 @@ static MString* psh_convert(struct PixelShader *ps)
+                              "}\n");
+     }
+ 
+-    if (ps->state->z_perspective) {
++    if (ps->state->fast_depth) {
++        /* Fixed-function interpolated depth, no geometry shader inputs */
++        if (ps->state->z_perspective) {
++            mstring_append(clip,
++                           "float zvalue = 1.0/gl_FragCoord.w + depthOffset;\n");
++        } else if (ps->opts.vulkan) {
++            mstring_append(clip, "float zvalue = gl_FragCoord.z*clipRange.y;\n");
++        } else {
++            /* Tolerate GL [-1,1] NDC imprecision at the clip range bounds,
++             * e.g. MS dashboard renders z=0.0 with clip range [0.0, 0.0].
++             */
++            mstring_append(clip, "float zvalue = gl_FragCoord.z*clipRange.y;\n"
++                                 "float ztol = clipRange.y/16777216.0;\n"
++                                 "if (zvalue < clipRange.z && zvalue >= clipRange.z - ztol) {\n"
++                                 "  zvalue = clipRange.z;\n"
++                                 "} else if (zvalue > clipRange.w && zvalue <= clipRange.w + ztol) {\n"
++                                 "  zvalue = clipRange.w;\n"
++                                 "}\n");
++        }
++    } else if (ps->state->z_perspective) {
+         mstring_append(
+             clip,
+             "vec2 unscaled_xy = gl_FragCoord.xy / surfaceScale;\n"
+@@ -1498,7 +1517,18 @@ static MString* psh_convert(struct PixelShader *ps)
+      * due to rounding.)
+      */
+ 
+-    switch (ps->state->depth_format) {
++    if (ps->state->fast_depth) {
++        if (ps->state->z_perspective) {
++            mstring_append(ps->code,
++                           "gl_FragDepth = clamp(zvalue, clipRange.z, clipRange.w)/clipRange.y;\n");
++        } else if (!ps->state->depth_clipping) {
++            mstring_append(ps->code,
++                           "gl_FragDepth = clamp(gl_FragCoord.z, clipRange.z/clipRange.y, clipRange.w/clipRange.y);\n");
++        }
++        /* Otherwise leave depth to fixed function, which keeps early depth
++         * testing / hidden surface removal enabled.
++         */
++    } else switch (ps->state->depth_format) {
+     case DEPTH_FORMAT_D16:
+         // 16-bit unsigned int
+         mstring_append(
+diff --git a/hw/xbox/nv2a/pgraph/glsl/psh.h b/hw/xbox/nv2a/pgraph/glsl/psh.h
+index 0c31e807fe..23a799124f 100644
+--- a/hw/xbox/nv2a/pgraph/glsl/psh.h
++++ b/hw/xbox/nv2a/pgraph/glsl/psh.h
+@@ -69,6 +69,7 @@ typedef struct PshState {
+     bool smooth_shading;
+     bool depth_clipping;
+     bool z_perspective;
++    bool fast_depth;
+ 
+     unsigned int surface_zeta_format;
+     enum PshDepthFormat depth_format;
+diff --git a/hw/xbox/nv2a/pgraph/glsl/shaders.c b/hw/xbox/nv2a/pgraph/glsl/shaders.c
+index 2d6cfaf7d2..19d5601d8f 100644
+--- a/hw/xbox/nv2a/pgraph/glsl/shaders.c
++++ b/hw/xbox/nv2a/pgraph/glsl/shaders.c
+@@ -18,8 +18,39 @@
+  */
+ 
+ #include "hw/xbox/nv2a/pgraph/pgraph.h"
++#include "ui/xemu-settings.h"
+ #include "shaders.h"
+ 
++/*
++ * Fast depth: skip the geometry shader + barycentric depth interpolation added
++ * for depth precision where fixed-function rasterization suffices. Geometry
++ * shaders are emulated on Apple Silicon (Metal has no geometry stage) and
++ * shader depth writes defeat hidden surface removal on tile-based GPUs, so
++ * this is a large win there at the cost of depth accuracy in a few titles.
++ * Only the OpenGL backend implements the fixed-function polygon offset needed.
++ */
++static bool no_geometry_shader(PGRAPHState *pg)
++{
++    return pg->renderer->ops.get_gpu_properties &&
++           pg->renderer->ops.get_gpu_properties()->no_geometry_shader;
++}
++
++static bool use_fast_depth(PGRAPHState *pg)
++{
++    return no_geometry_shader(pg) ||
++           (g_config.display.quality.fast_depth &&
++            (pg->renderer->type == CONFIG_DISPLAY_RENDERER_OPENGL ||
++             pg->renderer->type == CONFIG_DISPLAY_RENDERER_VULKAN));
++}
++
++void pgraph_glsl_get_geom_state(PGRAPHState *pg, GeomState *geom)
++{
++    memset(geom, 0, sizeof(*geom));
++    pgraph_glsl_set_geom_state(pg, geom);
++    geom->fast_depth = use_fast_depth(pg);
++    geom->no_geometry_shader = no_geometry_shader(pg);
++}
++
+ ShaderState pgraph_glsl_get_shader_state(PGRAPHState *pg)
+ {
+     pg->program_data_dirty = false; /* fixme */
+@@ -30,8 +61,13 @@ ShaderState pgraph_glsl_get_shader_state(PGRAPHState *pg)
+     memset(&state, 0, sizeof(ShaderState));
+ 
+     pgraph_glsl_set_vsh_state(pg, &state.vsh);
+-    pgraph_glsl_set_geom_state(pg, &state.geom);
++    /* All primitives must use the same depth method, even those still needing
++     * a geometry shader (e.g. quads), or multi-pass rendering of the same
++     * geometry gets mismatched depth values and z-fights.
++     */
++    pgraph_glsl_get_geom_state(pg, &state.geom);
+     pgraph_glsl_set_psh_state(pg, &state.psh);
++    state.psh.fast_depth = state.geom.fast_depth;
+ 
+     return state;
+ }
+@@ -74,7 +110,8 @@ bool pgraph_glsl_check_shader_state_dirty(PGRAPHState *pg,
+         pg->compressed_attrs != state->vsh.compressed_attrs ||
+         pg->primitive_mode != state->geom.primitive_mode ||
+         pg->surface_scale_factor != state->vsh.surface_scale_factor ||
+-        pg->surface_shape.zeta_format != state->psh.surface_zeta_format) {
++        pg->surface_shape.zeta_format != state->psh.surface_zeta_format ||
++        use_fast_depth(pg) != state->geom.fast_depth) {
+         return true;
+     }
+ 
+diff --git a/hw/xbox/nv2a/pgraph/glsl/shaders.h b/hw/xbox/nv2a/pgraph/glsl/shaders.h
+index 19d69c64c7..18c54c593a 100644
+--- a/hw/xbox/nv2a/pgraph/glsl/shaders.h
++++ b/hw/xbox/nv2a/pgraph/glsl/shaders.h
+@@ -33,6 +33,8 @@ typedef struct ShaderState {
+ typedef struct PGRAPHState PGRAPHState;
+ 
+ ShaderState pgraph_glsl_get_shader_state(PGRAPHState *pg);
++/* Geometry state as pgraph_glsl_get_shader_state() would compute it */
++void pgraph_glsl_get_geom_state(PGRAPHState *pg, GeomState *geom);
+ 
+ bool pgraph_glsl_check_shader_state_dirty(PGRAPHState *pg,
+                                           const ShaderState *state);
+diff --git a/hw/xbox/nv2a/pgraph/pgraph.c b/hw/xbox/nv2a/pgraph/pgraph.c
+index 9d8118fb49..1e8ce7df80 100644
+--- a/hw/xbox/nv2a/pgraph/pgraph.c
++++ b/hw/xbox/nv2a/pgraph/pgraph.c
+@@ -22,6 +22,7 @@
+ #include <math.h>
+ 
+ #include "hw/xbox/nv2a/nv2a_int.h"
++#include "qemu/xbox-poll.h"
+ #include "ui/xemu-notifications.h"
+ #include "ui/xemu-settings.h"
+ #include "util.h"
+@@ -376,6 +377,9 @@ void nv2a_release_framebuffer_surface(void)
+     NV2AState *d = g_nv2a;
+     PGRAPHState *pg = &d->pgraph;
+     qemu_mutex_lock(&pg->renderer_lock);
++    if (pg->renderer->ops.release_framebuffer_surface) {
++        pg->renderer->ops.release_framebuffer_surface(d);
++    }
+     pg->framebuffer_in_use = false;
+     qemu_cond_broadcast(&pg->framebuffer_released);
+     qemu_mutex_unlock(&pg->renderer_lock);
+@@ -522,6 +526,12 @@ static void pgraph_method_log(unsigned int subchannel,
+     static unsigned int last = 0;
+     static unsigned int count = 0;
+ 
++    /* Called for every method, skip the name lookups unless tracing */
++    if (!trace_event_get_state(TRACE_NV2A_PGRAPH_METHOD) &&
++        !trace_event_get_state(TRACE_NV2A_PGRAPH_METHOD_ABBREV)) {
++        return;
++    }
++
+     if (last == NV097_ARRAY_ELEMENT16 && method != last) {
+         method_name = "NV097_ARRAY_ELEMENT16";
+         trace_nv2a_pgraph_method_abbrev(subchannel, graphics_class, last,
+@@ -2859,6 +2869,7 @@ DEF_METHOD(NV097, BACK_END_WRITE_SEMAPHORE_RELEASE)
+     semaphore_data += semaphore_offset;
+ 
+     stl_le_p((uint32_t*)semaphore_data, parameter);
++    xbox_poll_notify();
+ 
+     //qemu_mutex_lock(&d->pgraph.lock);
+     //bql_unlock();
+@@ -3157,6 +3168,7 @@ void pgraph_write_zpass_pixel_cnt_report(NV2AState *d, uint32_t parameter,
+     stq_le_p((uint64_t *)&report_data[0], timestamp);
+     stl_le_p((uint32_t *)&report_data[8], result);
+     stl_le_p((uint32_t *)&report_data[12], done);
++    xbox_poll_notify();
+ 
+     NV2A_DPRINTF("Report result %d @%" HWADDR_PRIx, result, offset);
+ }
+diff --git a/hw/xbox/nv2a/pgraph/pgraph.h b/hw/xbox/nv2a/pgraph/pgraph.h
+index b4db914a3c..89a0eeb501 100644
+--- a/hw/xbox/nv2a/pgraph/pgraph.h
++++ b/hw/xbox/nv2a/pgraph/pgraph.h
+@@ -103,6 +103,8 @@ typedef struct GPUProperties {
+         short tri_strip1;
+         short tri_fan;
+     } geom_shader_winding;
++    /* Host has no geometry shaders (e.g. MoltenVK): always use fast depth */
++    bool no_geometry_shader;
+ } GPUProperties;
+ 
+ typedef struct PGRAPHRenderer {
+@@ -131,6 +133,7 @@ typedef struct PGRAPHRenderer {
+         void (*set_surface_scale_factor)(NV2AState *d, unsigned int scale);
+         unsigned int (*get_surface_scale_factor)(NV2AState *d);
+         int (*get_framebuffer_surface)(NV2AState *d);
++        void (*release_framebuffer_surface)(NV2AState *d);
+         GPUProperties *(*get_gpu_properties)(void);
+     } ops;
+ } PGRAPHRenderer;
+diff --git a/hw/xbox/nv2a/pgraph/profile.c b/hw/xbox/nv2a/pgraph/profile.c
+index 295042010d..0472ffbf54 100644
+--- a/hw/xbox/nv2a/pgraph/profile.c
++++ b/hw/xbox/nv2a/pgraph/profile.c
+@@ -39,11 +39,55 @@ void nv2a_profile_increment(void)
+     }
+ }
+ 
++/*
++ * With XEMU_PERF_LOG set, print frames per second and per-frame averages of
++ * the nonzero profile counters once a second to stderr.
++ */
++static void perf_log_frame(int64_t now)
++{
++    static int enabled = -1;
++    static int64_t ts;
++    static unsigned int frames;
++    static int64_t sums[NV2A_PROF__COUNT];
++
++    if (enabled < 0) {
++        enabled = getenv("XEMU_PERF_LOG") != NULL;
++        ts = now;
++    }
++    if (!enabled) {
++        return;
++    }
++
++    frames++;
++    for (int i = 0; i < NV2A_PROF__COUNT; i++) {
++        sums[i] += g_nv2a_stats.frame_working.counters[i];
++    }
++
++    int64_t delta = now - ts;
++    if (delta < 1000000) {
++        return;
++    }
++
++    fprintf(stderr, "perf: fps=%.1f", frames * 1000000.0 / delta);
++    for (int i = 0; i < NV2A_PROF__COUNT; i++) {
++        if (sums[i]) {
++            fprintf(stderr, " %s=%.1f", nv2a_profile_get_counter_name(i),
++                    (double)sums[i] / frames);
++        }
++    }
++    fprintf(stderr, "\n");
++
++    ts = now;
++    frames = 0;
++    memset(sums, 0, sizeof(sums));
++}
++
+ void nv2a_profile_flip_stall(void)
+ {
+     int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+     int64_t render_time = (now-g_nv2a_stats.last_flip_time)/1000;
+ 
++    perf_log_frame(now);
+     g_nv2a_stats.frame_working.mspf = render_time;
+     g_nv2a_stats.frame_history[g_nv2a_stats.frame_ptr] =
+         g_nv2a_stats.frame_working;
+diff --git a/hw/xbox/nv2a/pgraph/vk/display.c b/hw/xbox/nv2a/pgraph/vk/display.c
+index 6b9e5851c4..d0442cc795 100644
+--- a/hw/xbox/nv2a/pgraph/vk/display.c
++++ b/hw/xbox/nv2a/pgraph/vk/display.c
+@@ -18,6 +18,9 @@
+  */
+ 
+ #include "renderer.h"
++#if HAVE_IOSURFACE_DISPLAY
++#include "iosurface.h"
++#endif
+ #include <math.h>
+ 
+ static uint8_t *convert_texture_data__CR8YB8CB8YA8(uint8_t *data_out,
+@@ -320,7 +323,7 @@ static void create_render_pass(PGRAPHState *pg)
+ 
+     VkAttachmentReference color_reference;
+     attachment = (VkAttachmentDescription){
+-        .format = VK_FORMAT_R8G8B8A8_UNORM,
++        .format = DISPLAY_VK_FORMAT,
+         .samples = VK_SAMPLE_COUNT_1_BIT,
+         .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+@@ -552,6 +555,13 @@ static void destroy_current_display_image(PGRAPHState *pg)
+     CloseHandle(d->handle);
+     d->handle = 0;
+ #endif
++#elif HAVE_IOSURFACE_DISPLAY
++    glDeleteFramebuffers(2, d->gl_fbo);
++    d->gl_fbo[0] = d->gl_fbo[1] = 0;
++    glDeleteTextures(1, &d->gl_texture_id);
++    d->gl_texture_id = 0;
++    glDeleteTextures(1, &d->gl_rect_texture);
++    d->gl_rect_texture = 0;
+ #endif
+ 
+     vkDestroyImageView(r->device, d->image_view, NULL);
+@@ -563,6 +573,11 @@ static void destroy_current_display_image(PGRAPHState *pg)
+     vkFreeMemory(r->device, d->memory, NULL);
+     d->memory = VK_NULL_HANDLE;
+ 
++#if HAVE_IOSURFACE_DISPLAY
++    pgraph_vk_iosurface_release(d->iosurface);
++    d->iosurface = NULL;
++#endif
++
+     d->draw_time = 0;
+ }
+ 
+@@ -578,10 +593,10 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
+         destroy_current_display_image(pg);
+     }
+ 
+-    const GLint gl_internal_format = GL_RGBA8;
+     bool use_optimal_tiling = true;
+ 
+ #if HAVE_EXTERNAL_MEMORY
++    const GLint gl_internal_format = GL_RGBA8;
+     GLint num_tiling_types;
+     glGetInternalformativ(GL_TEXTURE_2D, gl_internal_format,
+                           GL_NUM_TILING_TYPES_EXT, 1, &num_tiling_types);
+@@ -609,7 +624,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
+         .extent.depth = 1,
+         .mipLevels = 1,
+         .arrayLayers = 1,
+-        .format = VK_FORMAT_R8G8B8A8_UNORM,
++        .format = DISPLAY_VK_FORMAT,
+         .tiling = use_optimal_tiling ? VK_IMAGE_TILING_OPTIMAL : VK_IMAGE_TILING_LINEAR,
+         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+         .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+@@ -617,6 +632,15 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
+         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+     };
+ 
++#if HAVE_IOSURFACE_DISPLAY
++    d->iosurface = pgraph_vk_iosurface_create(width, height);
++    assert(d->iosurface);
++    VkImportMetalIOSurfaceInfoEXT import_iosurface_info = {
++        .sType = VK_STRUCTURE_TYPE_IMPORT_METAL_IO_SURFACE_INFO_EXT,
++        .ioSurface = (IOSurfaceRef)d->iosurface,
++    };
++    image_create_info.pNext = &import_iosurface_info;
++#else
+     VkExternalMemoryImageCreateInfo external_memory_image_create_info = {
+         .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+ #ifdef WIN32
+@@ -626,6 +650,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
+ #endif
+     };
+     image_create_info.pNext = &external_memory_image_create_info;
++#endif
+ 
+     VK_CHECK(vkCreateImage(r->device, &image_create_info, NULL, &d->image));
+ 
+@@ -641,6 +666,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
+                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+     };
+ 
++#if HAVE_EXTERNAL_MEMORY
+     VkExportMemoryAllocateInfo export_memory_alloc_info = {
+         .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
+         .handleTypes =
+@@ -652,6 +678,7 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
+             ,
+     };
+     alloc_info.pNext = &export_memory_alloc_info;
++#endif
+ 
+     VK_CHECK(vkAllocateMemory(r->device, &alloc_info, NULL, &d->memory));
+     VK_CHECK(vkBindImageMemory(r->device, d->image, d->memory, 0));
+@@ -713,6 +740,33 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
+                          image_create_info.extent.height, d->gl_memory_obj, 0);
+     assert(glGetError() == GL_NO_ERROR);
+ 
++#elif HAVE_IOSURFACE_DISPLAY
++
++    /* GL can only wrap IOSurfaces as rectangle textures, while the UI samples
++     * a 2D texture: blit between them after each display render. */
++    glGenTextures(1, &d->gl_rect_texture);
++    glBindTexture(GL_TEXTURE_RECTANGLE, d->gl_rect_texture);
++    bool bound = pgraph_vk_iosurface_bind_gl_texture_rectangle(
++        d->iosurface, width, height);
++    assert(bound);
++
++    glGenTextures(1, &d->gl_texture_id);
++    glBindTexture(GL_TEXTURE_2D, d->gl_texture_id);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
++                 GL_UNSIGNED_BYTE, NULL);
++
++    glGenFramebuffers(2, d->gl_fbo);
++    glBindFramebuffer(GL_READ_FRAMEBUFFER, d->gl_fbo[0]);
++    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
++                           GL_TEXTURE_RECTANGLE, d->gl_rect_texture, 0);
++    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, d->gl_fbo[1]);
++    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
++                           GL_TEXTURE_2D, d->gl_texture_id, 0);
++    glBindFramebuffer(GL_FRAMEBUFFER, 0);
++    assert(glGetError() == GL_NO_ERROR);
++
+ #endif // HAVE_EXTERNAL_MEMORY
+ 
+     d->width = image_create_info.extent.width;
+@@ -925,7 +979,7 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
+                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+     pgraph_vk_transition_image_layout(
+-        pg, cmd, disp->image, VK_FORMAT_R8G8B8A8_UNORM,
++        pg, cmd, disp->image, DISPLAY_VK_FORMAT,
+         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+ 
+     VkRenderPassBeginInfo render_pass_begin_info = {
+@@ -990,7 +1044,7 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
+                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+ 
+     pgraph_vk_transition_image_layout(pg, cmd, disp->image,
+-                                      VK_FORMAT_R8G8B8_UNORM,
++                                      DISPLAY_VK_FORMAT,
+                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+ 
+@@ -998,6 +1052,16 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
+     pgraph_vk_end_single_time_commands(pg, cmd);
+     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_5);
+ 
++#if HAVE_IOSURFACE_DISPLAY
++    /* The queue is idle, so the IOSurface holds the finished frame */
++    glBindFramebuffer(GL_READ_FRAMEBUFFER, disp->gl_fbo[0]);
++    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, disp->gl_fbo[1]);
++    glBlitFramebuffer(0, 0, disp->width, disp->height, 0, 0, disp->width,
++                      disp->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
++    glBindFramebuffer(GL_FRAMEBUFFER, 0);
++    glFlush();
++#endif
++
+     disp->draw_time = surface->draw_time;
+ }
+ 
+diff --git a/hw/xbox/nv2a/pgraph/vk/draw.c b/hw/xbox/nv2a/pgraph/vk/draw.c
+index d78087e56b..f33278820b 100644
+--- a/hw/xbox/nv2a/pgraph/vk/draw.c
++++ b/hw/xbox/nv2a/pgraph/vk/draw.c
+@@ -54,6 +54,10 @@ static VkPrimitiveTopology get_primitive_topology(PGRAPHState *pg)
+     int polygon_mode = r->shader_binding->state.geom.polygon_front_mode;
+     int primitive_mode = r->shader_binding->state.geom.primitive_mode;
+ 
++    if (pgraph_glsl_quads_as_triangles(&r->shader_binding->state.geom)) {
++        return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
++    }
++
+     // FIXME: Replace with LUT
+     switch (primitive_mode) {
+     case PRIM_TYPE_POINTS:
+@@ -240,6 +244,10 @@ void pgraph_vk_finalize_pipelines(PGRAPHState *pg)
+ 
+     vkDestroyFence(r->device, r->command_buffer_fence, NULL);
+     vkDestroySemaphore(r->device, r->command_buffer_semaphore, NULL);
++
++    g_free(r->quad_indices);
++    r->quad_indices = NULL;
++    r->quad_indices_capacity = 0;
+ }
+ 
+ static void init_render_pass_state(PGRAPHState *pg, RenderPassState *state)
+@@ -803,6 +811,31 @@ static void create_pipeline(PGRAPHState *pg)
+         .pNext = rasterizer_next_struct,
+     };
+ 
++    if (r->shader_binding->state.geom.fast_depth) {
++        /* Without the geometry/fragment shader depth path, apply polygon
++         * offset with fixed function depth bias. */
++        uint32_t setupraster = pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER);
++        uint32_t enable_mask;
++        switch (r->shader_binding->state.geom.polygon_front_mode) {
++        case POLY_MODE_LINE:
++            enable_mask = NV_PGRAPH_SETUPRASTER_POFFSETLINEENABLE;
++            break;
++        case POLY_MODE_POINT:
++            enable_mask = NV_PGRAPH_SETUPRASTER_POFFSETPOINTENABLE;
++            break;
++        default:
++            enable_mask = NV_PGRAPH_SETUPRASTER_POFFSETFILLENABLE;
++            break;
++        }
++        if (setupraster & enable_mask) {
++            uint32_t zfactor_u32 = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETFACTOR);
++            uint32_t zbias_u32 = pgraph_reg_r(pg, NV_PGRAPH_ZOFFSETBIAS);
++            rasterizer.depthBiasEnable = VK_TRUE;
++            rasterizer.depthBiasSlopeFactor = *(float *)&zfactor_u32;
++            rasterizer.depthBiasConstantFactor = *(float *)&zbias_u32;
++        }
++    }
++
+     if (pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER) & NV_PGRAPH_SETUPRASTER_CULLENABLE) {
+         uint32_t cull_face = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER),
+                                       NV_PGRAPH_SETUPRASTER_CULLCTRL);
+@@ -2018,6 +2051,41 @@ static void copy_remapped_attributes_to_inline_buffer(PGRAPHState *pg,
+     buffer->buffer_offset += remap.buffer_space_required;
+ }
+ 
++static uint32_t *get_quad_indices(PGRAPHVkState *r, size_t count)
++{
++    if (count > r->quad_indices_capacity) {
++        r->quad_indices_capacity = MAX(count, r->quad_indices_capacity * 2);
++        r->quad_indices = g_renew(uint32_t, r->quad_indices,
++                                  r->quad_indices_capacity);
++    }
++    return r->quad_indices;
++}
++
++/* Convert vertices 0..count-1 into r->quad_indices, reserving index space */
++static size_t prepare_quad_range(PGRAPHState *pg, const GeomState *geom,
++                                 size_t count)
++{
++    PGRAPHVkState *r = pg->vk_renderer_state;
++
++    uint32_t *indices = get_quad_indices(
++        r, pgraph_quad_tri_index_count(geom->primitive_mode, count));
++    size_t n = pgraph_quads_to_triangles(geom, NULL, 0, count, indices);
++    ensure_buffer_space(pg, BUFFER_INDEX_STAGING, n * sizeof(uint32_t));
++    return n;
++}
++
++static void draw_quad_indices(PGRAPHVkState *r, VkDeviceSize offset,
++                              size_t count)
++{
++    if (!count) {
++        return;
++    }
++    vkCmdBindIndexBuffer(r->command_buffer,
++                         r->storage_buffers[BUFFER_INDEX].buffer, offset,
++                         VK_INDEX_TYPE_UINT32);
++    vkCmdDrawIndexed(r->command_buffer, count, 1, 0, 0, 0);
++}
++
+ void pgraph_vk_flush_draw(NV2AState *d)
+ {
+     PGRAPHState *pg = &d->pgraph;
+@@ -2030,6 +2098,13 @@ void pgraph_vk_flush_draw(NV2AState *d)
+ 
+     r->num_vertex_ram_buffer_syncs = 0;
+ 
++    /* Shaders are bound later in begin_draw(), so derive the geometry state
++     * that binding will have from the registers. */
++    GeomState geom_state;
++    pgraph_glsl_get_geom_state(pg, &geom_state);
++    const GeomState *geom = &geom_state;
++    bool quads = pgraph_glsl_quads_as_triangles(geom);
++
+     if (pg->draw_arrays_length) {
+         NV2A_VK_DGROUP_BEGIN("Draw Arrays");
+         nv2a_profile_inc_counter(NV2A_PROF_DRAW_ARRAYS);
+@@ -2050,17 +2125,43 @@ void pgraph_vk_flush_draw(NV2AState *d)
+         sync_vertex_ram_buffer(pg);
+         VertexBufferRemap remap = remap_unaligned_attributes(pg, max_element);
+ 
++        size_t num_quad_indices = 0;
++        if (quads) {
++            size_t total = 0;
++            for (int i = 0; i < pg->draw_arrays_length; i++) {
++                total += pgraph_quad_tri_index_count(geom->primitive_mode,
++                                                     pg->draw_arrays_count[i]);
++            }
++            uint32_t *indices = get_quad_indices(r, total);
++            for (int i = 0; i < pg->draw_arrays_length; i++) {
++                num_quad_indices += pgraph_quads_to_triangles(
++                    geom, NULL, pg->draw_arrays_start[i],
++                    pg->draw_arrays_count[i], indices + num_quad_indices);
++            }
++            ensure_buffer_space(pg, BUFFER_INDEX_STAGING,
++                                num_quad_indices * sizeof(uint32_t));
++        }
++
+         begin_pre_draw(pg);
+         copy_remapped_attributes_to_inline_buffer(pg, remap, 0, max_element);
++        VkDeviceSize index_offset = 0;
++        if (num_quad_indices) {
++            index_offset = pgraph_vk_update_index_buffer(
++                pg, r->quad_indices, num_quad_indices * sizeof(uint32_t));
++        }
+         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
+                                      "Draw Arrays");
+         begin_draw(pg);
+         bind_vertex_buffer(pg, remap.attributes, 0);
+-        for (int i = 0; i < pg->draw_arrays_length; i++) {
+-            uint32_t start = pg->draw_arrays_start[i],
+-                     count = pg->draw_arrays_count[i];
+-            NV2A_VK_DPRINTF("- [%d] Start:%d Count:%d", i, start, count);
+-            vkCmdDraw(r->command_buffer, count, 1, start, 0);
++        if (quads) {
++            draw_quad_indices(r, index_offset, num_quad_indices);
++        } else {
++            for (int i = 0; i < pg->draw_arrays_length; i++) {
++                uint32_t start = pg->draw_arrays_start[i],
++                         count = pg->draw_arrays_count[i];
++                NV2A_VK_DPRINTF("- [%d] Start:%d Count:%d", i, start, count);
++                vkCmdDraw(r->command_buffer, count, 1, start, 0);
++            }
+         }
+         end_draw(pg);
+         pgraph_vk_end_debug_marker(r, r->command_buffer);
+@@ -2073,8 +2174,17 @@ void pgraph_vk_flush_draw(NV2AState *d)
+ 
+         nv2a_profile_inc_counter(NV2A_PROF_INLINE_ELEMENTS);
+ 
+-        size_t index_data_size =
+-            pg->inline_elements_length * sizeof(pg->inline_elements[0]);
++        uint32_t *index_data = pg->inline_elements;
++        size_t index_count = pg->inline_elements_length;
++        if (quads) {
++            index_data = get_quad_indices(
++                r, pgraph_quad_tri_index_count(geom->primitive_mode,
++                                               index_count));
++            index_count = pgraph_quads_to_triangles(
++                geom, pg->inline_elements, 0, pg->inline_elements_length,
++                index_data);
++        }
++        size_t index_data_size = index_count * sizeof(uint32_t);
+ 
+         ensure_buffer_space(pg, BUFFER_INDEX_STAGING, index_data_size);
+ 
+@@ -2092,17 +2202,16 @@ void pgraph_vk_flush_draw(NV2AState *d)
+ 
+         begin_pre_draw(pg);
+         copy_remapped_attributes_to_inline_buffer(pg, remap, 0, max_element + 1);
+-        VkDeviceSize buffer_offset = pgraph_vk_update_index_buffer(
+-            pg, pg->inline_elements, index_data_size);
++        VkDeviceSize buffer_offset = 0;
++        if (index_count) {
++            buffer_offset = pgraph_vk_update_index_buffer(pg, index_data,
++                                                          index_data_size);
++        }
+         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
+                                      "Inline Elements");
+         begin_draw(pg);
+         bind_vertex_buffer(pg, remap.attributes, 0);
+-        vkCmdBindIndexBuffer(r->command_buffer,
+-                             r->storage_buffers[BUFFER_INDEX].buffer,
+-                             buffer_offset, VK_INDEX_TYPE_UINT32);
+-        vkCmdDrawIndexed(r->command_buffer, pg->inline_elements_length, 1, 0, 0,
+-                         0);
++        draw_quad_indices(r, buffer_offset, index_count);
+         end_draw(pg);
+         pgraph_vk_end_debug_marker(r, r->command_buffer);
+ 
+@@ -2131,15 +2240,26 @@ void pgraph_vk_flush_draw(NV2AState *d)
+             offset += vertex_data_size;
+         }
+         ensure_buffer_space(pg, BUFFER_VERTEX_INLINE_STAGING, offset);
++        size_t num_quad_indices =
++            quads ? prepare_quad_range(pg, geom, pg->inline_buffer_length) : 0;
+ 
+         begin_pre_draw(pg);
+         VkDeviceSize buffer_offset = pgraph_vk_update_vertex_inline_buffer(
+             pg, data, sizes, r->num_active_vertex_attribute_descriptions);
++        VkDeviceSize index_offset = 0;
++        if (num_quad_indices) {
++            index_offset = pgraph_vk_update_index_buffer(
++                pg, r->quad_indices, num_quad_indices * sizeof(uint32_t));
++        }
+         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
+                                      "Inline Buffer");
+         begin_draw(pg);
+         bind_inline_vertex_buffer(pg, buffer_offset);
+-        vkCmdDraw(r->command_buffer, pg->inline_buffer_length, 1, 0, 0);
++        if (quads) {
++            draw_quad_indices(r, index_offset, num_quad_indices);
++        } else {
++            vkCmdDraw(r->command_buffer, pg->inline_buffer_length, 1, 0, 0);
++        }
+         end_draw(pg);
+         pgraph_vk_end_debug_marker(r, r->command_buffer);
+ 
+@@ -2174,16 +2294,27 @@ void pgraph_vk_flush_draw(NV2AState *d)
+         NV2A_DPRINTF("draw inline array %d, %d\n", vertex_size, index_count);
+         pgraph_vk_bind_vertex_attributes(d, 0, index_count - 1, true,
+                                          vertex_size, index_count - 1);
++        size_t num_quad_indices =
++            quads ? prepare_quad_range(pg, geom, index_count) : 0;
+ 
+         begin_pre_draw(pg);
+         void *inline_array_data = pg->inline_array;
+         VkDeviceSize buffer_offset = pgraph_vk_update_vertex_inline_buffer(
+             pg, &inline_array_data, &inline_array_data_size, 1);
++        VkDeviceSize index_offset = 0;
++        if (num_quad_indices) {
++            index_offset = pgraph_vk_update_index_buffer(
++                pg, r->quad_indices, num_quad_indices * sizeof(uint32_t));
++        }
+         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
+                                      "Inline Array");
+         begin_draw(pg);
+         bind_inline_vertex_buffer(pg, buffer_offset);
+-        vkCmdDraw(r->command_buffer, index_count, 1, 0, 0);
++        if (quads) {
++            draw_quad_indices(r, index_offset, num_quad_indices);
++        } else {
++            vkCmdDraw(r->command_buffer, index_count, 1, 0, 0);
++        }
+         end_draw(pg);
+         pgraph_vk_end_debug_marker(r, r->command_buffer);
+         NV2A_VK_DGROUP_END();
+diff --git a/hw/xbox/nv2a/pgraph/vk/glsl.h b/hw/xbox/nv2a/pgraph/vk/glsl.h
+index 3e57624d0a..e63f9c1b53 100644
+--- a/hw/xbox/nv2a/pgraph/vk/glsl.h
++++ b/hw/xbox/nv2a/pgraph/vk/glsl.h
+@@ -145,6 +145,48 @@ static inline void uniform_copy(ShaderUniformLayout *layout, int idx,
+     }
+ }
+ 
++/* Like uniform_copy, but only writes and reports elements that differ */
++static inline bool uniform_copy_if_changed(ShaderUniformLayout *layout, int idx,
++                                           void *values, size_t value_size,
++                                           size_t count)
++{
++    assert(idx > 0 && "invalid uniform index");
++
++    ShaderUniform *u = &layout->uniforms[idx - 1];
++    const size_t element_size = value_size * u->dim_v;
++
++    size_t bytes_remaining = value_size * count;
++    char *p_out = uniform_ptr(layout, idx);
++    char *p_max = p_out + layout->total_size;
++    char *p_in = (char *)values;
++    bool changed = false;
++
++    if (element_size == u->stride) {
++        /* Tightly packed: compare and copy as one block */
++        assert(p_out + bytes_remaining <= p_max);
++        if (memcmp(p_out, p_in, bytes_remaining)) {
++            memcpy(p_out, p_in, bytes_remaining);
++            changed = true;
++        }
++        return changed;
++    }
++
++    int index = 0;
++    while (bytes_remaining) {
++        assert((p_out + element_size) <= p_max);
++        assert(index < u->dim_a);
++        if (memcmp(p_out, p_in, element_size)) {
++            memcpy(p_out, p_in, element_size);
++            changed = true;
++        }
++        bytes_remaining -= element_size;
++        p_out += u->stride;
++        p_in += element_size;
++        index += 1;
++    }
++    return changed;
++}
++
+ static inline
+ void uniform1fv(ShaderUniformLayout *layout, int idx, size_t count, float *values)
+ {
+diff --git a/hw/xbox/nv2a/pgraph/vk/gpuprops.c b/hw/xbox/nv2a/pgraph/vk/gpuprops.c
+index ecc8bb3852..cbda5787f4 100644
+--- a/hw/xbox/nv2a/pgraph/vk/gpuprops.c
++++ b/hw/xbox/nv2a/pgraph/vk/gpuprops.c
+@@ -589,6 +589,14 @@ void pgraph_vk_determine_gpu_properties(NV2AState *d)
+ {
+     const int width = 640;
+     const int height = 480;
++    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
++
++    if (!r->enabled_physical_device_features.geometryShader) {
++        memset(&pgraph_vk_gpu_properties, 0, sizeof(pgraph_vk_gpu_properties));
++        pgraph_vk_gpu_properties.no_geometry_shader = true;
++        fprintf(stderr, "VK: no geometry shader support, using fast depth\n");
++        return;
++    }
+ 
+     uint8_t *pixels = render_geom_shader_triangles(d, width, height);
+     determine_triangle_winding_order(pixels, width, height,
+diff --git a/hw/xbox/nv2a/pgraph/vk/instance.c b/hw/xbox/nv2a/pgraph/vk/instance.c
+index edead06c0f..7f7d5abc25 100644
+--- a/hw/xbox/nv2a/pgraph/vk/instance.c
++++ b/hw/xbox/nv2a/pgraph/vk/instance.c
+@@ -22,6 +22,10 @@
+ #include "renderer.h"
+ #include "xemu-version.h"
+ 
++#ifdef __APPLE__
++#include <dlfcn.h>
++#endif
++
+ #define VkExtensionPropertiesArray GArray
+ #define StringArray GArray
+ 
+@@ -35,6 +39,9 @@ static char const *const required_device_extensions[] = {
+ #ifdef WIN32
+     VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
+     VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
++#elif defined(__APPLE__)
++    /* Display images are shared with GL through IOSurfaces */
++    VK_EXT_METAL_OBJECTS_EXTENSION_NAME,
+ #else
+     VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+     VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
+@@ -142,14 +149,60 @@ add_optional_instance_extension_names(PGRAPHState *pg,
+         g_config.display.vulkan.validation_layers &&
+         add_extension_if_available(available_extensions, enabled_extension_names,
+                                    VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
++
++    /* Needed to enumerate non-conformant implementations like MoltenVK
++     * through the Vulkan loader. */
++    r->portability_enumeration_extension_enabled =
++        is_extension_available(available_extensions,
++                               VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) &&
++        add_extension_if_available(available_extensions, enabled_extension_names,
++                                   VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
++}
++
++#ifdef __APPLE__
++/*
++ * Load MoltenVK directly: from the app bundle first, then from Homebrew. This
++ * avoids depending on a Vulkan loader and ICD manifest being installed.
++ */
++static VkResult load_vulkan_library(void)
++{
++    static const char *const paths[] = {
++        "@executable_path/../Libraries/arm64/libMoltenVK.dylib",
++        "@executable_path/../Frameworks/libMoltenVK.dylib",
++        "@executable_path/libMoltenVK.dylib",
++        "/opt/homebrew/lib/libMoltenVK.dylib",
++        "/usr/local/lib/libMoltenVK.dylib",
++    };
++
++    for (int i = 0; i < ARRAY_SIZE(paths); i++) {
++        void *module = dlopen(paths[i], RTLD_NOW | RTLD_LOCAL);
++        if (!module) {
++            continue;
++        }
++        PFN_vkGetInstanceProcAddr get_instance_proc_addr =
++            (PFN_vkGetInstanceProcAddr)dlsym(module, "vkGetInstanceProcAddr");
++        if (get_instance_proc_addr) {
++            fprintf(stderr, "Loaded Vulkan implementation: %s\n", paths[i]);
++            volkInitializeCustom(get_instance_proc_addr);
++            return VK_SUCCESS;
++        }
++        dlclose(module);
++    }
++
++    return volkInitialize();
+ }
++#endif
+ 
+ static bool create_instance(PGRAPHState *pg, Error **errp)
+ {
+     PGRAPHVkState *r = pg->vk_renderer_state;
+     VkResult result;
+ 
++#ifdef __APPLE__
++    result = load_vulkan_library();
++#else
+     result = volkInitialize();
++#endif
+     if (result != VK_SUCCESS) {
+         error_setg(errp, "volkInitialize failed");
+         return false;
+@@ -195,6 +248,9 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
+ 
+     VkInstanceCreateInfo create_info = {
+         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
++        .flags = r->portability_enumeration_extension_enabled ?
++                     VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR :
++                     0,
+         .pApplicationInfo = &app_info,
+         .enabledExtensionCount = enabled_extension_names->len,
+         .ppEnabledExtensionNames =
+@@ -331,6 +387,14 @@ static void add_optional_device_extension_names(
+     r->memory_budget_extension_enabled = add_extension_if_available(
+         available_extensions, enabled_extension_names,
+         VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
++
++    /* Must be enabled when supported (e.g. MoltenVK) */
++    if (is_extension_available(available_extensions,
++                               VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
++        add_extension_if_available(available_extensions,
++                                   enabled_extension_names,
++                                   VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
++    }
+ }
+ 
+ static bool check_device_support_required_extensions(VkPhysicalDevice device)
+@@ -489,7 +553,13 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
+         }
+         F(depthClamp, true),
+         F(fillModeNonSolid, true),
++#ifdef __APPLE__
++        /* Metal has no geometry shaders: fast depth and quad conversion
++         * replace them. */
++        F(geometryShader, false),
++#else
+         F(geometryShader, true),
++#endif
+         F(occlusionQueryPrecise, true),
+         F(samplerAnisotropy, false),
+         F(shaderClipDistance, true),
+diff --git a/hw/xbox/nv2a/pgraph/vk/iosurface.c b/hw/xbox/nv2a/pgraph/vk/iosurface.c
+new file mode 100644
+index 0000000000..a6c072be41
+--- /dev/null
++++ b/hw/xbox/nv2a/pgraph/vk/iosurface.c
+@@ -0,0 +1,54 @@
++/*
++ * Geforce NV2A PGRAPH Vulkan Renderer: IOSurface display interop (macOS)
++ *
++ * The display image is rendered by Vulkan (MoltenVK) into an IOSurface which
++ * the OpenGL UI samples without a copy through the CPU.
++ *
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ */
++
++#include <CoreFoundation/CoreFoundation.h>
++#include <IOSurface/IOSurface.h>
++#include <OpenGL/OpenGL.h>
++#include <OpenGL/CGLIOSurface.h>
++#include <OpenGL/gl3.h>
++
++#include "iosurface.h"
++
++static void set_int(CFMutableDictionaryRef dict, CFStringRef key, int32_t v)
++{
++    CFNumberRef num = CFNumberCreate(NULL, kCFNumberSInt32Type, &v);
++    CFDictionarySetValue(dict, key, num);
++    CFRelease(num);
++}
++
++void *pgraph_vk_iosurface_create(int width, int height)
++{
++    CFMutableDictionaryRef props = CFDictionaryCreateMutable(
++        NULL, 0, &kCFTypeDictionaryKeyCallBacks,
++        &kCFTypeDictionaryValueCallBacks);
++    set_int(props, kIOSurfaceWidth, width);
++    set_int(props, kIOSurfaceHeight, height);
++    set_int(props, kIOSurfaceBytesPerElement, 4);
++    set_int(props, kIOSurfacePixelFormat, 'BGRA');
++
++    IOSurfaceRef surface = IOSurfaceCreate(props);
++    CFRelease(props);
++    return (void *)surface;
++}
++
++void pgraph_vk_iosurface_release(void *surface)
++{
++    if (surface) {
++        CFRelease((IOSurfaceRef)surface);
++    }
++}
++
++bool pgraph_vk_iosurface_bind_gl_texture_rectangle(void *surface, int width,
++                                                   int height)
++{
++    CGLError err = CGLTexImageIOSurface2D(
++        CGLGetCurrentContext(), GL_TEXTURE_RECTANGLE, GL_RGBA, width, height,
++        GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, (IOSurfaceRef)surface, 0);
++    return err == kCGLNoError;
++}
+diff --git a/hw/xbox/nv2a/pgraph/vk/iosurface.h b/hw/xbox/nv2a/pgraph/vk/iosurface.h
+new file mode 100644
+index 0000000000..9efc0d649f
+--- /dev/null
++++ b/hw/xbox/nv2a/pgraph/vk/iosurface.h
+@@ -0,0 +1,26 @@
++/*
++ * Geforce NV2A PGRAPH Vulkan Renderer: IOSurface display interop (macOS)
++ *
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ */
++
++#ifndef HW_XBOX_NV2A_PGRAPH_VK_IOSURFACE_H
++#define HW_XBOX_NV2A_PGRAPH_VK_IOSURFACE_H
++
++#include <stdbool.h>
++
++/*
++ * Kept free of Apple headers so it can be included next to epoxy. Surfaces
++ * are BGRA8, 4 bytes per pixel.
++ */
++void *pgraph_vk_iosurface_create(int width, int height);
++void pgraph_vk_iosurface_release(void *surface);
++
++/*
++ * Back the GL_TEXTURE_RECTANGLE currently bound in the current CGL context
++ * with surface.
++ */
++bool pgraph_vk_iosurface_bind_gl_texture_rectangle(void *surface, int width,
++                                                   int height);
++
++#endif
+diff --git a/hw/xbox/nv2a/pgraph/vk/meson.build b/hw/xbox/nv2a/pgraph/vk/meson.build
+index 93ef5ca330..668a8ff6b9 100644
+--- a/hw/xbox/nv2a/pgraph/vk/meson.build
++++ b/hw/xbox/nv2a/pgraph/vk/meson.build
+@@ -22,4 +22,10 @@ specific_ss.add([volk, libglslang, vma, vulkan, spirv_reflect,
+ 		)
+ 	])
+ 
++if host_os == 'darwin'
++  specific_ss.add(dependency('appleframeworks',
++                             modules: ['CoreFoundation', 'IOSurface', 'OpenGL']),
++                  files('iosurface.c'))
++endif
++
+ endif
+diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.c b/hw/xbox/nv2a/pgraph/vk/renderer.c
+index 4272bbceb6..d69a31a9af 100644
+--- a/hw/xbox/nv2a/pgraph/vk/renderer.c
++++ b/hw/xbox/nv2a/pgraph/vk/renderer.c
+@@ -22,13 +22,13 @@
+ 
+ #include "gloffscreen.h"
+ 
+-#if HAVE_EXTERNAL_MEMORY
++#if HAVE_GL_DISPLAY
+ static GloContext *g_gl_context;
+ #endif
+ 
+ static void early_context_init(void)
+ {
+-#if HAVE_EXTERNAL_MEMORY
++#if HAVE_GL_DISPLAY
+     g_gl_context = glo_context_create();
+ #endif
+ }
+@@ -39,7 +39,7 @@ static void pgraph_vk_init(NV2AState *d, Error **errp)
+ 
+     pg->vk_renderer_state = (PGRAPHVkState *)g_malloc0(sizeof(PGRAPHVkState));
+ 
+-#if HAVE_EXTERNAL_MEMORY
++#if HAVE_GL_DISPLAY
+     glo_set_current(g_gl_context);
+ #endif
+ 
+@@ -190,7 +190,7 @@ static int pgraph_vk_get_framebuffer_surface(NV2AState *d)
+ 
+     surface->frame_time = pg->frame_time;
+ 
+-#if HAVE_EXTERNAL_MEMORY
++#if HAVE_GL_DISPLAY
+     qemu_event_reset(&d->pgraph.sync_complete);
+     qatomic_set(&pg->sync_pending, true);
+     pfifo_kick(d);
+diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.h b/hw/xbox/nv2a/pgraph/vk/renderer.h
+index deb8762225..b805a76333 100644
+--- a/hw/xbox/nv2a/pgraph/vk/renderer.h
++++ b/hw/xbox/nv2a/pgraph/vk/renderer.h
+@@ -41,7 +41,17 @@
+ #include "constants.h"
+ #include "glsl.h"
+ 
++#ifdef __APPLE__
++/* No GL_EXT_memory_object on macOS: share the display image via IOSurface */
++#define HAVE_EXTERNAL_MEMORY 0
++#define HAVE_IOSURFACE_DISPLAY 1
++#define DISPLAY_VK_FORMAT VK_FORMAT_B8G8R8A8_UNORM
++#else
+ #define HAVE_EXTERNAL_MEMORY 1
++#define HAVE_IOSURFACE_DISPLAY 0
++#define DISPLAY_VK_FORMAT VK_FORMAT_R8G8B8A8_UNORM
++#endif
++#define HAVE_GL_DISPLAY (HAVE_EXTERNAL_MEMORY || HAVE_IOSURFACE_DISPLAY)
+ 
+ typedef struct QueueFamilyIndices {
+     int queue_family;
+@@ -289,6 +299,10 @@ typedef struct PGRAPHVkDisplayState {
+     // OpenGL Interop
+ #ifdef WIN32
+     HANDLE handle;
++#elif HAVE_IOSURFACE_DISPLAY
++    void *iosurface;
++    GLuint gl_rect_texture;
++    GLuint gl_fbo[2];
+ #else
+     int fd;
+ #endif
+@@ -324,7 +338,12 @@ typedef struct PGRAPHVkState {
+     VkDebugUtilsMessengerEXT debug_messenger;
+     int debug_depth;
+ 
++    /* Scratch space for quad to triangle index conversion */
++    uint32_t *quad_indices;
++    size_t quad_indices_capacity;
++
+     bool debug_utils_extension_enabled;
++    bool portability_enumeration_extension_enabled;
+     bool custom_border_color_extension_enabled;
+     bool memory_budget_extension_enabled;
+ 
+@@ -410,7 +429,7 @@ typedef struct PGRAPHVkState {
+     ShaderModuleCacheEntry *shader_module_cache_entries;
+ 
+     // FIXME: Merge these into a structure
+-    uint64_t uniform_buffer_hashes[2];
++    ShaderUniformLayout *uniform_buffer_layouts[2];
+     size_t uniform_buffer_offsets[2];
+     bool uniforms_changed;
+ 
+diff --git a/hw/xbox/nv2a/pgraph/vk/shaders.c b/hw/xbox/nv2a/pgraph/vk/shaders.c
+index df5a527946..184df4d4a9 100644
+--- a/hw/xbox/nv2a/pgraph/vk/shaders.c
++++ b/hw/xbox/nv2a/pgraph/vk/shaders.c
+@@ -425,19 +425,22 @@ static ShaderBinding *get_shader_binding_for_state(PGRAPHVkState *r,
+     return binding;
+ }
+ 
+-static void apply_uniform_updates(ShaderUniformLayout *layout,
++/* Returns whether any uniform value changed */
++static bool apply_uniform_updates(ShaderUniformLayout *layout,
+                                   const UniformInfo *info, int *locs,
+                                   void *values, size_t count)
+ {
++    bool changed = false;
+     for (int i = 0; i < count; i++) {
+         if (locs[i] != -1) {
+-            uniform_copy(layout, locs[i], (char*)values + info[i].val_offs,
+-                         4, (info[i].size * info[i].count) / 4);
++            changed |= uniform_copy_if_changed(
++                layout, locs[i], (char *)values + info[i].val_offs, 4,
++                (info[i].size * info[i].count) / 4);
+         }
+     }
++    return changed;
+ }
+ 
+-// FIXME: Dirty tracking
+ static void update_shader_uniforms(PGRAPHState *pg)
+ {
+     NV2A_VK_DGROUP_BEGIN("%s", __func__);
+@@ -453,9 +456,10 @@ static void update_shader_uniforms(PGRAPHState *pg)
+     VshUniformValues vsh_values;
+     pgraph_glsl_set_vsh_uniform_values(pg, &binding->state.vsh,
+                                   binding->vsh.uniform_locs, &vsh_values);
+-    apply_uniform_updates(&binding->vsh.module_info->uniforms, VshUniformInfo,
+-                          binding->vsh.uniform_locs, &vsh_values,
+-                          VshUniform__COUNT);
++    bool changed = apply_uniform_updates(&binding->vsh.module_info->uniforms,
++                                         VshUniformInfo,
++                                         binding->vsh.uniform_locs,
++                                         &vsh_values, VshUniform__COUNT);
+ 
+     PshUniformValues psh_values;
+     pgraph_glsl_set_psh_uniform_values(pg, binding->psh.uniform_locs,
+@@ -474,16 +478,19 @@ static void update_shader_uniforms(PGRAPHState *pg)
+ 
+         psh_values.texScale[i] = scale;
+     }
+-    apply_uniform_updates(&binding->psh.module_info->uniforms, PshUniformInfo,
+-                          binding->psh.uniform_locs, &psh_values,
+-                          PshUniform__COUNT);
+-
++    changed |= apply_uniform_updates(&binding->psh.module_info->uniforms,
++                                     PshUniformInfo, binding->psh.uniform_locs,
++                                     &psh_values, PshUniform__COUNT);
++
++    /* Each layout's allocation holds the values last written to it, so a
++     * layout that was also the last one uploaded for its stage only needs
++     * uploading again when a value changed. */
++    changed |= r->shader_bindings_changed;
+     for (int i = 0; i < ARRAY_SIZE(layouts); i++) {
+-        uint64_t hash =
+-            fast_hash(layouts[i]->allocation, layouts[i]->total_size);
+-        r->uniforms_changed |= (hash != r->uniform_buffer_hashes[i]);
+-        r->uniform_buffer_hashes[i] = hash;
++        changed |= layouts[i] != r->uniform_buffer_layouts[i];
++        r->uniform_buffer_layouts[i] = layouts[i];
+     }
++    r->uniforms_changed |= changed;
+ 
+     nv2a_profile_inc_counter(r->uniforms_changed ?
+                                  NV2A_PROF_SHADER_UBO_DIRTY :
+diff --git a/include/qemu/osdep.h b/include/qemu/osdep.h
+index 4ca8ccb27c..e3881aad08 100644
+--- a/include/qemu/osdep.h
++++ b/include/qemu/osdep.h
+@@ -858,14 +858,27 @@ size_t qemu_get_host_physmem(void);
+  * for the current thread.
+  */
+ #ifdef __APPLE__
++/*
++ * MAP_JIT protection of the current thread: -1 unknown, 0 write, 1 execute.
++ * pthread_jit_write_protect_np() is costly and cpu_tb_exec() requests execute
++ * permission for every translation block run, so skip redundant toggles.
++ */
++extern __thread int8_t qemu_jit_execute_state;
++
+ static inline void qemu_thread_jit_execute(void)
+ {
+-    pthread_jit_write_protect_np(true);
++    if (qemu_jit_execute_state != 1) {
++        pthread_jit_write_protect_np(true);
++        qemu_jit_execute_state = 1;
++    }
+ }
+ 
+ static inline void qemu_thread_jit_write(void)
+ {
+-    pthread_jit_write_protect_np(false);
++    if (qemu_jit_execute_state != 0) {
++        pthread_jit_write_protect_np(false);
++        qemu_jit_execute_state = 0;
++    }
+ }
+ #else
+ static inline void qemu_thread_jit_write(void) {}
+diff --git a/include/qemu/thread.h b/include/qemu/thread.h
+index f0302ed01f..593d4493a2 100644
+--- a/include/qemu/thread.h
++++ b/include/qemu/thread.h
+@@ -212,6 +212,19 @@ int qemu_thread_set_affinity(QemuThread *thread, unsigned long *host_cpus,
+ int qemu_thread_get_affinity(QemuThread *thread, unsigned long **host_cpus,
+                              unsigned long *nbits);
+ void *qemu_thread_join(QemuThread *thread);
++
++/*
++ * Hint that the calling thread is latency critical. On macOS this raises the
++ * QoS class so the scheduler keeps the thread on performance cores rather
++ * than efficiency cores.
++ */
++static inline void qemu_thread_set_latency_critical(void)
++{
++#ifdef __APPLE__
++    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
++#endif
++}
++
+ void qemu_thread_get_self(QemuThread *thread);
+ bool qemu_thread_is_self(QemuThread *thread);
+ G_NORETURN void qemu_thread_exit(void *retval);
+diff --git a/include/qemu/xbox-poll.h b/include/qemu/xbox-poll.h
+new file mode 100644
+index 0000000000..4b473d3bab
+--- /dev/null
++++ b/include/qemu/xbox-poll.h
+@@ -0,0 +1,20 @@
++/*
++ * Sleeping instead of spinning in guest polling loops (xemu)
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef QEMU_XBOX_POLL_H
++#define QEMU_XBOX_POLL_H
++
++/*
++ * Signal that emulated hardware made progress a guest polling loop may be
++ * waiting for: a device wrote guest memory or registers, or a vCPU was
++ * kicked (e.g. for an interrupt).
++ */
++void xbox_poll_notify(void);
++
++/* Sleep until the next xbox_poll_notify() or timeout_ns, whichever is first */
++void xbox_poll_wait(int64_t timeout_ns);
++
++#endif
+diff --git a/meson.build b/meson.build
+index 82e5f5af65..909017ca60 100644
+--- a/meson.build
++++ b/meson.build
+@@ -2391,6 +2391,23 @@ if host_os == 'windows'
+   vulkan = declare_dependency(compile_args: ['-DVK_USE_PLATFORM_WIN32_KHR'])
+ elif host_os == 'linux'
+   vulkan = dependency('vulkan')
++elif host_os == 'darwin'
++  # Vulkan via MoltenVK, loaded at runtime by volk. Only the Khronos headers
++  # are needed at build time.
++  vulkan_headers_dir = ''
++  foreach d : ['/opt/homebrew/opt/vulkan-headers/include',
++               '/usr/local/opt/vulkan-headers/include']
++    if vulkan_headers_dir == '' and fs.is_file(d / 'vulkan' / 'vulkan.h')
++      vulkan_headers_dir = d
++    endif
++  endforeach
++  if vulkan_headers_dir != ''
++    vulkan = declare_dependency(
++      compile_args: ['-DVK_USE_PLATFORM_METAL_EXT', '-DVK_ENABLE_BETA_EXTENSIONS',
++                     '-isystem', vulkan_headers_dir])
++  else
++    warning('Vulkan headers not found, building without Vulkan renderer')
++  endif
+ endif
+ 
+ if vulkan.found()
+@@ -2413,6 +2430,9 @@ if vulkan.found()
+   volk_opts.add_cmake_defines({'VOLK_STATIC_DEFINES': 'VK_NO_PROTOTYPES'})
+   if host_os == 'windows'
+     volk_opts.append_compile_args('c', '-DVK_USE_PLATFORM_WIN32_KHR=1')
++  elif host_os == 'darwin'
++    volk_opts.append_compile_args('c', '-DVK_USE_PLATFORM_METAL_EXT=1',
++                                  '-isystem', vulkan_headers_dir)
+   endif
+   volk_subproj = cmake.subproject('volk', options: volk_opts)
+   volk = declare_dependency(compile_args: ['-DVK_NO_PROTOTYPES'],
+diff --git a/scripts/download-macos-libs.py b/scripts/download-macos-libs.py
+index b55a0b1d5b..a97f171a84 100755
+--- a/scripts/download-macos-libs.py
++++ b/scripts/download-macos-libs.py
+@@ -7,6 +7,7 @@
+ from urllib.request import urlopen
+ import re
+ import os.path
++import tarfile
+ from tarfile import TarFile
+ import subprocess
+ 
+@@ -134,7 +135,12 @@ def install_pkg(self, pkg_name):
+ 			assert extracted_path.startswith(self._extract_path), f'tarball has a global file: {fname}'
+ 
+ 		print(f'    [*] Extracting to {self._extract_path}')
+-		tb.extractall(self._extract_path, numeric_owner=True)
++		# Python 3.14 defaults to the 'data' filter, which rejects the absolute
++		# symlinks some packages ship; file paths are validated above.
++		if hasattr(tarfile, 'tar_filter'):
++			tb.extractall(self._extract_path, numeric_owner=True, filter='tar')
++		else:
++			tb.extractall(self._extract_path, numeric_owner=True)
+ 
+ 		for fpath in tb.getnames():
+ 			# FIXME: Symlinks
+diff --git a/system/cpus.c b/system/cpus.c
+index ef2d2f241f..51cc719cd2 100644
+--- a/system/cpus.c
++++ b/system/cpus.c
+@@ -23,6 +23,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/xbox-poll.h"
+ #include "monitor/monitor.h"
+ #include "qemu/coroutine-tls.h"
+ #include "qapi/error.h"
+@@ -498,6 +499,10 @@ void cpus_kick_thread(CPUState *cpu)
+ 
+ void qemu_cpu_kick(CPUState *cpu)
+ {
++#ifdef XBOX
++    /* Wake a guest polling loop sleeping in helper_xbox_poll */
++    xbox_poll_notify();
++#endif
+     qemu_cond_broadcast(cpu->halt_cond);
+     if (cpus_accel->kick_vcpu_thread) {
+         cpus_accel->kick_vcpu_thread(cpu);
+diff --git a/target/i386/helper.h b/target/i386/helper.h
+index dde92f246d..be70ec3bbb 100644
+--- a/target/i386/helper.h
++++ b/target/i386/helper.h
+@@ -92,6 +92,10 @@ DEF_HELPER_1(stgi, void, env)
+ DEF_HELPER_1(clgi, void, env)
+ DEF_HELPER_FLAGS_2(flush_page, TCG_CALL_NO_RWG, void, env, tl)
+ DEF_HELPER_FLAGS_1(hlt, TCG_CALL_NO_WG, noreturn, env)
++#ifdef XBOX
++DEF_HELPER_1(xbox_idle, void, env)
++DEF_HELPER_2(xbox_poll, void, env, i32)
++#endif
+ DEF_HELPER_FLAGS_2(monitor, TCG_CALL_NO_WG, void, env, tl)
+ DEF_HELPER_FLAGS_2(mwait, TCG_CALL_NO_WG, noreturn, env, int)
+ DEF_HELPER_1(rdmsr, void, env)
+diff --git a/target/i386/ops_sse.h b/target/i386/ops_sse.h
+index a2e4d48039..0a0f07b132 100644
+--- a/target/i386/ops_sse.h
++++ b/target/i386/ops_sse.h
+@@ -468,6 +468,9 @@ void glue(helper_pshufhw, SUFFIX)(Reg *d, Reg *s, int order)
+             Reg *d, Reg *v, Reg *s)                                     \
+     {                                                                   \
+         int i;                                                          \
++        if (SHIFT == 1 && SSE_FAST_PS_ ## name(env, d, v, s)) {         \
++            return;                                                     \
++        }                                                               \
+         for (i = 0; i < 2 << SHIFT; i++) {                              \
+             d->ZMM_S(i) = F(32, v->ZMM_S(i), s->ZMM_S(i));              \
+         }                                                               \
+diff --git a/target/i386/tcg/fpu_helper.c b/target/i386/tcg/fpu_helper.c
+index d7377a92ea..9c540b1f0b 100644
+--- a/target/i386/tcg/fpu_helper.c
++++ b/target/i386/tcg/fpu_helper.c
+@@ -3506,6 +3506,21 @@ void helper_emms(CPUX86State *env)
+     *(uint32_t *)(env->fptags + 4) = 0x01010101;
+ }
+ 
++/* Packed single add/sub/mul vector fast path, see sse-fast.h */
++#include "sse-fast.h"
++#define SSE_FAST_PS_add(env, d, v, s) \
++    sse_fast_ps(&(env)->sse_status, &(d)->ZMM_L(0), &(v)->ZMM_L(0), \
++                &(s)->ZMM_L(0), SSE_FAST_ADD)
++#define SSE_FAST_PS_sub(env, d, v, s) \
++    sse_fast_ps(&(env)->sse_status, &(d)->ZMM_L(0), &(v)->ZMM_L(0), \
++                &(s)->ZMM_L(0), SSE_FAST_SUB)
++#define SSE_FAST_PS_mul(env, d, v, s) \
++    sse_fast_ps(&(env)->sse_status, &(d)->ZMM_L(0), &(v)->ZMM_L(0), \
++                &(s)->ZMM_L(0), SSE_FAST_MUL)
++#define SSE_FAST_PS_div(env, d, v, s) false
++#define SSE_FAST_PS_min(env, d, v, s) false
++#define SSE_FAST_PS_max(env, d, v, s) false
++
+ #define SHIFT 0
+ #include "ops_sse.h"
+ 
+diff --git a/target/i386/tcg/sse-fast.h b/target/i386/tcg/sse-fast.h
+new file mode 100644
+index 0000000000..21fb05c00d
+--- /dev/null
++++ b/target/i386/tcg/sse-fast.h
+@@ -0,0 +1,134 @@
++/*
++ * Vectorized fast path for packed single precision SSE add/sub/mul
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef TARGET_I386_TCG_SSE_FAST_H
++#define TARGET_I386_TCG_SSE_FAST_H
++
++#include "fpu/softfloat.h"
++
++enum SseFastOp {
++    SSE_FAST_ADD,
++    SSE_FAST_SUB,
++    SSE_FAST_MUL,
++};
++
++#if defined(__aarch64__)
++#include <arm_neon.h>
++
++/*
++ * Compute 4 lanes of a packed single precision add/sub/mul with one host
++ * vector instruction, when every lane would take softfloat's hardfloat path
++ * anyway (see float32_gen2): inexact already raised, round to nearest even,
++ * and zero-or-normal inputs. Lanes whose result is tiny (and so may need
++ * underflow or flush-to-zero handling) are redone with the scalar op, so
++ * results and exception flags match per-lane softfloat exactly.
++ *
++ * Returns false, without touching dst, if the scalar loop must be used.
++ * dst may alias a or b.
++ */
++static inline bool sse_fast_ps(float_status *st, uint32_t *dst,
++                               const uint32_t *a, const uint32_t *b,
++                               enum SseFastOp op)
++{
++    if (!(st->float_exception_flags & float_flag_inexact) ||
++        st->float_rounding_mode != float_round_nearest_even) {
++        return false;
++    }
++
++    uint32x4_t va = vld1q_u32(a);
++    uint32x4_t vb = vld1q_u32(b);
++
++    /* Zero or normal: exponent neither 0 nor 0xff, or magnitude zero */
++    const uint32x4_t exp_mask = vdupq_n_u32(0x7f800000);
++    const uint32x4_t abs_mask = vdupq_n_u32(0x7fffffff);
++    uint32x4_t ea = vandq_u32(va, exp_mask);
++    uint32x4_t eb = vandq_u32(vb, exp_mask);
++    uint32x4_t zon_a = vorrq_u32(
++        vandq_u32(vmvnq_u32(vceqzq_u32(ea)), vmvnq_u32(vceqq_u32(ea, exp_mask))),
++        vceqzq_u32(vandq_u32(va, abs_mask)));
++    uint32x4_t zon_b = vorrq_u32(
++        vandq_u32(vmvnq_u32(vceqzq_u32(eb)), vmvnq_u32(vceqq_u32(eb, exp_mask))),
++        vceqzq_u32(vandq_u32(vb, abs_mask)));
++    if (vminvq_u32(vandq_u32(zon_a, zon_b)) == 0) {
++        return false;
++    }
++
++    float32x4_t fa = vreinterpretq_f32_u32(va);
++    float32x4_t fb = vreinterpretq_f32_u32(vb);
++    float32x4_t fr;
++    switch (op) {
++    case SSE_FAST_ADD:
++        fr = vaddq_f32(fa, fb);
++        break;
++    case SSE_FAST_SUB:
++        fr = vsubq_f32(fa, fb);
++        break;
++    default:
++        fr = vmulq_f32(fa, fb);
++        break;
++    }
++    uint32x4_t vr = vreinterpretq_u32_f32(fr);
++    uint32x4_t abs_r = vandq_u32(vr, abs_mask);
++
++    if (vmaxvq_u32(vceqq_u32(abs_r, exp_mask))) {
++        float_raise(float_flag_overflow, st);
++    }
++
++    /*
++     * Tiny results (|r| <= FLT_MIN) may need underflow or flush-to-zero
++     * handling: redo those lanes in scalar. Exactly zero results are exact,
++     * as in float32_gen2: for add/sub a zero sum of zero-or-normal inputs is
++     * exact cancellation, and a product with a zero input is an exact zero.
++     */
++    uint32x4_t tiny = vcleq_u32(abs_r, vdupq_n_u32(0x00800000));
++    if (op == SSE_FAST_MUL) {
++        uint32x4_t zero_in = vorrq_u32(vceqzq_u32(vandq_u32(va, abs_mask)),
++                                       vceqzq_u32(vandq_u32(vb, abs_mask)));
++        tiny = vbicq_u32(tiny, zero_in);
++    } else {
++        tiny = vbicq_u32(tiny, vceqzq_u32(abs_r));
++    }
++    if (vmaxvq_u32(tiny)) {
++        uint32_t r[4], t[4], la[4], lb[4];
++        vst1q_u32(r, vr);
++        vst1q_u32(t, tiny);
++        vst1q_u32(la, va);
++        vst1q_u32(lb, vb);
++        for (int i = 0; i < 4; i++) {
++            if (!t[i]) {
++                continue;
++            }
++            switch (op) {
++            case SSE_FAST_ADD:
++                r[i] = float32_add(la[i], lb[i], st);
++                break;
++            case SSE_FAST_SUB:
++                r[i] = float32_sub(la[i], lb[i], st);
++                break;
++            default:
++                r[i] = float32_mul(la[i], lb[i], st);
++                break;
++            }
++        }
++        vr = vld1q_u32(r);
++    }
++
++    vst1q_u32(dst, vr);
++    return true;
++}
++
++#else
++
++static inline bool sse_fast_ps(float_status *st, uint32_t *dst,
++                               const uint32_t *a, const uint32_t *b,
++                               enum SseFastOp op)
++{
++    return false;
++}
++
++#endif
++
++#endif /* TARGET_I386_TCG_SSE_FAST_H */
+diff --git a/target/i386/tcg/system/misc_helper.c b/target/i386/tcg/system/misc_helper.c
+index 964f19dbc2..89c8c5a5a7 100644
+--- a/target/i386/tcg/system/misc_helper.c
++++ b/target/i386/tcg/system/misc_helper.c
+@@ -18,6 +18,8 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/xbox-poll.h"
++#include "qemu/timer.h"
+ #include "qemu/main-loop.h"
+ #include "cpu.h"
+ #include "exec/helper-proto.h"
+@@ -511,6 +513,84 @@ void helper_flush_page(CPUX86State *env, target_ulong addr)
+     tlb_flush_page(env_cpu(env), addr);
+ }
+ 
++#ifdef XBOX
++/*
++ * The Xbox kernel idle loop (KiIdleLoop) never halts:
++ *
++ *       sti
++ *       nop
++ *   P:  nop
++ *       cli
++ *       cmp   ebp, [ebp]            ; DPC list (Prcb+50h) empty?
++ *       je    1f
++ *       ...retire DPCs...
++ *   1:  cmp   dword [ebx+2Ch], 0    ; Prcb->NextThread
++ *       je    <sti>
++ *
++ * Each sti ends a TB, so the loop exits translated code tens of millions of
++ * times per second and keeps a host core fully busy whenever the game waits.
++ * Only an interrupt handler can queue a DPC or ready a thread on the single
++ * processor Xbox, so with both checks failing, halting at P until the next
++ * interrupt is equivalent to spinning. Called at the start of the TB at P.
++ */
++void helper_xbox_idle(CPUX86State *env)
++{
++    CPUState *cs = env_cpu(env);
++    uint32_t ebp = env->regs[R_EBP], ebx = env->regs[R_EBX];
++    uint32_t dpc_flink, next_thread;
++
++    if (!(env->eflags & IF_MASK) || (env->hflags & HF_INHIBIT_IRQ_MASK)) {
++        return;
++    }
++    if (cpu_memory_rw_debug(cs, ebp, &dpc_flink, 4, false) ||
++        cpu_memory_rw_debug(cs, ebx + 0x2c, &next_thread, 4, false)) {
++        return;
++    }
++    if (le32_to_cpu(dpc_flink) != ebp || next_thread != 0) {
++        return;
++    }
++
++    cs->halted = 1;
++    cs->exception_index = EXCP_HLT;
++    cpu_loop_exit(cs);
++}
++
++/*
++ * Called at the start of each iteration of a guest polling loop: a short
++ * loop that only reads memory and compares until a value changes, typically
++ * waiting for the GPU (see is_xbox_poll_loop). After the loop has spun for a
++ * while, sleep until device emulation makes progress or the vCPU is kicked
++ * (interrupts), instead of keeping a host core busy. The loop re-checks its
++ * condition after every wakeup, so this only changes timing.
++ */
++#define XBOX_POLL_SPIN_NS  20000   /* spin this long before sleeping */
++#define XBOX_POLL_GAP_NS   50000   /* longer gaps start a new poll */
++#define XBOX_POLL_SLEEP_NS 250000  /* fallback wakeup */
++
++void helper_xbox_poll(CPUX86State *env, uint32_t pc)
++{
++    static __thread uint32_t poll_pc;
++    static __thread int64_t poll_start, poll_last;
++    CPUState *cs = env_cpu(env);
++    int64_t now = get_clock();
++
++    if (pc != poll_pc || now - poll_last > XBOX_POLL_GAP_NS) {
++        poll_pc = pc;
++        poll_start = now;
++    }
++    poll_last = now;
++
++    if (now - poll_start < XBOX_POLL_SPIN_NS ||
++        qatomic_read(&cs->exit_request) ||
++        qatomic_read(&cs->interrupt_request)) {
++        return;
++    }
++
++    xbox_poll_wait(XBOX_POLL_SLEEP_NS);
++    poll_last = get_clock();
++}
++#endif
++
+ G_NORETURN void helper_hlt(CPUX86State *env)
+ {
+     CPUState *cs = env_cpu(env);
+diff --git a/target/i386/tcg/translate.c b/target/i386/tcg/translate.c
+index c753caf4e5..5a4973480b 100644
+--- a/target/i386/tcg/translate.c
++++ b/target/i386/tcg/translate.c
+@@ -4310,6 +4310,201 @@ static void i386_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
+     tcg_gen_insn_start(pc_arg, dc->cc_op);
+ }
+ 
++#if defined(XBOX) && !defined(CONFIG_USER_ONLY)
++/*
++ * Does a TB start at the second nop of the Xbox kernel idle loop
++ * (sti; nop; [nop]; cli; cmp ebp,[ebp]; je ...)? See helper_xbox_idle.
++ */
++static bool is_xbox_idle_loop(DisasContext *dc, CPUX86State *env)
++{
++    /* sti; nop; | nop; cli; cmp ebp,[ebp+0]; je rel8 */
++    static const uint8_t sig[] = { 0xfb, 0x90, 0x90, 0xfa, 0x3b, 0x6d, 0x00, 0x74 };
++    const int before = 2;
++    vaddr pc = dc->base.pc_first;
++    vaddr offset = pc & ~TARGET_PAGE_MASK;
++
++    /* Whole signature must be on the TB's first page, which must be RAM */
++    if (dc->base.num_insns != 1 || CODE64(dc) || CPL(dc) != 0 ||
++        tb_page_addr0(dc->base.tb) == -1 || offset < before ||
++        offset > TARGET_PAGE_SIZE - (sizeof(sig) - before)) {
++        return false;
++    }
++    for (int i = 0; i < ARRAY_SIZE(sig); i++) {
++        if (translator_ldub(env, &dc->base, pc - before + i) != sig[i]) {
++            return false;
++        }
++    }
++    return true;
++}
++#endif
++
++/*
++ * Length of the ModRM (+SIB, displacement) bytes at pc for 32-bit addressing,
++ * or 0 if unreadable. *is_reg tells whether r/m is a register.
++ */
++static int xbox_modrm_len(DisasContext *dc, CPUX86State *env, vaddr pc,
++                          bool *is_reg)
++{
++    int modrm = translator_ldub(env, &dc->base, pc);
++    int mod = modrm >> 6, rm = modrm & 7, len = 1;
++
++    *is_reg = mod == 3;
++    if (mod == 3) {
++        return 1;
++    }
++    if (rm == 4) {
++        int sib = translator_ldub(env, &dc->base, pc + 1);
++        len++;
++        if (mod == 0 && (sib & 7) == 5) {
++            len += 4;
++        }
++    } else if (mod == 0 && rm == 5) {
++        len += 4;
++    }
++    if (mod == 1) {
++        len += 1;
++    } else if (mod == 2) {
++        len += 4;
++    }
++    return len;
++}
++
++/*
++ * Does the TB at pc_first start a polling loop: a few instructions that load
++ * memory, compute and compare, ending in a conditional branch back to
++ * pc_first, with no stores and no state carried between iterations? E.g. the
++ * D3D push buffer fence wait
++ *     1: mov ecx,[edx]; mov edi,esi; sub edi,ecx; cmp eax,edi; jb 1b
++ * Each iteration then computes the same result until something else (GPU,
++ * interrupt) changes memory, so it can sleep between iterations (see
++ * helper_xbox_poll). Register modifications are only accepted on registers
++ * assigned earlier in the same iteration, which rejects counting loops like
++ * "dec ecx; jnz".
++ */
++static bool is_xbox_poll_loop(DisasContext *dc, CPUX86State *env)
++{
++    vaddr start = dc->base.pc_first, pc = start;
++    vaddr page_end = (start & TARGET_PAGE_MASK) + TARGET_PAGE_SIZE;
++    unsigned fresh = 0;        /* 32-bit registers assigned this iteration */
++    bool loads = false;
++
++    if (dc->base.num_insns != 1 || CODE64(dc) || !CODE32(dc) ||
++        tb_page_addr0(dc->base.tb) == -1) {
++        return false;
++    }
++
++    for (int n = 0; n < 8; n++) {
++        bool is_reg;
++        int len, op, modrm, reg, rm;
++
++        /* Stay inside the page: at most 2 + 1 + 1 + 4 + 4 bytes per insn */
++        if (pc + 16 > page_end) {
++            return false;
++        }
++        op = translator_ldub(env, &dc->base, pc);
++        modrm = translator_ldub(env, &dc->base, pc + 1);
++        reg = (modrm >> 3) & 7;
++        rm = modrm & 7;
++
++        switch (op) {
++        case 0x90:                                  /* nop */
++            len = 1;
++            break;
++        case 0xf3:                                  /* pause */
++            if (modrm != 0x90) {
++                return false;
++            }
++            len = 2;
++            break;
++        case 0x8b:                                  /* mov r32, r/m32 */
++            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg);
++            loads |= !is_reg;
++            fresh |= 1 << reg;
++            break;
++        case 0x8a:                                  /* mov r8, r/m8 */
++        case 0x38: case 0x39: case 0x3a: case 0x3b: /* cmp */
++        case 0x84: case 0x85:                       /* test */
++            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg);
++            loads |= !is_reg;
++            break;
++        case 0x03: case 0x0b: case 0x23:            /* add/or/and r32, r/m */
++        case 0x2b: case 0x33:                       /* sub/xor r32, r/m */
++            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg);
++            loads |= !is_reg;
++            if (!(fresh & (1 << reg))) {
++                return false;
++            }
++            break;
++        case 0x01: case 0x09: case 0x21:            /* add/or/and r/m32, r */
++        case 0x29: case 0x31:                       /* sub/xor r/m32, r */
++        case 0x89:                                  /* mov r/m32, r */
++            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg);
++            if (!is_reg || (op != 0x89 && !(fresh & (1 << rm)))) {
++                return false;
++            }
++            fresh |= 1 << rm;
++            break;
++        case 0x81: case 0x83:                       /* alu r/m32, imm */
++            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg) +
++                  (op == 0x81 ? 4 : 1);
++            if (reg == 7) {
++                loads |= !is_reg;                   /* cmp */
++            } else if (!is_reg || !(fresh & (1 << rm)) ||
++                       reg == 2 || reg == 3) {      /* no adc/sbb */
++                return false;
++            }
++            break;
++        case 0x80:                                  /* cmp r/m8, imm8 */
++            if (reg != 7) {
++                return false;
++            }
++            len = 2 + xbox_modrm_len(dc, env, pc + 1, &is_reg);
++            loads |= !is_reg;
++            break;
++        case 0xf6: case 0xf7:                       /* test r/m, imm */
++            if (reg != 0) {
++                return false;
++            }
++            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg) +
++                  (op == 0xf7 ? 4 : 1);
++            loads |= !is_reg;
++            break;
++        case 0x0f:
++            if (modrm == 0xb6 || modrm == 0xb7 ||   /* movzx/movsx */
++                modrm == 0xbe || modrm == 0xbf) {
++                int modrm2 = translator_ldub(env, &dc->base, pc + 2);
++                len = 2 + xbox_modrm_len(dc, env, pc + 2, &is_reg);
++                loads |= !is_reg;
++                fresh |= 1 << ((modrm2 >> 3) & 7);
++                break;
++            }
++            if (modrm >= 0x80 && modrm <= 0x8f) {   /* jcc rel32 */
++                int32_t rel = translator_ldl(env, &dc->base, pc + 2);
++                return loads && pc + 6 + rel == start;
++            }
++            return false;
++        case 0x70 ... 0x7f: {                       /* jcc rel8 */
++            int8_t rel = modrm;
++            return loads && pc + 2 + rel == start;
++        }
++        case 0x3c: case 0xa8:                       /* cmp/test al, imm8 */
++            len = 2;
++            break;
++        case 0x3d: case 0xa9:                       /* cmp/test eax, imm32 */
++            len = 5;
++            break;
++        case 0xb8 ... 0xbf:                         /* mov r32, imm32 */
++            fresh |= 1 << (op & 7);
++            len = 5;
++            break;
++        default:
++            return false;
++        }
++        pc += len;
++    }
++    return false;
++}
++
+ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
+ {
+     DisasContext *dc = container_of(dcbase, DisasContext, base);
+@@ -4317,6 +4512,20 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
+     CCOp orig_cc_op = dc->cc_op;
+     target_ulong orig_pc_save = dc->pc_save;
+ 
++#if defined(XBOX) && !defined(CONFIG_USER_ONLY)
++    if (is_xbox_idle_loop(dc, cpu_env(cpu))) {
++        gen_update_cc_op(dc);
++        gen_update_eip_cur(dc);
++        gen_helper_xbox_idle(tcg_env);
++        orig_cc_op_dirty = dc->cc_op_dirty;
++        orig_cc_op = dc->cc_op;
++        orig_pc_save = dc->pc_save;
++    } else if (is_xbox_poll_loop(dc, cpu_env(cpu))) {
++        gen_helper_xbox_poll(tcg_env,
++                             tcg_constant_i32((uint32_t)dc->base.pc_first));
++    }
++#endif
++
+ #ifdef TARGET_VSYSCALL_PAGE
+     /*
+      * Detect entry into the vsyscall page and invoke the syscall.
+diff --git a/ui/xemu.c b/ui/xemu.c
+index 18dc3b30f2..9f6336fb01 100644
+--- a/ui/xemu.c
++++ b/ui/xemu.c
+@@ -785,7 +785,14 @@ static void *vblank_timer_thread(void *opaque)
+         // Wait until deadline
+         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+         if (now < next_vblank) {
++#ifdef __APPLE__
++            /* SDL_DelayPrecise wakes every millisecond and spins the last
++             * one; a single Darwin sleep is accurate enough for vblank.
++             */
++            SDL_DelayNS(next_vblank - now);
++#else
+             SDL_DelayPrecise(next_vblank - now);
++#endif
+         } else if (now > next_vblank + vblank_interval_ns) {
+             // We've fallen behind by more than one frame, reset to avoid
+             // rapid-fire catch-up
+@@ -883,7 +890,9 @@ static void gl_render_frame(struct xemu_console *scon)
+     xemu_main_loop_unlock();
+ 
+     xemu_hud_render();
++#ifndef __APPLE__
+     glFinish();
++#endif
+ 
+     if (release_surface_texture) {
+         xemu_main_loop_lock();
+@@ -1435,6 +1444,17 @@ int main(int argc, char **argv)
+     struct xemu_console *scon = &scon_list[0];
+     while (!qatomic_read(&qemu_exiting)) {
+         poll_events(scon);
++
++        /* Skip rendering while nothing is visible. Swaps aren't throttled by
++         * vsync for hidden windows (notably on macOS), so this loop would
++         * otherwise spin at full speed.
++         */
++        if (SDL_GetWindowFlags(scon->real_window) &
++            (SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED | SDL_WINDOW_OCCLUDED)) {
++            SDL_DelayNS(vblank_interval_ns);
++            continue;
++        }
++
+         gl_render_frame(scon);
+     }
+     qemu_sem_post(&display_shutdown_sem);
+diff --git a/ui/xui/main-menu.cc b/ui/xui/main-menu.cc
+index 85997c1a5e..83125adc02 100644
+--- a/ui/xui/main-menu.cc
++++ b/ui/xui/main-menu.cc
+@@ -763,6 +763,10 @@ void MainMenuDisplayView::Draw()
+                      "Increase surface scaling factor for higher quality")) {
+         nv2a_set_surface_scale_factor(rendering_scale+1);
+     }
++    Toggle("Fast depth", &g_config.display.quality.fast_depth,
++           "Use fixed-function depth instead of geometry shader emulation "
++           "(OpenGL only). Much faster on Apple Silicon, may cause depth "
++           "artifacts in some games");
+ 
+     SectionTitle("Window");
+     bool fs = xemu_is_fullscreen();
+diff --git a/ui/xui/main.cc b/ui/xui/main.cc
+index ace02bc768..bdad69f5d7 100644
+--- a/ui/xui/main.cc
++++ b/ui/xui/main.cc
+@@ -332,6 +332,19 @@ void xemu_hud_render()
+         SDL_GL_SetSwapInterval(g_vsync ? 1 : 0);
+     }
+ 
++    /* Testing aid: XEMU_AUTO_SCREENSHOT=<seconds> takes one screenshot after
++     * that many seconds of running. */
++    static gint64 auto_screenshot_at = -1;
++    if (auto_screenshot_at == -1) {
++        const char *env = getenv("XEMU_AUTO_SCREENSHOT");
++        auto_screenshot_at =
++            env ? g_get_monotonic_time() + atoi(env) * G_USEC_PER_SEC : 0;
++    }
++    if (auto_screenshot_at > 0 && g_get_monotonic_time() >= auto_screenshot_at) {
++        auto_screenshot_at = 0;
++        g_screenshot_pending = true;
++    }
++
+     if (g_screenshot_pending) {
+         SaveScreenshot(g_tex, g_flip_req);
+         g_screenshot_pending = false;
+diff --git a/util/meson.build b/util/meson.build
+index d6a50cad51..8ba168e1fe 100644
+--- a/util/meson.build
++++ b/util/meson.build
+@@ -1,4 +1,5 @@
+ util_ss.add(files('osdep.c', 'cutils.c', 'unicode.c', 'qemu-timer-common.c'))
++util_ss.add(files('xbox-poll.c'))
+ util_ss.add(files('thread-context.c'), numa)
+ if not config_host_data.get('CONFIG_ATOMIC64')
+   util_ss.add(files('atomic64.c'))
+diff --git a/util/osdep.c b/util/osdep.c
+index 7b53d2211f..9602b9d757 100644
+--- a/util/osdep.c
++++ b/util/osdep.c
+@@ -33,6 +33,10 @@
+ 
+ static const char *hw_version = QEMU_HW_VERSION;
+ 
++#ifdef __APPLE__
++__thread int8_t qemu_jit_execute_state = -1;
++#endif
++
+ int socket_set_cork(int fd, int v)
+ {
+ #if defined(SOL_TCP) && defined(TCP_CORK)
+diff --git a/util/qemu-timer.c b/util/qemu-timer.c
+index 650030c98b..c187f443fa 100644
+--- a/util/qemu-timer.c
++++ b/util/qemu-timer.c
+@@ -323,6 +323,30 @@ int qemu_timeout_ns_to_ms(int64_t ns)
+ /* qemu implementation of g_poll which uses a nanosecond timeout but is
+  * otherwise identical to g_poll
+  */
++#if defined(XBOX) && defined(__APPLE__) && !defined(CONFIG_PPOLL)
++#include <sys/event.h>
++
++/* Sleep using a one-shot kqueue timer, which is far more precise than
++ * nanosleep on Darwin. On failure (e.g. EINTR) return early; callers spin
++ * for any remaining time.
++ */
++static void precise_sleep_ns(int64_t ns)
++{
++    static __thread int kq = -1;
++    struct kevent ev;
++
++    if (kq < 0) {
++        kq = kqueue();
++        if (kq < 0) {
++            return;
++        }
++    }
++    EV_SET(&ev, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT,
++           NOTE_NSECONDS | NOTE_CRITICAL, ns, NULL);
++    kevent(kq, &ev, 1, &ev, 1, NULL);
++}
++#endif
++
+ int qemu_poll_ns(GPollFD *fds, guint nfds, int64_t timeout)
+ {
+ #ifdef CONFIG_PPOLL
+@@ -348,9 +372,24 @@ int qemu_poll_ns(GPollFD *fds, guint nfds, int64_t timeout)
+      * near, to avoid missing deadlines due to costly sleeps.
+      */
+     #define XBOX_BUSYWAIT_THRESHOLD_NS 1250000
++#ifdef __APPLE__
++    /* Sleep for most of the interval with a precise kqueue timer and only
++     * spin for the remainder. Spinning for the whole threshold kept a core
++     * busy almost constantly, as device timers are rarely more than a
++     * millisecond apart. Measured on M4: NOTE_CRITICAL kqueue timers wake
++     * ~12us late (p99 ~32us), nanosleep ~110us (p99 ~175us).
++     */
++    #define XBOX_BUSYWAIT_SPIN_NS 40000
++#endif
+     if ((0 < timeout) && (timeout < XBOX_BUSYWAIT_THRESHOLD_NS)) {
+         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+         int64_t end = now + timeout;
++#ifdef XBOX_BUSYWAIT_SPIN_NS
++        if (timeout > XBOX_BUSYWAIT_SPIN_NS) {
++            precise_sleep_ns(timeout - XBOX_BUSYWAIT_SPIN_NS);
++            now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
++        }
++#endif
+         while (now < end) {
+             now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+         }
+diff --git a/util/xbox-poll.c b/util/xbox-poll.c
+new file mode 100644
+index 0000000000..c9ab860f15
+--- /dev/null
++++ b/util/xbox-poll.c
+@@ -0,0 +1,55 @@
++/*
++ * Sleeping instead of spinning in guest polling loops (xemu)
++ *
++ * Games commonly spin on a memory word that the GPU updates, e.g. waiting for
++ * a push buffer fence. Emulated, that burns a host core that the GPU thread
++ * could use. The translator detects such loops (see helper_xbox_poll) and they
++ * sleep here until device emulation reports progress.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/atomic.h"
++#include "qemu/xbox-poll.h"
++
++static pthread_mutex_t poll_lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t poll_cond = PTHREAD_COND_INITIALIZER;
++static uint64_t poll_seq;
++static int poll_waiters;
++
++void xbox_poll_notify(void)
++{
++    qatomic_inc(&poll_seq);
++    smp_mb();
++    if (qatomic_read(&poll_waiters)) {
++        pthread_mutex_lock(&poll_lock);
++        pthread_cond_broadcast(&poll_cond);
++        pthread_mutex_unlock(&poll_lock);
++    }
++}
++
++void xbox_poll_wait(int64_t timeout_ns)
++{
++    uint64_t seq = qatomic_read(&poll_seq);
++
++    pthread_mutex_lock(&poll_lock);
++    qatomic_inc(&poll_waiters);
++    smp_mb();
++    if (qatomic_read(&poll_seq) == seq) {
++#ifdef __APPLE__
++        struct timespec ts = { .tv_sec = timeout_ns / 1000000000,
++                               .tv_nsec = timeout_ns % 1000000000 };
++        pthread_cond_timedwait_relative_np(&poll_cond, &poll_lock, &ts);
++#else
++        struct timespec ts;
++        clock_gettime(CLOCK_REALTIME, &ts);
++        int64_t ns = ts.tv_nsec + timeout_ns;
++        ts.tv_sec += ns / 1000000000;
++        ts.tv_nsec = ns % 1000000000;
++        pthread_cond_timedwait(&poll_cond, &poll_lock, &ts);
++#endif
++    }
++    qatomic_dec(&poll_waiters);
++    pthread_mutex_unlock(&poll_lock);
++}
