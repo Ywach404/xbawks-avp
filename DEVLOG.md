@@ -2284,3 +2284,88 @@ does not build for this platform.
 Revisit KosmicKrisp only when both become true: an enabled visionOS or iOS
 build in Mesa with CI behind it, and a path to import an existing
 `MTLTexture`.
+
+## 2026-10-30 -- two things the first public build got wrong
+
+Caught by a scan of the published repository the day after it went up.
+Both were defaults that were convenient while the repository was private
+and dangerous the moment it was not.
+
+**The build script would have shipped Microsoft firmware and a game.**
+`make-app.sh` defaulted `XEMU_MEDIA` to a path that exists on this
+machine, so every build silently copied the MCPX boot ROM, the BIOS, the
+2 GB hard disk image and the first disc image it found into the app, then
+zipped all of it into an IPA. An IPA is the shape that gets uploaded.
+
+Media is now copied only when `XEMU_MEDIA` names a folder, a disc only
+when `XEMU_GAME` names one, and a bundle carrying either **refuses to
+become an IPA**. Both paths tested: with nothing set, zero media and a
+9.9 MB IPA; with media set, media present and no IPA. Testing also caught
+a trap the refusal created, since the IPA from the previous medialess
+build was left on disk where it could be uploaded in place of the refused
+one, so the refusal deletes it.
+
+**The commit carried a personal email.** The repository's commit identity
+is now the GitHub noreply address, and the single public commit was
+rewritten and force pushed. That removes the address from the live
+history; it does not undo the day it spent served by the API, so treat
+reduction rather than erasure as the outcome.
+
+The general shape of both: a default chosen for local iteration speed,
+never revisited when the repository gained a remote. The question that
+catches it is not "did I remember" but "if a stranger ran this, what
+lands in the output".
+
+### The guard now checks for it, rather than the rule only being written down
+
+Two rules added to `~/.config/git/template/hooks/pre-push`, and the hook
+split into two tiers while doing it, because the two things it guards
+have different risk.
+
+**Rule 3, content that is not ours to give away.** Refuses a push whose
+paths look like firmware, a ROM, a disc image or save data: `.iso`,
+`.xiso`, `.xbe`, `.rom`, `.bin`, `.qcow2`, `.img`, a dozen cartridge
+formats, and anything named `bios*`, `mcpx*`, `eeprom*` or `firmware*`.
+`.gitignore` already denies these, so it should never fire. It exists
+because `.gitignore` filters what gets added and this checks what
+actually leaves.
+
+**Rule 4, a build default that would include what it should not.**
+Refuses an added line matching a shell parameter expansion whose
+variable name carries MEDIA, ROM, BIOS, FIRMWARE, GAME, ISO, ASSET,
+SAMPLE, FONT, MODEL, SAVE or DISC and whose default is not empty.
+`${XEMU_MEDIA:-}` passes. `${XEMU_MEDIA:-$ROOT/../_scratch/media}`, which
+is exactly the line that caused this, does not.
+
+Tested against five cases in a throwaway repository rather than reasoned
+about: a clean push passes, the same push to a private GitLab exits
+silently, a disc image is refused by name, the dangerous default is
+refused and quoted back, and the empty default passes. Then against the
+real thing: the public commit passes clean, and the working branch is
+correctly refused, because its full history carries the pre-scrub
+commits. Only the squashed export can reach GitHub, which is the
+intended shape.
+
+**Rule 3 runs on every remote; Rules 1, 2 and 4 stay public only.** A
+private note or another project's name is only dangerous at publication,
+and the hook still exits before those on a GitLab push. A boot ROM is
+dangerous in any history, because a repository that is private today can
+gain a public remote tomorrow, as this one did on 2026-10-29, and by
+then the history already carries it. `.gitignore` is also only a filter
+on what gets added, and `git add -f` walks past it.
+
+Measured before widening rather than after: across 28 repositories
+exactly one tracks a file matching Rule 3, and it is
+`port/assets/models/S4g.mlpackage/.../weight.bin`, CoreML weights rather
+than firmware. So the rule carves out `.mlpackage`, `.mlmodelc` and
+`.mlmodel` paths and widening costs nothing.
+
+Retested on both tiers: a ROM is refused to GitHub and to GitLab, the
+CoreML file passes on both, a dangerous build default is refused to
+GitHub and ignored on GitLab, and a clean push passes everywhere. Then
+against the three repositories that have GitHub remotes, simulated
+against what those remotes actually hold: all clean.
+
+Deployed to all 29 repositories, one of which had no guard at all. Every
+previous hook is kept under `~/.config/git/hook-backups/<timestamp>/`,
+so the change is reversible with a copy back.

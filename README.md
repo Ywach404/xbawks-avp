@@ -4,6 +4,12 @@ An original Xbox emulator for Apple Vision Pro, running on the headset itself. I
 
 As far as I can find, it is the first standalone, JIT based original Xbox emulator on the platform. The dashboard boots, a retail disc boots, and the game runs at its own frame rate on the headset's M5.
 
+![The Xbox dashboard running in an immersive space](docs/media/dashboard.gif)
+
+![A game running from a disc image](docs/media/gameplay.gif)
+
+Recorded through the headset's passthrough camera, so the room behind the screen is real. Both clips are from my own console's files and my own disc; Xbawks ships neither.
+
 Ported and maintained by A. Cervantez. xemu and QEMU are the work of their respective projects and are GPL-2.0; so is everything here that touches them.
 
 ## What it does today
