@@ -1212,10 +1212,62 @@ index f45bdc3458..c1bab2c7c5 100644
      fake_argv[fake_argc++] = strdup("-m");
      fake_argv[fake_argc++] = g_strdup_printf("%d", mem);
 diff --git a/tcg/region.c b/tcg/region.c
-index 848bc25fc6..f261e3cedb 100644
+index 848bc25fc6..a1ab290818 100644
 --- a/tcg/region.c
 +++ b/tcg/region.c
-@@ -668,28 +668,158 @@ static void prepare_jit_region(void *addr, size_t size)
+@@ -630,6 +630,7 @@ extern kern_return_t mach_vm_remap(vm_map_t target_task,
+ #endif
+ #if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
+ #include <sys/sysctl.h>
++#include <dlfcn.h>
+ 
+ /*
+  * JIT on the iOS family, the only way it is available.
+@@ -658,6 +659,43 @@ static bool debugger_is_attached(void)
+     return (info.kp_proc.p_flag & P_TRACED) != 0;
+ }
+ 
++/*
++ * Say which way the code buffer was obtained, and what the platform would
++ * allow today.
++ *
++ * The debugger path is 22 lines and the only one that works here as of
++ * 2026-11-01. The other two are Apple's own, and both are checked on every
++ * boot rather than only by the weekly SDK tripwire, so the app itself is
++ * the thing that notices the day the policy moves. A line reading ACCEPTED
++ * or RESOLVES means rerun probes/jit-probe on device: the attach may no
++ * longer be needed.
++ *
++ * It also catches the inverse. If this ever stops saying "debugger" on a
++ * build that used to work, the platform has closed rather than opened.
++ */
++static void log_jit_strategy(const char *chosen)
++{
++    bool map_jit = false;
++    void *probe = mmap(NULL, qemu_real_host_page_size(),
++                       PROT_READ | PROT_WRITE | PROT_EXEC,
++                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT, -1, 0);
++    if (probe != MAP_FAILED) {
++        map_jit = true;
++        munmap(probe, qemu_real_host_page_size());
++    }
++    bool toggle = dlsym(RTLD_DEFAULT,
++                        "pthread_jit_write_protect_supported_np") != NULL;
++
++    fprintf(stderr, "[tcg] jit strategy: %s\n", chosen);
++    fprintf(stderr, "[tcg]   MAP_JIT: %s\n",
++            map_jit ? "ACCEPTED, first-party JIT may be available, rerun the probe"
++                    : "refused, as expected");
++    fprintf(stderr, "[tcg]   pthread_jit_write_protect_supported_np: %s\n",
++            toggle ? "RESOLVES, the platform has moved, rerun the probe"
++                   : "absent, as expected");
++    fflush(stderr);
++}
++
+ static void prepare_jit_region(void *addr, size_t size)
+ {
+     register void *x0 asm("x0") = addr;
+@@ -668,28 +706,158 @@ static void prepare_jit_region(void *addr, size_t size)
  }
  #endif
  
@@ -1387,7 +1439,7 @@ index 848bc25fc6..f261e3cedb 100644
          return -1;
      }
  
-@@ -707,8 +837,7 @@ static int alloc_code_gen_buffer_splitwx_vmremap(size_t size, Error **errp)
+@@ -707,8 +875,7 @@ static int alloc_code_gen_buffer_splitwx_vmremap(size_t size, Error **errp)
                          &max_prot,
                          VM_INHERIT_NONE);
      if (ret != KERN_SUCCESS) {
@@ -1397,7 +1449,7 @@ index 848bc25fc6..f261e3cedb 100644
          munmap((void *)buf_rw, size);
          return -1;
      }
-@@ -720,34 +849,64 @@ static int alloc_code_gen_buffer_splitwx_vmremap(size_t size, Error **errp)
+@@ -720,34 +887,65 @@ static int alloc_code_gen_buffer_splitwx_vmremap(size_t size, Error **errp)
          return -1;
      }
  
@@ -1426,6 +1478,7 @@ index 848bc25fc6..f261e3cedb 100644
 -    if (mprotect((void *)buf_rw, size, PROT_READ | PROT_WRITE) != 0) {
 -        error_setg_errno(errp, errno, "mprotect rw alias for jit splitwx");
 +    tcg_splitwx_diff = buf_rx - buf_rw;
++    log_jit_strategy("debugger-prepared (brk #0x69), executable mapping first");
 +    fprintf(stderr, "[tcg] jit: base 0x%llx now rw, remap 0x%llx prepared "
 +                    "(remap cur %d max %d)\n",
 +            (unsigned long long)buf_rw, (unsigned long long)buf_rx,
@@ -1478,7 +1531,7 @@ index 848bc25fc6..f261e3cedb 100644
  }
  #endif /* CONFIG_DARWIN */
  #endif /* CONFIG_TCG_INTERPRETER */
-@@ -933,6 +1092,10 @@ void tcg_region_init(size_t tb_size, int splitwx, unsigned max_threads)
+@@ -933,6 +1131,10 @@ void tcg_region_init(size_t tb_size, int splitwx, unsigned max_threads)
          }
      }
  
