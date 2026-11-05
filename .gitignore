@@ -43,3 +43,15 @@ xcuserdata/
 build.log
 build-xros/
 build-app/
+
+# Private engineering notes. Never tracked, never pushed. The public
+# DEVLOG.md is the record strangers read; this is the one they do not.
+DEVLOG-private.md
+
+# Cover art is the publisher's, not ours. Fetched to the device by
+# tools/fetch-xbox-covers.py when wanted, and never committed.
+# The script is ours and is tracked; what it downloads is not.
+*.png
+*.jpg
+*.jpeg
+!docs/media/*.gif
