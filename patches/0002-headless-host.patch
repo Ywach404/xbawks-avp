@@ -1,5 +1,5 @@
 diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
-index 1433c0df5a..698070256d 100644
+index 1433c0d..6980702 100644
 --- a/accel/tcg/cpu-exec.c
 +++ b/accel/tcg/cpu-exec.c
 @@ -18,6 +18,10 @@
@@ -77,7 +77,7 @@ index 1433c0df5a..698070256d 100644
      qemu_plugin_disable_mem_helpers(cpu);
      /*
 diff --git a/accel/tcg/tcg-accel-ops-mttcg.c b/accel/tcg/tcg-accel-ops-mttcg.c
-index 25dbb198ff..5dc2de18f6 100644
+index 25dbb19..5dc2de1 100644
 --- a/accel/tcg/tcg-accel-ops-mttcg.c
 +++ b/accel/tcg/tcg-accel-ops-mttcg.c
 @@ -85,6 +85,30 @@ static void *mttcg_cpu_thread_fn(void *arg)
@@ -112,7 +112,7 @@ index 25dbb198ff..5dc2de18f6 100644
          qemu_process_cpu_events(cpu);
  
 diff --git a/block/file-posix.c b/block/file-posix.c
-index 6265d2e248..cb337c027e 100644
+index 6265d2e..cb337c0 100644
 --- a/block/file-posix.c
 +++ b/block/file-posix.c
 @@ -1568,6 +1568,11 @@ static void raw_refresh_limits(BlockDriverState *bs, Error **errp)
@@ -128,7 +128,7 @@ index 6265d2e248..cb337c027e 100644
  
      if (!fstatfs(s->fd, &buf)) {
 diff --git a/configure b/configure
-index 410bf21b1c..166713106c 100755
+index 410bf21..1667131 100755
 --- a/configure
 +++ b/configure
 @@ -636,6 +636,8 @@ for opt do
@@ -160,7 +160,7 @@ index 410bf21b1c..166713106c 100755
    rm -rf meson-private meson-info meson-logs
  
 diff --git a/hw/xbox/mcpx/apu/dsp/dsp.c b/hw/xbox/mcpx/apu/dsp/dsp.c
-index 0d844af07d..ea612ed8dc 100644
+index 0d844af..ea612ed 100644
 --- a/hw/xbox/mcpx/apu/dsp/dsp.c
 +++ b/hw/xbox/mcpx/apu/dsp/dsp.c
 @@ -119,11 +119,16 @@ DSPState *dsp_init(void *rw_opaque, dsp_scratch_rw_func scratch_rw,
@@ -198,7 +198,7 @@ index 0d844af07d..ea612ed8dc 100644
 +#endif
  }
 diff --git a/hw/xbox/mcpx/apu/dsp/meson.build b/hw/xbox/mcpx/apu/dsp/meson.build
-index 3429547e24..9187e85190 100644
+index 3429547..9187e85 100644
 --- a/hw/xbox/mcpx/apu/dsp/meson.build
 +++ b/hw/xbox/mcpx/apu/dsp/meson.build
 @@ -1,11 +1,27 @@
@@ -232,7 +232,7 @@ index 3429547e24..9187e85190 100644
  
  dsp = declare_dependency(
 diff --git a/hw/xbox/nv2a/nv2a.c b/hw/xbox/nv2a/nv2a.c
-index 1565c05211..2121ed997f 100644
+index 1565c05..2121ed9 100644
 --- a/hw/xbox/nv2a/nv2a.c
 +++ b/hw/xbox/nv2a/nv2a.c
 @@ -77,6 +77,23 @@ DMAObject nv_dma_load(NV2AState *d, hwaddr dma_obj_address)
@@ -260,14 +260,16 @@ index 1565c05211..2121ed997f 100644
  {
      DMAObject dma = nv_dma_load(d, dma_obj_address);
 diff --git a/hw/xbox/nv2a/nv2a.h b/hw/xbox/nv2a/nv2a.h
-index 2a9b7312d4..050166a017 100644
+index 2a9b731..7414129 100644
 --- a/hw/xbox/nv2a/nv2a.h
 +++ b/hw/xbox/nv2a/nv2a.h
-@@ -24,6 +24,37 @@
+@@ -24,6 +24,39 @@
  void nv2a_init(PCIBus *bus, int devfn, MemoryRegion *ram);
  void nv2a_context_init(void);
  int nv2a_get_framebuffer_surface(void);
 +int nv2a_get_frame_count(void);
++typedef struct NV2AState NV2AState;
++NV2AState *g_nv2a_for_stats(void);
 +/*
 + * Zero-copy presentation: copy the scanned-out surface into a Metal
 + * texture on the GPU. Returns 1 when a frame was copied, 0 when there
@@ -302,7 +304,7 @@ index 2a9b7312d4..050166a017 100644
  void nv2a_set_surface_scale_factor(unsigned int scale);
  unsigned int nv2a_get_surface_scale_factor(void);
 diff --git a/hw/xbox/nv2a/pgraph/meson.build b/hw/xbox/nv2a/pgraph/meson.build
-index fc52f609eb..ca105c5ce4 100644
+index fc52f60..ca105c5 100644
 --- a/hw/xbox/nv2a/pgraph/meson.build
 +++ b/hw/xbox/nv2a/pgraph/meson.build
 @@ -12,7 +12,11 @@ if have_renderdoc
@@ -319,7 +321,7 @@ index fc52f609eb..ca105c5ce4 100644
  subdir('vk')
  specific_ss.add(nv2a_vsh_cpu)
 diff --git a/hw/xbox/nv2a/pgraph/pgraph.c b/hw/xbox/nv2a/pgraph/pgraph.c
-index 1e8ce7df80..bb6d10f1be 100644
+index 1e8ce7d..e12a724 100644
 --- a/hw/xbox/nv2a/pgraph/pgraph.c
 +++ b/hw/xbox/nv2a/pgraph/pgraph.c
 @@ -254,15 +254,20 @@ void pgraph_clear_dirty_reg_map(PGRAPHState *pg)
@@ -348,7 +350,7 @@ index 1e8ce7df80..bb6d10f1be 100644
  #endif
      fprintf(stderr, "Warning: No available renderer\n");
      return CONFIG_DISPLAY_RENDERER_NULL;
-@@ -355,6 +360,49 @@ void pgraph_destroy(PGRAPHState *pg)
+@@ -355,6 +360,55 @@ void pgraph_destroy(PGRAPHState *pg)
      qemu_mutex_destroy(&pg->lock);
  }
  
@@ -389,6 +391,12 @@ index 1e8ce7df80..bb6d10f1be 100644
 +}
 +#endif
 +
++/* For the host's report stats line, which needs the device pointer. */
++NV2AState *g_nv2a_for_stats(void)
++{
++    return g_nv2a;
++}
++
 +/* Flips the guest has presented, for the host's speed line. */
 +int nv2a_get_frame_count(void)
 +{
@@ -399,7 +407,7 @@ index 1e8ce7df80..bb6d10f1be 100644
  {
      NV2AState *d = g_nv2a;
 diff --git a/hw/xbox/nv2a/pgraph/vk/buffer.c b/hw/xbox/nv2a/pgraph/vk/buffer.c
-index d87c875aa4..b06bc450f3 100644
+index d87c875..1c9a688 100644
 --- a/hw/xbox/nv2a/pgraph/vk/buffer.c
 +++ b/hw/xbox/nv2a/pgraph/vk/buffer.c
 @@ -18,6 +18,9 @@
@@ -429,8 +437,204 @@ index d87c875aa4..b06bc450f3 100644
      };
  
      r->storage_buffers[BUFFER_COMPUTE_SRC] = (StorageBuffer){
+@@ -108,6 +120,8 @@ void pgraph_vk_init_buffers(NV2AState *d)
+ 
+     r->bitmap_size = memory_region_size(d->vram) / 4096;
+     r->uploaded_bitmap = bitmap_new(r->bitmap_size);
++    r->uploaded_lo = g_malloc0_n(r->bitmap_size, sizeof(uint16_t));
++    r->uploaded_hi = g_malloc0_n(r->bitmap_size, sizeof(uint16_t));
+     bitmap_clear(r->uploaded_bitmap, 0, r->bitmap_size);
+ 
+     r->storage_buffers[BUFFER_VERTEX_INLINE] = (StorageBuffer){
+@@ -128,7 +142,15 @@ void pgraph_vk_init_buffers(NV2AState *d)
+         .alloc_info = device_alloc_create_info,
+         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+-        .buffer_size = 8 * 1024 * 1024,
++        /*
++         * Roughly 6.5 KiB of uniforms per draw, so 8 MiB was about 1,290
++         * draws before the pipeline had to drain to reclaim it. That is
++         * the same order as the descriptor set count, and both were being
++         * hit together. 32 MiB costs 24 MiB more here and the same again
++         * in staging, which is affordable even under the headset's
++         * memory ceiling.
++         */
++        .buffer_size = 32 * 1024 * 1024,
+     };
+ 
+     r->storage_buffers[BUFFER_UNIFORM_STAGING] = (StorageBuffer){
+@@ -169,6 +191,8 @@ void pgraph_vk_finalize_buffers(NV2AState *d)
+ 
+     g_free(r->uploaded_bitmap);
+     r->uploaded_bitmap = NULL;
++    g_free(r->uploaded_lo); r->uploaded_lo = NULL;
++    g_free(r->uploaded_hi); r->uploaded_hi = NULL;
+ }
+ 
+ bool pgraph_vk_buffer_has_space_for(PGRAPHState *pg, int index,
+diff --git a/hw/xbox/nv2a/pgraph/vk/draw.c b/hw/xbox/nv2a/pgraph/vk/draw.c
+index f332788..47a0744 100644
+--- a/hw/xbox/nv2a/pgraph/vk/draw.c
++++ b/hw/xbox/nv2a/pgraph/vk/draw.c
+@@ -18,6 +18,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/timer.h"
+ #include "qemu/fast-hash.h"
+ #include "renderer.h"
+ #include <math.h>
+@@ -1243,6 +1244,28 @@ const enum NV2A_PROF_COUNTERS_ENUM finish_reason_to_counter_enum[] = {
+     [VK_FINISH_REASON_STALLED] = NV2A_PROF_FINISH_STALLED,
+ };
+ 
++/*
++ * Every full GPU drain, counted by why it happened.
++ *
++ * pgraph_vk_finish stops the pipeline dead, and it fires from sixteen
++ * places for nine different reasons. Halo's first level runs at a third
++ * the frame rate of its second despite the second being far larger, and
++ * that is not explained by cold caches (replaying the first in a warm
++ * session is just as slow) or by a poll-loop misfire (that would not vary
++ * by level). So count the drains and let the log say which reason
++ * collapses when the level changes.
++ */
++unsigned long xemu_vk_finish_counts[9];
++
++/*
++ * And what each reason actually cost, which the counts cannot say. A drain
++ * waits on one fence for whatever the GPU still has queued, so two drains
++ * with the same label can differ by a hundredfold depending on how much
++ * work was outstanding. Counting told us where to look; only the clock
++ * says whether looking there is worth anything.
++ */
++unsigned long long xemu_vk_finish_ns[9];
++
+ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
+ {
+     PGRAPHVkState *r = pg->vk_renderer_state;
+@@ -1250,7 +1273,14 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
+     assert(!r->in_draw);
+     assert(r->debug_depth == 0);
+ 
++    int64_t finish_t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
++    bool finish_timed = false;
++
+     if (r->in_command_buffer) {
++        finish_timed = true;
++        if ((unsigned)finish_reason < 9) {
++            xemu_vk_finish_counts[finish_reason]++;
++        }
+         nv2a_profile_inc_counter(finish_reason_to_counter_enum[finish_reason]);
+ 
+         if (r->in_render_pass) {
+@@ -1326,6 +1356,11 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
+     pgraph_vk_process_pending_reports_internal(d);
+ 
+     pgraph_vk_compute_finish_complete(r);
++
++    if (finish_timed && (unsigned)finish_reason < 9) {
++        xemu_vk_finish_ns[finish_reason] +=
++            qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - finish_t0;
++    }
+ }
+ 
+ void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
+@@ -1662,8 +1697,39 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
+         if (memory_region_test_and_clear_dirty(d->vram, addr, size,
+                                                DIRTY_MEMORY_NV2A)) {
+             NV2A_VK_DPRINTF("Memory dirty. Synchronizing...");
++            r->vtx_bytes_dirty += size;
++            unsigned long before = r->vtx_flush_real;
+             pgraph_vk_update_vertex_ram_buffer(pg, addr, d->vram_ptr + addr,
+                                                size);
++            if (r->vtx_flush_real != before) {
++                /*
++                 * That drained. Ask whether it had to: a ring copy can
++                 * only serve an attribute whose element zero is inside
++                 * the copied range, because that is where the binding
++                 * points.
++                 */
++                bool all_inside = true;
++                bool any = false;
++                for (int a = 0; a < NV2A_VERTEXSHADER_ATTRIBUTES; a++) {
++                    if (r->vertex_attribute_to_description_location[a] < 0) {
++                        continue;
++                    }
++                    hwaddr base = r->vertex_attribute_offsets[a];
++                    if (base >= addr + size) {
++                        continue;   /* reads above the dirty range */
++                    }
++                    any = true;
++                    if (base < addr) {
++                        all_inside = false;
++                        break;
++                    }
++                }
++                if (any && all_inside) {
++                    r->vtx_hazard_redirectable++;
++                } else {
++                    r->vtx_hazard_not++;
++                }
++            }
+         }
+     }
+ 
+@@ -1939,6 +2005,33 @@ typedef struct VertexBufferRemap {
+     } map[NV2A_VERTEXSHADER_ATTRIBUTES];
+ } VertexBufferRemap;
+ 
++/*
++ * What routing every active attribute through the inline ring would cost
++ * for this draw, packed the same way the remap path packs the subset it
++ * already takes. Measured only; nothing here changes what is drawn.
++ */
++static void measure_full_remap(PGRAPHState *pg, uint32_t num_vertices)
++{
++    PGRAPHVkState *r = pg->vk_renderer_state;
++    VkDeviceAddress total = 0;
++
++    for (int attr_id = 0; attr_id < NV2A_VERTEXSHADER_ATTRIBUTES; attr_id++) {
++        int desc_loc = r->vertex_attribute_to_description_location[attr_id];
++        if (desc_loc < 0) {
++            continue;
++        }
++        size_t element_size, element_count;
++        get_size_and_count_for_format(
++            r->vertex_attribute_descriptions[desc_loc].format,
++            &element_size, &element_count);
++        total = ROUND_UP(total, element_size)
++                + (VkDeviceAddress)element_size * element_count * num_vertices;
++    }
++
++    r->vtx_bytes_if_remapped += total;
++    r->vtx_draws++;
++}
++
+ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
+                                                     uint32_t num_vertices)
+ {
+@@ -1946,6 +2039,8 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
+ 
+     VertexBufferRemap remap = {0};
+ 
++    measure_full_remap(pg, num_vertices);
++
+     VkDeviceAddress output_offset = 0;
+ 
+     for (int attr_id = 0; attr_id < NV2A_VERTEXSHADER_ATTRIBUTES; attr_id++) {
+@@ -1990,6 +2085,9 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
+     }
+ 
+     remap.buffer_space_required = output_offset;
++    if (remap.attributes) {
++        r->vtx_draws_remapped++;
++    }
+ 
+     // reserve space
+     if (remap.attributes) {
 diff --git a/hw/xbox/nv2a/pgraph/vk/gpuprops.c b/hw/xbox/nv2a/pgraph/vk/gpuprops.c
-index cbda5787f4..2ec96d62bb 100644
+index cbda578..2ec96d6 100644
 --- a/hw/xbox/nv2a/pgraph/vk/gpuprops.c
 +++ b/hw/xbox/nv2a/pgraph/vk/gpuprops.c
 @@ -591,7 +591,26 @@ void pgraph_vk_determine_gpu_properties(NV2AState *d)
@@ -462,7 +666,7 @@ index cbda5787f4..2ec96d62bb 100644
          pgraph_vk_gpu_properties.no_geometry_shader = true;
          fprintf(stderr, "VK: no geometry shader support, using fast depth\n");
 diff --git a/hw/xbox/nv2a/pgraph/vk/instance.c b/hw/xbox/nv2a/pgraph/vk/instance.c
-index 7f7d5abc25..d000506a2a 100644
+index 7f7d5ab..d000506 100644
 --- a/hw/xbox/nv2a/pgraph/vk/instance.c
 +++ b/hw/xbox/nv2a/pgraph/vk/instance.c
 @@ -160,6 +160,7 @@ add_optional_instance_extension_names(PGRAPHState *pg,
@@ -517,7 +721,7 @@ index 7f7d5abc25..d000506a2a 100644
  #endif
  
 diff --git a/hw/xbox/nv2a/pgraph/vk/meson.build b/hw/xbox/nv2a/pgraph/vk/meson.build
-index 668a8ff6b9..b311510f48 100644
+index 668a8ff..b311510 100644
 --- a/hw/xbox/nv2a/pgraph/vk/meson.build
 +++ b/hw/xbox/nv2a/pgraph/vk/meson.build
 @@ -22,7 +22,12 @@ specific_ss.add([volk, libglslang, vma, vulkan, spirv_reflect,
@@ -535,7 +739,7 @@ index 668a8ff6b9..b311510f48 100644
                               modules: ['CoreFoundation', 'IOSurface', 'OpenGL']),
                    files('iosurface.c'))
 diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.c b/hw/xbox/nv2a/pgraph/vk/renderer.c
-index d69a31a9af..f5725a3b84 100644
+index d69a31a..f5725a3 100644
 --- a/hw/xbox/nv2a/pgraph/vk/renderer.c
 +++ b/hw/xbox/nv2a/pgraph/vk/renderer.c
 @@ -20,7 +20,9 @@
@@ -648,7 +852,7 @@ index d69a31a9af..f5725a3b84 100644
  #endif
  }
 diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.h b/hw/xbox/nv2a/pgraph/vk/renderer.h
-index b805a76333..08e2a11c58 100644
+index b805a76..8e0dfb3 100644
 --- a/hw/xbox/nv2a/pgraph/vk/renderer.h
 +++ b/hw/xbox/nv2a/pgraph/vk/renderer.h
 @@ -44,7 +44,17 @@
@@ -689,7 +893,87 @@ index b805a76333..08e2a11c58 100644
  } PGRAPHVkDisplayState;
  
  typedef struct ComputePipelineKey {
-@@ -408,6 +421,26 @@ typedef struct PGRAPHVkState {
+@@ -325,7 +338,15 @@ typedef struct ComputePipeline {
+ typedef struct PGRAPHVkComputeState {
+     VkDescriptorPool descriptor_pool;
+     VkDescriptorSetLayout descriptor_set_layout;
+-    VkDescriptorSet descriptor_sets[1024];
++    /*
++     * One set is burned per draw and they can only be recycled when the
++     * GPU is done with them, so running out drains the pipeline. Timing
++     * showed that drain costing up to 3156 ms of a 5 s window in a scene
++     * with a door opening and an explosion. A set is a few dozen bytes
++     * and the pool's maxSets follows this array, so the headroom is
++     * cheap and the ceiling it replaces was not a device limit.
++     */
++    VkDescriptorSet descriptor_sets[4096];
+     int descriptor_set_index;
+     VkPipelineLayout pipeline_layout;
+     Lru pipeline_cache;
+@@ -368,7 +389,8 @@ typedef struct PGRAPHVkState {
+     VkCommandBuffer aux_command_buffer;
+     bool in_aux_command_buffer;
+ 
+-    VkFramebuffer framebuffers[50];
++    /* Also a drain when exhausted, for the price of a handle each. */
++    VkFramebuffer framebuffers[256];
+     int framebuffer_index;
+     bool framebuffer_dirty;
+ 
+@@ -385,7 +407,15 @@ typedef struct PGRAPHVkState {
+ 
+     VkDescriptorPool descriptor_pool;
+     VkDescriptorSetLayout descriptor_set_layout;
+-    VkDescriptorSet descriptor_sets[1024];
++    /*
++     * One set is burned per draw and they can only be recycled when the
++     * GPU is done with them, so running out drains the pipeline. Timing
++     * showed that drain costing up to 3156 ms of a 5 s window in a scene
++     * with a door opening and an explosion. A set is a few dozen bytes
++     * and the pool's maxSets follows this array, so the headroom is
++     * cheap and the ceiling it replaces was not a device limit.
++     */
++    VkDescriptorSet descriptor_sets[4096];
+     int descriptor_set_index;
+ 
+     StorageBuffer storage_buffers[BUFFER_COUNT];
+@@ -393,6 +423,35 @@ typedef struct PGRAPHVkState {
+     MemorySyncRequirement vertex_ram_buffer_syncs[NV2A_VERTEXSHADER_ATTRIBUTES];
+     size_t num_vertex_ram_buffer_syncs;
+     unsigned long *uploaded_bitmap;
++    /*
++     * Per uploaded page, the byte range within it that was actually
++     * uploaded. Only meaningful where the bitmap bit is set, so clearing
++     * the bitmap is enough to invalidate these and they never need
++     * clearing themselves.
++     */
++    uint16_t *uploaded_lo, *uploaded_hi;
++    unsigned long vtx_flush_real, vtx_flush_avoided;
++    /*
++     * Measurement for the decision about routing all vertex data through
++     * the inline ring. bytes_dirty is what is copied today, which is only
++     * the ranges the guest actually dirtied. bytes_if_remapped is what a
++     * per draw copy would move instead, every referenced byte on every
++     * draw whether it changed or not. The ratio between them is the whole
++     * question and reasoning about it is no substitute for reading it.
++     */
++    unsigned long long vtx_bytes_dirty, vtx_bytes_if_remapped;
++    unsigned long vtx_draws, vtx_draws_remapped;
++    /*
++     * Whether a hazard could be sidestepped by sending the new bytes to
++     * the inline ring instead of draining. The binding points at element
++     * zero and indices are absolute, so a ring copy only works if the
++     * dirty range starts at or before the base of every attribute that
++     * reads it. If it starts partway in, the ring offset for element zero
++     * would be before the start of the copy, and that needs the draw
++     * calls rebased, which is a much larger change. This counts which
++     * case the hazards actually are.
++     */
++    unsigned long vtx_hazard_redirectable, vtx_hazard_not;
+     size_t bitmap_size;
+ 
+     VkVertexInputAttributeDescription vertex_attribute_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
+@@ -408,6 +467,26 @@ typedef struct PGRAPHVkState {
      SurfaceBinding *color_binding, *zeta_binding;
      bool downloads_pending;
      QemuEvent downloads_complete;
@@ -716,7 +1000,18 @@ index b805a76333..08e2a11c58 100644
      bool download_dirty_surfaces_pending;
      QemuEvent dirty_surfaces_download_complete; // common
  
-@@ -531,6 +564,9 @@ void pgraph_vk_surface_flush(NV2AState *d);
+@@ -437,6 +516,10 @@ typedef struct PGRAPHVkState {
+     int max_queries_in_flight; // FIXME: Move out to constant
+     int num_queries_in_flight;
+     bool new_query_needed;
++    int64_t last_report_service_ns; /* deadlock breaker, see reports.c */
++    unsigned long report_drains, report_drains_skipped;
++    unsigned long report_queue_depth_sum;
++    unsigned long drain_by_clock, drain_by_queue, drain_by_pool;
+     bool query_in_flight;
+     uint32_t zpass_pixel_count_result;
+     QSIMPLEQ_HEAD(, QueryReport) report_queue; // FIXME: Statically allocate
+@@ -531,6 +614,9 @@ void pgraph_vk_surface_flush(NV2AState *d);
  void pgraph_vk_process_pending_downloads(NV2AState *d);
  void pgraph_vk_surface_download_if_dirty(NV2AState *d, SurfaceBinding *surface);
  SurfaceBinding *pgraph_vk_surface_get_within(NV2AState *d, hwaddr addr);
@@ -726,8 +1021,225 @@ index b805a76333..08e2a11c58 100644
  void pgraph_vk_wait_for_surface_download(SurfaceBinding *e);
  void pgraph_vk_download_dirty_surfaces(NV2AState *d);
  void pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg, hwaddr start, hwaddr size);
+@@ -582,6 +668,17 @@ void pgraph_vk_clear_report_value(NV2AState *d);
+ void pgraph_vk_get_report(NV2AState *d, uint32_t parameter);
+ void pgraph_vk_process_pending_reports(NV2AState *d);
+ void pgraph_vk_process_pending_reports_internal(NV2AState *d);
++void pgraph_vk_report_stats(NV2AState *d, unsigned long *drains,
++                            unsigned long *skipped, unsigned long *depth_sum,
++                            unsigned *queries_in_flight);
++void pgraph_vk_report_triggers(NV2AState *d, unsigned long *clock,
++                               unsigned long *queue, unsigned long *pool);
++void pgraph_vk_vertex_volume(NV2AState *d, unsigned long long *dirty,
++                             unsigned long long *if_remapped,
++                             unsigned long *draws,
++                             unsigned long *draws_remapped);
++void pgraph_vk_vertex_stats(NV2AState *d, unsigned long *real,
++                            unsigned long *avoided);
+ 
+ typedef enum FinishReason {
+     VK_FINISH_REASON_VERTEX_BUFFER_DIRTY,
+diff --git a/hw/xbox/nv2a/pgraph/vk/reports.c b/hw/xbox/nv2a/pgraph/vk/reports.c
+index c860a9b..d293e38 100644
+--- a/hw/xbox/nv2a/pgraph/vk/reports.c
++++ b/hw/xbox/nv2a/pgraph/vk/reports.c
+@@ -142,9 +142,105 @@ void pgraph_vk_process_pending_reports_internal(NV2AState *d)
+     }
+ 
+     r->num_queries_in_flight = 0;
++
++    /*
++     * Every pgraph_vk_finish ends here, whatever its reason, and this
++     * empties the whole queue. So this is the one place that knows when
++     * reports were last written, which is what the breaker below measures
++     * against. Recording it in the caller instead would only see the
++     * drains the breaker itself asked for and would never see the free
++     * ones.
++     */
++    r->last_report_service_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
++
+     NV2A_VK_DGROUP_END();
+ }
+ 
++/*
++ * How often the renderer may stop the GPU to collect occlusion results.
++ *
++ * Measured on a Vision Pro, 2026-11-01: this function fired about 980
++ * times a second in Halo's Pillar of Autumn, roughly 196 full pipeline
++ * drains per frame, against less than one per frame in the second level.
++ * It accounted for the entire difference between 5 fps and 33 fps. The
++ * command FIFO goes briefly idle hundreds of times a frame in a scene
++ * full of occluders, and every time it did, everything stopped.
++ *
++ * Deferring is safe for correctness because each drain processes the
++ * whole report queue, so batching writes the same values in the same
++ * order, only later. It is not safe for the query pool, which is a fixed
++ * 1024 entries and asserts on overflow in begin_query, so pool pressure
++ * overrides the limit. A deep report queue does too, since that means
++ * the guest is queueing work rather than waiting on one result.
++ */
++/*
++ * Tuned 2026-11-01 after the first measurement. At 8 ms and a queue of
++ * 64 the level went from 5 fps to a median of 26, and neither valve was
++ * close to firing: queries in flight peaked at 32 of 1024, three
++ * percent of the pool. Average queue depth at drain time was 45 to 52
++ * against a threshold of 64, which says the queue was the binding
++ * limit rather than the clock, so both move.
++ *
++ * The floor that makes this safe to push: every flip calls
++ * pgraph_vk_finish, and every finish processes the whole report queue,
++ * so a report can never be delayed more than one frame no matter what
++ * these numbers say.
++ *
++ * Tuned again 2026-11-04, and this time the instrumentation named the
++ * culprit as this code. In Halo at 30 fps the counters read:
++ *
++ *   gpu drains in 5 s: 380 vtxbuf=49 flip_stall=163 stalled=165
++ *   reports: 165 drains, 5500 skipped, avg queue 72
++ *   drain trigger: clock 165, queue 0, pool 0
++ *
++ * Every drain came from the clock. Neither valve fired once: the queue
++ * averaged 72 against a threshold of 256, and queries in flight never
++ * passed 80 of 1024. So the 16 ms limiter was not holding anything back,
++ * it was the only thing still asking, about 33 times a second, which is
++ * once per frame.
++ *
++ * And once per frame is already free. The floor above says every flip
++ * finishes and every finish empties the queue, so the flip was going to
++ * write those same reports 33 ms later at no cost. The clock drain was
++ * buying nothing and paying a full fence wait for it.
++ *
++ * Two changes follow. The timestamp moves into the internal processor so
++ * it measures when reports were last written rather than when this
++ * function last asked, which means the free per-flip service resets it.
++ * And 16 ms becomes 100 ms, chosen from the data: the worst frame
++ * measured in that session was 80 ms (63 flips in 5 s), and a breaker
++ * shorter than the slowest frame fires precisely during the frames that
++ * are already slow.
++ *
++ * What is left is a deadlock breaker, not a rate limit. It exists for a
++ * guest that spin-reads a report without ever flipping, where neither
++ * valve would trip because one outstanding query grows neither the queue
++ * nor the pool. Worst case there is 100 ms of added latency on that read,
++ * not a hang, so this is a latency choice and not a correctness one.
++ */
++/*
++ * Corrected 2026-11-05, and this one was a plain logic error. There used
++ * to be a second valve here: drain early if the report queue is deeper
++ * than 256, on the reasoning that a deep queue means a lot of outstanding
++ * work. Timing the drains showed it firing 100 to 127 times per 5 s in
++ * heavy combat and costing 1656 to 2408 ms of that 5 s, between a third
++ * and a half of the entire GPU stall budget, while the pool valve never
++ * fired once and queries in flight never passed 128 of 1024.
++ *
++ * The reasoning was backwards. A guest spinning on one result has a queue
++ * one deep and must be served; a guest with 300 queued is firing and
++ * forgetting and is not waiting for any of them. So a deep queue is a
++ * reason to defer, not a reason to drain. It was arguing for urgency from
++ * the evidence of no urgency.
++ *
++ * What remains is the query pool, which is a fixed 1024 and asserts on
++ * overflow, so that valve is a real limit rather than a guess; and the
++ * breaker below, for a guest that spin reads without ever flipping. The
++ * floor is unchanged: every flip finishes and every finish empties the
++ * whole queue.
++ */
++#define REPORT_SERVICE_BREAKER_NS 100000000 /* 100 ms, see above */
++
+ void pgraph_vk_process_pending_reports(NV2AState *d)
+ {
+     PGRAPHState *pg = &d->pgraph;
+@@ -153,8 +249,85 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
+     uint32_t *dma_get = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET];
+     uint32_t *dma_put = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT];
+ 
+-    if (*dma_get == *dma_put && r->in_command_buffer &&
+-        !QSIMPLEQ_EMPTY(&r->report_queue)) {
+-        pgraph_vk_finish(pg, VK_FINISH_REASON_STALLED);
++    if (!(*dma_get == *dma_put && r->in_command_buffer &&
++          !QSIMPLEQ_EMPTY(&r->report_queue))) {
++        return;
+     }
++
++    /* Depth is still counted, capped, because it is the number that
++     * showed the old valve was wrong and it is worth being able to see. */
++    unsigned depth = 0;
++    QueryReport *it;
++    QSIMPLEQ_FOREACH(it, &r->report_queue, entry) {
++        if (++depth >= 4096) {
++            break;
++        }
++    }
++
++    bool pool_pressure =
++        r->num_queries_in_flight * 4 >= r->max_queries_in_flight * 3;
++
++    if (!pool_pressure) {
++        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
++        if (now - r->last_report_service_ns < REPORT_SERVICE_BREAKER_NS) {
++            r->report_drains_skipped++;
++            return;
++        }
++        r->drain_by_clock++;
++    } else {
++        r->drain_by_pool++;
++    }
++
++    r->report_drains++;
++    r->report_queue_depth_sum += depth;
++    pgraph_vk_finish(pg, VK_FINISH_REASON_STALLED);
++}
++
++/* For the host's sampler line. */
++void pgraph_vk_report_stats(NV2AState *d, unsigned long *drains,
++                            unsigned long *skipped, unsigned long *depth_sum,
++                            unsigned *queries_in_flight)
++{
++    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
++    *drains = r->report_drains;
++    *skipped = r->report_drains_skipped;
++    *depth_sum = r->report_queue_depth_sum;
++    *queries_in_flight = r->num_queries_in_flight;
++}
++
++void pgraph_vk_hazard_shape(NV2AState *d, unsigned long *redirectable,
++                            unsigned long *not_redirectable)
++{
++    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
++    *redirectable = r->vtx_hazard_redirectable;
++    *not_redirectable = r->vtx_hazard_not;
++}
++
++void pgraph_vk_vertex_volume(NV2AState *d, unsigned long long *dirty,
++                             unsigned long long *if_remapped,
++                             unsigned long *draws,
++                             unsigned long *draws_remapped)
++{
++    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
++    *dirty = r->vtx_bytes_dirty;
++    *if_remapped = r->vtx_bytes_if_remapped;
++    *draws = r->vtx_draws;
++    *draws_remapped = r->vtx_draws_remapped;
++}
++
++void pgraph_vk_vertex_stats(NV2AState *d, unsigned long *real,
++                            unsigned long *avoided)
++{
++    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
++    *real = r->vtx_flush_real;
++    *avoided = r->vtx_flush_avoided;
++}
++
++void pgraph_vk_report_triggers(NV2AState *d, unsigned long *clock,
++                               unsigned long *queue, unsigned long *pool)
++{
++    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
++    *clock = r->drain_by_clock;
++    *queue = r->drain_by_queue;
++    *pool = r->drain_by_pool;
+ }
 diff --git a/hw/xbox/nv2a/pgraph/vk/surface.c b/hw/xbox/nv2a/pgraph/vk/surface.c
-index 9d438f2d7b..10ae89a530 100644
+index 9d438f2..10ae89a 100644
 --- a/hw/xbox/nv2a/pgraph/vk/surface.c
 +++ b/hw/xbox/nv2a/pgraph/vk/surface.c
 @@ -1758,3 +1758,203 @@ void pgraph_vk_surface_flush(NV2AState *d)
@@ -935,7 +1447,7 @@ index 9d438f2d7b..10ae89a530 100644
 +    qemu_event_set(&r->present_complete);
 +}
 diff --git a/hw/xbox/nv2a/pgraph/vk/texture.c b/hw/xbox/nv2a/pgraph/vk/texture.c
-index 5647275520..bbae3cbcc8 100644
+index 5647275..bbae3cb 100644
 --- a/hw/xbox/nv2a/pgraph/vk/texture.c
 +++ b/hw/xbox/nv2a/pgraph/vk/texture.c
 @@ -1546,8 +1546,24 @@ void pgraph_vk_init_textures(PGRAPHState *pg)
@@ -963,8 +1475,81 @@ index 5647275520..bbae3cbcc8 100644
  
      r->texture_format_properties = g_malloc0_n(
          ARRAY_SIZE(kelvin_color_format_vk_map), sizeof(VkFormatProperties));
+diff --git a/hw/xbox/nv2a/pgraph/vk/vertex.c b/hw/xbox/nv2a/pgraph/vk/vertex.c
+index 1e84101..c720715 100644
+--- a/hw/xbox/nv2a/pgraph/vk/vertex.c
++++ b/hw/xbox/nv2a/pgraph/vk/vertex.c
+@@ -53,16 +53,66 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
+     size_t end_bit = TARGET_PAGE_ALIGN(offset + size) / TARGET_PAGE_SIZE;
+     size_t nbits = end_bit - start_bit;
+ 
+-    if (find_next_bit(r->uploaded_bitmap, start_bit + nbits, start_bit) <
+-        end_bit) {
++    /*
++     * Writing over vertex data that recorded draws still reference is a
++     * real write-after-read hazard and the flush is correct. But the
++     * bitmap tracks whole 4 KiB pages, so two unrelated structures that
++     * merely share a page looked like a hazard and flushed the entire
++     * pipeline for nothing.
++     *
++     * Keep the byte range actually uploaded within each page and flush
++     * only on a true overlap. Conservative in both directions: anything
++     * that does overlap, or that cannot be checked, still flushes.
++     */
++    bool hazard = false;
++    for (size_t p = start_bit; p < end_bit && !hazard; p++) {
++        if (!test_bit(p, r->uploaded_bitmap)) {
++            continue;
++        }
++        hwaddr page_start = (hwaddr)p * TARGET_PAGE_SIZE;
++        hwaddr w_lo = offset > page_start ? offset - page_start : 0;
++        hwaddr w_end = offset + size;
++        hwaddr w_hi = w_end < page_start + TARGET_PAGE_SIZE
++                          ? w_end - page_start : TARGET_PAGE_SIZE;
++        if (w_lo < r->uploaded_hi[p] && r->uploaded_lo[p] < w_hi) {
++            hazard = true;
++        }
++    }
++
++    if (hazard) {
+         // Vertex data changed while building the draw list. Finish drawing
+         // before updating RAM buffer.
++        r->vtx_flush_real++;
+         pgraph_vk_finish(pg, VK_FINISH_REASON_VERTEX_BUFFER_DIRTY);
++    } else if (find_next_bit(r->uploaded_bitmap, start_bit + nbits,
++                             start_bit) < end_bit) {
++        /* A page was touched but the bytes do not overlap: no flush. */
++        r->vtx_flush_avoided++;
+     }
+ 
+     nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_1);
+     memcpy(r->storage_buffers[BUFFER_VERTEX_RAM].mapped + offset, data, size);
+ 
++    /*
++     * Record what each page now holds. A page whose bit is already set
++     * widens its range; one that is not starts fresh. pgraph_vk_finish
++     * clears the bitmap, which is what invalidates these.
++     */
++    for (size_t p = start_bit; p < end_bit; p++) {
++        hwaddr page_start = (hwaddr)p * TARGET_PAGE_SIZE;
++        hwaddr w_lo = offset > page_start ? offset - page_start : 0;
++        hwaddr w_end = offset + size;
++        hwaddr w_hi = w_end < page_start + TARGET_PAGE_SIZE
++                          ? w_end - page_start : TARGET_PAGE_SIZE;
++        if (test_bit(p, r->uploaded_bitmap)) {
++            if (w_lo < r->uploaded_lo[p]) r->uploaded_lo[p] = w_lo;
++            if (w_hi > r->uploaded_hi[p]) r->uploaded_hi[p] = w_hi;
++        } else {
++            r->uploaded_lo[p] = w_lo;
++            r->uploaded_hi[p] = w_hi;
++        }
++    }
++
+     bitmap_set(r->uploaded_bitmap, start_bit, nbits);
+ }
+ 
 diff --git a/hw/xbox/xid.c b/hw/xbox/xid.c
-index 396d8119bc..f55b735575 100644
+index 396d811..f55b735 100644
 --- a/hw/xbox/xid.c
 +++ b/hw/xbox/xid.c
 @@ -101,6 +101,45 @@ void update_input(USBXIDGamepadState *s)
@@ -1014,7 +1599,7 @@ index 396d8119bc..f55b735575 100644
  
  void usb_xid_handle_reset(USBDevice *dev)
 diff --git a/include/qemu/osdep.h b/include/qemu/osdep.h
-index e3881aad08..e89eed59bc 100644
+index e3881aa..e89eed5 100644
 --- a/include/qemu/osdep.h
 +++ b/include/qemu/osdep.h
 @@ -857,7 +857,29 @@ size_t qemu_get_host_physmem(void);
@@ -1049,7 +1634,7 @@ index e3881aad08..e89eed59bc 100644
   * MAP_JIT protection of the current thread: -1 unknown, 0 write, 1 execute.
   * pthread_jit_write_protect_np() is costly and cpu_tb_exec() requests execute
 diff --git a/meson.build b/meson.build
-index 909017ca60..defc108e51 100644
+index 909017c..defc108 100644
 --- a/meson.build
 +++ b/meson.build
 @@ -1882,10 +1882,17 @@ if not get_option('coreaudio').auto() or (host_os == 'darwin' and have_system)
@@ -1126,7 +1711,7 @@ index 909017ca60..defc108e51 100644
  genconfig_proj = subproject('genconfig', required: true)
  genconfig = genconfig_proj.get_variable('cnode_dep')
 diff --git a/meson_options.txt b/meson_options.txt
-index b1e7b3484d..2cc98368f2 100644
+index b1e7b34..2cc9836 100644
 --- a/meson_options.txt
 +++ b/meson_options.txt
 @@ -394,3 +394,6 @@ option('rust', type: 'feature', value: 'disabled',
@@ -1137,7 +1722,7 @@ index b1e7b3484d..2cc98368f2 100644
 +option('dsp_jit', type : 'feature', value : 'auto',
 +       description: 'Rust recompiler for the MCPX DSP56300 (a C interpreter is always built)')
 diff --git a/net/meson.build b/net/meson.build
-index 804eb71f82..47f8bd3b47 100644
+index 804eb71..47f8bd3 100644
 --- a/net/meson.build
 +++ b/net/meson.build
 @@ -62,7 +62,12 @@ else
@@ -1155,7 +1740,7 @@ index 804eb71f82..47f8bd3b47 100644
  if have_vhost_net_vdpa
    system_ss.add(when: 'CONFIG_VIRTIO_NET', if_true: files('vhost-vdpa.c'), if_false: files('vhost-vdpa-stub.c'))
 diff --git a/net/net.c b/net/net.c
-index 2609958dc0..e0df3582a4 100644
+index 2609958..e0df358 100644
 --- a/net/net.c
 +++ b/net/net.c
 @@ -1308,7 +1308,9 @@ static int (* const net_client_init_fun[NET_CLIENT_DRIVER__MAX])(
@@ -1169,7 +1754,7 @@ index 2609958dc0..e0df3582a4 100644
          [NET_CLIENT_DRIVER_VMNET_HOST] = net_init_vmnet_host,
          [NET_CLIENT_DRIVER_VMNET_SHARED] = net_init_vmnet_shared,
 diff --git a/system/vl.c b/system/vl.c
-index f45bdc3458..c1bab2c7c5 100644
+index f45bdc3..c1bab2c 100644
 --- a/system/vl.c
 +++ b/system/vl.c
 @@ -3053,6 +3053,38 @@ void qemu_init(int argc, char **argv)
@@ -1212,21 +1797,48 @@ index f45bdc3458..c1bab2c7c5 100644
      fake_argv[fake_argc++] = strdup("-m");
      fake_argv[fake_argc++] = g_strdup_printf("%d", mem);
 diff --git a/tcg/region.c b/tcg/region.c
-index 848bc25fc6..a1ab290818 100644
+index 2181267..a1ab290 100644
 --- a/tcg/region.c
 +++ b/tcg/region.c
-@@ -630,6 +630,7 @@ extern kern_return_t mach_vm_remap(vm_map_t target_task,
- #endif
- #if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
- #include <sys/sysctl.h>
+@@ -624,13 +624,293 @@ extern kern_return_t mach_vm_remap(vm_map_t target_task,
+                                    vm_prot_t *max_protection,
+                                    vm_inherit_t inheritance);
+ 
++
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++#if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
++#include <sys/sysctl.h>
 +#include <dlfcn.h>
- 
- /*
-  * JIT on the iOS family, the only way it is available.
-@@ -658,6 +659,43 @@ static bool debugger_is_attached(void)
-     return (info.kp_proc.p_flag & P_TRACED) != 0;
- }
- 
++
++/*
++ * JIT on the iOS family, the only way it is available.
++ *
++ * Measured on a Vision Pro running visionOS 27 (see DEVLOG, S0): an app
++ * cannot make its own memory executable. MAP_JIT returns EPERM and
++ * mprotect to R+X returns success and then faults on the first instruction
++ * fetch. What does work is a debugger writing to each page of an
++ * already-RX mapping, after which those pages execute for the life of the
++ * process, including after the debugger detaches.
++ *
++ * The request is a trap. The debugger reads x0 and x1, prepares that range
++ * and continues us. With nothing attached the trap is fatal, so it is
++ * gated on actually being traced.
++ */
++static bool debugger_is_attached(void)
++{
++    struct kinfo_proc info;
++    size_t len = sizeof(info);
++    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid() };
++
++    info.kp_proc.p_flag = 0;
++    if (sysctl(mib, 4, &info, &len, NULL, 0) != 0) {
++        return false;
++    }
++    return (info.kp_proc.p_flag & P_TRACED) != 0;
++}
++
 +/*
 + * Say which way the code buffer was obtained, and what the platform would
 + * allow today.
@@ -1264,13 +1876,16 @@ index 848bc25fc6..a1ab290818 100644
 +    fflush(stderr);
 +}
 +
- static void prepare_jit_region(void *addr, size_t size)
- {
-     register void *x0 asm("x0") = addr;
-@@ -668,28 +706,158 @@ static void prepare_jit_region(void *addr, size_t size)
- }
- #endif
- 
++static void prepare_jit_region(void *addr, size_t size)
++{
++    register void *x0 asm("x0") = addr;
++    register size_t x1 asm("x1") = size;
++
++    /* UTM's legacy JIT26 request: prepare x1 bytes at x0, then detach. */
++    asm volatile("brk #0x69" : : "r"(x0), "r"(x1) : "memory");
++}
++#endif
++
 +/*
 + * Diagnostic: do the writable and executable views still show the same
 + * bytes? They are meant to be one set of pages seen twice. If they ever
@@ -1401,14 +2016,9 @@ index 848bc25fc6..a1ab290818 100644
      mach_vm_address_t buf_rw, buf_rx;
      vm_prot_t cur_prot, max_prot;
  
+-    /* Map the read-write portion via normal anon memory. */
 +#if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
-     /*
--     * The base mapping is R+X here, not R+W.
--     *
--     * A debugger can only prepare pages that have no writable mapping at
--     * that moment, so the writable alias is created afterwards, at the end
--     * of this function. On every other platform this is simply R+W from
--     * the start.
++    /*
 +     * UTM's order, exactly, because UTM's QEMU runs with JIT on this very
 +     * headset: the base anonymous mapping is R+X, the remap is made and
 +     * set R+X as upstream does, the debugger prepares the remap while no
@@ -1420,80 +2030,15 @@ index 848bc25fc6..a1ab290818 100644
 +     * any time. The upstream order starts from writable memory and on
 +     * device parks the vCPU on the first prologue instruction forever
 +     * (measured 2026-10-29).
-      */
--#if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
--    const int base_prot = PROT_READ | PROT_EXEC;
--#else
--    const int base_prot = PROT_READ | PROT_WRITE;
--#endif
++     */
 +    if (!debugger_is_attached()) {
 +        error_setg(errp, "JIT needs a debugger attached on this platform. "
 +                         "Launch through Apparition or StikDebug.");
 +        return -1;
 +    }
- 
--    if (!alloc_code_gen_buffer_anon(size, base_prot,
--                                    MAP_PRIVATE | MAP_ANONYMOUS, errp)) {
++
 +    if (alloc_code_gen_buffer_anon(size, PROT_READ | PROT_EXEC,
 +                                   MAP_PRIVATE | MAP_ANONYMOUS, errp) < 0) {
-         return -1;
-     }
- 
-@@ -707,8 +875,7 @@ static int alloc_code_gen_buffer_splitwx_vmremap(size_t size, Error **errp)
-                         &max_prot,
-                         VM_INHERIT_NONE);
-     if (ret != KERN_SUCCESS) {
--        /* TODO: Convert "ret" to a human readable error message. */
--        error_setg(errp, "vm_remap for jit splitwx failed");
-+        error_setg(errp, "vm_remap for jit splitwx failed (%d)", (int)ret);
-         munmap((void *)buf_rw, size);
-         return -1;
-     }
-@@ -720,34 +887,65 @@ static int alloc_code_gen_buffer_splitwx_vmremap(size_t size, Error **errp)
-         return -1;
-     }
- 
--#if (TARGET_OS_VISION || TARGET_OS_IOS) && defined(__aarch64__)
--    /*
--     * Ask the debugger to make the executable view executable, while no
--     * writable mapping of it exists. Without this the pages are RX and
--     * still refuse to run, and the process dies at the first translated
--     * block with no message at all.
--     */
--    if (debugger_is_attached()) {
--        prepare_jit_region((void *)buf_rx, size);
--    } else {
--        error_setg(errp, "JIT needs a debugger attached on this platform. "
--                         "Launch through Apparition or StikDebug.");
-+    prepare_jit_region((void *)buf_rx, size);
-+
-+    if (mprotect((void *)buf_rw, size, PROT_READ | PROT_WRITE) != 0) {
-+        error_setg_errno(errp, errno, "mprotect rw base for jit splitwx");
-         munmap((void *)buf_rx, size);
-         munmap((void *)buf_rw, size);
-         return -1;
-     }
- 
--    /* Only now is the writable alias safe to create. */
--    if (mprotect((void *)buf_rw, size, PROT_READ | PROT_WRITE) != 0) {
--        error_setg_errno(errp, errno, "mprotect rw alias for jit splitwx");
-+    tcg_splitwx_diff = buf_rx - buf_rw;
-+    log_jit_strategy("debugger-prepared (brk #0x69), executable mapping first");
-+    fprintf(stderr, "[tcg] jit: base 0x%llx now rw, remap 0x%llx prepared "
-+                    "(remap cur %d max %d)\n",
-+            (unsigned long long)buf_rw, (unsigned long long)buf_rx,
-+            (int)cur_prot, (int)max_prot);
-+
-+    selftest_rw = (uint8_t *)buf_rw + size - qemu_real_host_page_size() - 64;
-+    selftest_rx = selftest_rw + tcg_splitwx_diff;
-+    selftest2_rw = (uint8_t *)buf_rw + size - 2 * qemu_real_host_page_size();
-+    selftest2_rx = selftest2_rw + tcg_splitwx_diff;
-+    tcg_jit_selftest("after alias");
-+    tcg_jit_selftest_thread("after alias, new thread");
-+    return PROT_READ | PROT_WRITE;
-+#else
-+    if (!alloc_code_gen_buffer_anon(size, PROT_READ | PROT_WRITE,
-+                                    MAP_PRIVATE | MAP_ANONYMOUS, errp)) {
 +        return -1;
 +    }
 +
@@ -1511,19 +2056,46 @@ index 848bc25fc6..a1ab290818 100644
 +                        &max_prot,
 +                        VM_INHERIT_NONE);
 +    if (ret != KERN_SUCCESS) {
-+        /* TODO: Convert "ret" to a human readable error message. */
-+        error_setg(errp, "vm_remap for jit splitwx failed");
++        error_setg(errp, "vm_remap for jit splitwx failed (%d)", (int)ret);
 +        munmap((void *)buf_rw, size);
 +        return -1;
 +    }
 +
 +    if (mprotect((void *)buf_rx, size, host_prot_read_exec()) != 0) {
 +        error_setg_errno(errp, errno, "mprotect for jit splitwx");
-         munmap((void *)buf_rx, size);
-         munmap((void *)buf_rw, size);
++        munmap((void *)buf_rx, size);
++        munmap((void *)buf_rw, size);
++        return -1;
++    }
++
++    prepare_jit_region((void *)buf_rx, size);
++
++    if (mprotect((void *)buf_rw, size, PROT_READ | PROT_WRITE) != 0) {
++        error_setg_errno(errp, errno, "mprotect rw base for jit splitwx");
++        munmap((void *)buf_rx, size);
++        munmap((void *)buf_rw, size);
++        return -1;
++    }
++
++    tcg_splitwx_diff = buf_rx - buf_rw;
++    log_jit_strategy("debugger-prepared (brk #0x69), executable mapping first");
++    fprintf(stderr, "[tcg] jit: base 0x%llx now rw, remap 0x%llx prepared "
++                    "(remap cur %d max %d)\n",
++            (unsigned long long)buf_rw, (unsigned long long)buf_rx,
++            (int)cur_prot, (int)max_prot);
++
++    selftest_rw = (uint8_t *)buf_rw + size - qemu_real_host_page_size() - 64;
++    selftest_rx = selftest_rw + tcg_splitwx_diff;
++    selftest2_rw = (uint8_t *)buf_rw + size - 2 * qemu_real_host_page_size();
++    selftest2_rx = selftest2_rw + tcg_splitwx_diff;
++    tcg_jit_selftest("after alias");
++    tcg_jit_selftest_thread("after alias, new thread");
++    return PROT_READ | PROT_WRITE;
++#else
+     if (!alloc_code_gen_buffer_anon(size, PROT_READ | PROT_WRITE,
+                                     MAP_PRIVATE | MAP_ANONYMOUS, errp)) {
          return -1;
-     }
--#endif
+@@ -665,6 +945,7 @@ static int alloc_code_gen_buffer_splitwx_vmremap(size_t size, Error **errp)
  
      tcg_splitwx_diff = buf_rx - buf_rw;
      return PROT_READ | PROT_WRITE;
@@ -1531,7 +2103,7 @@ index 848bc25fc6..a1ab290818 100644
  }
  #endif /* CONFIG_DARWIN */
  #endif /* CONFIG_TCG_INTERPRETER */
-@@ -933,6 +1131,10 @@ void tcg_region_init(size_t tb_size, int splitwx, unsigned max_threads)
+@@ -850,6 +1131,10 @@ void tcg_region_init(size_t tb_size, int splitwx, unsigned max_threads)
          }
      }
  
@@ -1543,7 +2115,7 @@ index 848bc25fc6..a1ab290818 100644
  
      /*
 diff --git a/tcg/tcg.c b/tcg/tcg.c
-index 7967bbcafd..6f3c51b656 100644
+index 7967bbc..6f3c51b 100644
 --- a/tcg/tcg.c
 +++ b/tcg/tcg.c
 @@ -23,6 +23,9 @@
@@ -1586,7 +2158,7 @@ index 7967bbcafd..6f3c51b656 100644
  
  void tcg_func_start(TCGContext *s)
 diff --git a/ui/meson.build b/ui/meson.build
-index ea46bf0f44..498b27af7c 100644
+index ea46bf0..fd185c8 100644
 --- a/ui/meson.build
 +++ b/ui/meson.build
 @@ -27,10 +27,16 @@ xemu_ss.add(files(
@@ -1608,7 +2180,7 @@ index ea46bf0f44..498b27af7c 100644
    'xemu-widescreen.c',
  ))
  
-@@ -40,21 +46,49 @@ if host_os == 'windows'
+@@ -40,21 +46,50 @@ if host_os == 'windows'
    xemu_ss.add(nvapi, d3d11, dxgi)
  endif
  
@@ -1651,11 +2223,12 @@ index ea46bf0f44..498b27af7c 100644
 +  xros_sdk = run_command(xcrun, '-sdk', 'xros', '--show-sdk-path',
 +                         check: true).stdout().strip()
 +  swift_app = custom_target('xemu-host-app.o',
-+    input: 'xemu-host-app.swift',
++    input: ['xemu-host-app.swift', 'xbawks-picker.swift',
++             'xbawks-console.swift'],
 +    output: 'xemu-host-app.o',
 +    depend_files: files('xemu-host-bridge.h'),
 +    command: [xcrun, '-sdk', 'xros', 'swiftc',
-+              '-target', 'arm64-apple-xros26.0', '-O', '-parse-as-library',
++              '-target', 'arm64-apple-xros26.0', '-O', '-wmo', '-parse-as-library',
 +              '-emit-object',
 +              '-import-objc-header', meson.current_source_dir() / 'xemu-host-bridge.h',
 +              '@INPUT@', '-o', '@OUTPUT@'])
@@ -1666,12 +2239,680 @@ index ea46bf0f44..498b27af7c 100644
  system_ss.add_all(xemu_ss)
  
  system_ss.add(when: pixman, if_true: files('console-vc.c'), if_false: files('console-vc-stubs.c'))
+diff --git a/ui/xbawks-console.swift b/ui/xbawks-console.swift
+new file mode 100644
+index 0000000..896c313
+--- /dev/null
++++ b/ui/xbawks-console.swift
+@@ -0,0 +1,404 @@
++/*
++ * The console in the room, and the button that swaps a disc.
++ *
++ * There is no window while playing, because a spatial controller belongs
++ * to the app only while an immersive space is open and no window of the
++ * app is being gazed at. That rule is what made the first disc choice a
++ * startup step: pick a game, then the window goes away for good, and
++ * changing your mind meant relaunching the app, reattaching a debugger
++ * and often rebooting the headset.
++ *
++ * A RealityKit entity is not a window. So the console itself becomes the
++ * control: it sits in the room at true scale, and pressing it brings the
++ * deck back. Looking at a thing and pressing it is also what you would
++ * do to the real hardware, which is the whole reason it reads as obvious.
++ *
++ * The model is loaded at runtime from Documents and is not part of this
++ * app. It is somebody else's work with no licence attached to it, so it
++ * does not travel in the bundle or the repository. Without it the button
++ * is a plain box of the same dimensions and behaves identically.
++ */
++
++import ARKit
++import Foundation
++import RealityKit
++import SwiftUI
++import UIKit
++import simd
++
++/// Real console, measured: 320 x 91 to 100 x 260 mm. The model's own shell
++/// bounding box is 323.3 x 93.4 x 259.4 mm, so these are the fallback box
++/// and the sanity check for a model whose units did not survive export.
++enum ConsoleMetrics {
++    static let width: Float = 0.323
++    static let height: Float = 0.093
++    static let depth: Float = 0.259
++
++    /// On a low table, within arm's reach, slightly below the screen. Close
++    /// enough that gaze lands on it without hunting.
++    static let position = SIMD3<Float>(0, 0.72, -1.15)
++}
++
++/// A colourway is a set of part colours. The original hardware shipped in
++/// several and more exist as limited editions, so this is a table rather
++/// than constants: adding one is adding a case here.
++struct Colourway {
++    let name: String
++    let shell: UIColor
++    let jewel: UIColor
++    let trim: UIColor
++
++    static let matteBlack = Colourway(
++        name: "Matte Black",
++        shell: UIColor(white: 0.055, alpha: 1),
++        jewel: UIColor(red: 0.42, green: 0.80, blue: 0.11, alpha: 1),
++        trim: UIColor(white: 0.10, alpha: 1))
++}
++
++@MainActor
++enum XbawksConsole {
++    /// Where the model is looked for. Documents, beside the discs, because
++    /// that is where everything the app cannot redistribute already lives.
++    static var modelURL: URL? {
++        let docs = FileManager.default.urls(for: .documentDirectory,
++                                            in: .userDomainMask).first
++        guard let url = docs?.appendingPathComponent("xbox.usdz") else {
++            return nil
++        }
++        return FileManager.default.fileExists(atPath: url.path) ? url : nil
++    }
++
++    /// The tappable console. Returns the fallback box if there is no model,
++    /// so the disc swap works for anyone, with or without the asset.
++    static func make(_ way: Colourway = .matteBlack) async -> Entity {
++        let root = Entity()
++        root.name = "xbawks-console"
++        var hasModel = false
++
++        if let url = modelURL {
++            do {
++                let loaded = try await Entity(contentsOf: url)
++                paint(loaded, way)
++                normaliseScale(loaded)
++                /*
++                 * Centre the geometry on the root. A glTF export puts the
++                 * origin wherever the authoring scene had it, which for
++                 * this model is not the middle of the console, so the
++                 * collision shape and the thing you can see were in two
++                 * different places. That is why it had no collision from
++                 * the outside: you were poking next to it.
++                 */
++                let b = loaded.visualBounds(relativeTo: nil)
++                loaded.position = -b.center
++                fputs("[host] console: model extents \(b.extents) "
++                      + "centre \(b.center)\n", stderr)
++                root.addChild(loaded)
++                hasModel = true
++                fputs("[host] console: model loaded from Documents\n", stderr)
++            } catch {
++                fputs("[host] console: model failed to load (\(error)), "
++                      + "using the box\n", stderr)
++                root.addChild(fallbackBox(way))
++            }
++        } else {
++            fputs("[host] console: no Documents/xbox.usdz, using the box\n",
++                  stderr)
++            root.addChild(fallbackBox(way))
++        }
++        fflush(stderr)
++
++        root.position = ConsoleMetrics.position
++
++        /*
++         * Collision from the model's own geometry where there is a model,
++         * so a fingertip meets the shell where the shell actually is. A
++         * box around the whole console is easier to aim at but it also
++         * extends into the air above and beside it, which is what made a
++         * poke near the console register as a poke on it.
++         *
++         * The parts are individually hulled. That is fine: every gesture
++         * walks up to this root before acting, so hitting a fin and
++         * hitting the lid do the same thing.
++         */
++        /*
++         * One shape, measured from what is actually on screen rather than
++         * from the nominal dimensions, and sitting on the root now that
++         * the geometry is centred there. A console is very nearly a
++         * rectangular box, so a box is an honest fit; per part convex
++         * hulls were more faithful and also left the root with no shape of
++         * its own, which a physics body needs.
++         */
++        var extents = SIMD3<Float>(ConsoleMetrics.width,
++                                   ConsoleMetrics.height,
++                                   ConsoleMetrics.depth)
++        if hasModel {
++            let measured = root.visualBounds(relativeTo: root).extents
++            if measured.x > 0 && measured.y > 0 && measured.z > 0 {
++                extents = measured
++            }
++        }
++        root.components.set(CollisionComponent(
++            shapes: [ShapeResource.generateBox(size: extents)],
++            isStatic: true))
++        root.components.set(PhysicsBodyComponent(mode: .static))
++        root.components.set(InputTargetComponent())
++        root.components.set(HoverEffectComponent())
++        fputs("[host] console: collision box \(extents)\n", stderr)
++
++        return root
++    }
++
++    /// The model carries no materials at all: the project's website paints
++    /// it in the browser. Unpainted it renders as default white plastic,
++    /// which looks like a mistake rather than a console.
++    private static func paint(_ entity: Entity, _ way: Colourway) {
++        var shell = PhysicallyBasedMaterial()
++        shell.baseColor = .init(tint: way.shell)
++        shell.roughness = .init(floatLiteral: 0.65)
++        shell.metallic = .init(floatLiteral: 0.0)
++
++        var trim = PhysicallyBasedMaterial()
++        trim.baseColor = .init(tint: way.trim)
++        trim.roughness = .init(floatLiteral: 0.45)
++
++        var jewel = PhysicallyBasedMaterial()
++        jewel.baseColor = .init(tint: way.jewel)
++        jewel.roughness = .init(floatLiteral: 0.15)
++        jewel.emissiveColor = .init(color: way.jewel)
++        jewel.emissiveIntensity = 0.6
++
++        /*
++         * Lit, so the thing you press announces itself. This is the only
++         * reason the model's part names matter: the export kept them, so
++         * the ring can glow without touching the rest of the shell.
++         */
++        var ring = PhysicallyBasedMaterial()
++        ring.baseColor = .init(tint: way.jewel)
++        ring.emissiveColor = .init(color: way.jewel)
++        ring.emissiveIntensity = 2.0
++
++        func walk(_ e: Entity) {
++            if var model = e.components[ModelComponent.self] {
++                let n = e.name.lowercased()
++                let material: PhysicallyBasedMaterial
++                if n.contains("jewel") {
++                    material = jewel
++                } else if n.contains("ring_light") || n.contains("ringlight") {
++                    material = ring
++                } else if n.contains("button") || n.contains("port")
++                            || n.contains("fins") || n.contains("feet") {
++                    material = trim
++                } else {
++                    material = shell
++                }
++                model.materials = Array(repeating: material,
++                                        count: max(1, model.materials.count))
++                e.components.set(model)
++                /*
++                 * Per part, because a hover effect renders on the entity
++                 * that holds the mesh. On the bare root it had nothing to
++                 * draw, so looking at the console gave no sign that it
++                 * was a thing you could touch.
++                 */
++                e.components.set(HoverEffectComponent())
++            }
++            for child in e.children { walk(child) }
++        }
++        walk(entity)
++    }
++
++    /// The model is authored in metres, but a conversion that normalised
++    /// units would put a 32 cm console at 32 m and it would be invisible
++    /// from inside it. Measure and correct rather than trust.
++    private static func normaliseScale(_ entity: Entity) {
++        let extent = entity.visualBounds(relativeTo: nil).extents
++        let widest = max(extent.x, extent.z)
++        guard widest > 0 else { return }
++        let ratio = widest / ConsoleMetrics.width
++        if ratio < 0.8 || ratio > 1.25 {
++            entity.scale = .one / ratio
++            fputs("[host] console: model measured \(widest) m wide, "
++                  + "scaled by \(1 / ratio)\n", stderr)
++        }
++    }
++
++    private static func fallbackBox(_ way: Colourway) -> ModelEntity {
++        var shell = PhysicallyBasedMaterial()
++        shell.baseColor = .init(tint: way.shell)
++        shell.roughness = .init(floatLiteral: 0.65)
++
++        let mesh = MeshResource.generateBox(
++            width: ConsoleMetrics.width,
++            height: ConsoleMetrics.height,
++            depth: ConsoleMetrics.depth,
++            cornerRadius: 0.008)
++        let body = ModelEntity(mesh: mesh, materials: [shell])
++
++        /* A green jewel on the lid, so the box still reads as the console. */
++        var jewel = PhysicallyBasedMaterial()
++        jewel.baseColor = .init(tint: way.jewel)
++        jewel.emissiveColor = .init(color: way.jewel)
++        jewel.emissiveIntensity = 1.5
++        let disc = ModelEntity(
++            mesh: MeshResource.generateCylinder(height: 0.002, radius: 0.028),
++            materials: [jewel])
++        disc.position = [0, ConsoleMetrics.height / 2 + 0.001, 0]
++        body.addChild(disc)
++        return body
++    }
++}
++
++/*
++ * Where the console was left. Placement is only useful if it survives a
++ * relaunch, otherwise every launch puts it back in front of your knees.
++ */
++enum ConsolePlacement {
++    private static let posKey = "xbawks.console.position"
++    private static let rotKey = "xbawks.console.rotation"
++
++    static func loadPosition() -> SIMD3<Float> {
++        guard let a = UserDefaults.standard.array(forKey: posKey) as? [Double],
++              a.count == 3 else {
++            return ConsoleMetrics.position
++        }
++        return SIMD3<Float>(Float(a[0]), Float(a[1]), Float(a[2]))
++    }
++
++    static func loadRotation() -> simd_quatf {
++        guard let a = UserDefaults.standard.array(forKey: rotKey) as? [Double],
++              a.count == 4 else {
++            return simd_quatf(angle: 0, axis: [0, 1, 0])
++        }
++        let q = simd_quatf(ix: Float(a[0]), iy: Float(a[1]),
++                           iz: Float(a[2]), r: Float(a[3]))
++        /*
++         * Only the turn about vertical survives a reload. An earlier build
++         * allowed rotation about any axis, so a console saved while tipped
++         * would come back tipped forever with no way to level it. Taking
++         * the yaw out of whatever was stored fixes that in place.
++         */
++        let forward = q.act(SIMD3<Float>(0, 0, 1))
++        return simd_quatf(angle: atan2(forward.x, forward.z), axis: [0, 1, 0])
++    }
++
++    static func save(position p: SIMD3<Float>, rotation q: simd_quatf) {
++        UserDefaults.standard.set([Double(p.x), Double(p.y), Double(p.z)],
++                                  forKey: posKey)
++        UserDefaults.standard.set([Double(q.imag.x), Double(q.imag.y),
++                                   Double(q.imag.z), Double(q.real)],
++                                  forKey: rotKey)
++    }
++}
++
++/*
++ * Where the real surfaces are, so the console can be put down on a table
++ * rather than through it.
++ *
++ * Plane detection rather than scene reconstruction: a table is a
++ * horizontal plane with a known extent, which is exactly the question
++ * being asked, and the mesh would have to be raycast against for the same
++ * answer at more cost. Authorisation can be refused, and a refusal is not
++ * an error here: without it the console simply moves freely, which is how
++ * it behaved before any of this existed.
++ */
++@MainActor
++final class SurfaceFinder {
++    private struct Surface {
++        let y: Float
++        /// World to extent space. Used rather than a yaw angle because the
++        /// extent already carries its own rotation and inverting the
++        /// transform cannot get the convention wrong the way pulling an
++        /// angle out of it can.
++        let extentFromWorld: simd_float4x4
++        let halfWidth: Float
++        let halfDepth: Float
++
++        func contains(_ x: Float, _ z: Float) -> Bool {
++            let local = extentFromWorld * SIMD4<Float>(x, y, z, 1)
++            return abs(local.x) <= halfWidth && abs(local.z) <= halfDepth
++        }
++    }
++
++    private var surfaces: [UUID: Surface] = [:]
++    private var session: ARKitSession?
++    private var misses = 0
++
++    func start() async {
++        let session = ARKitSession()
++        self.session = session
++
++        let result = await session.requestAuthorization(for: [.worldSensing])
++        guard result[.worldSensing] == .allowed else {
++            fputs("[host] surfaces: world sensing refused, the console will "
++                  + "move freely\n", stderr)
++            fflush(stderr)
++            return
++        }
++
++        let provider = PlaneDetectionProvider(alignments: [.horizontal])
++        do {
++            try await session.run([provider])
++        } catch {
++            fputs("[host] surfaces: plane detection failed (\(error))\n",
++                  stderr)
++            fflush(stderr)
++            return
++        }
++        fputs("[host] surfaces: looking for tables and floors\n", stderr)
++        fflush(stderr)
++
++        for await update in provider.anchorUpdates {
++            let a = update.anchor
++            switch update.event {
++            case .removed:
++                surfaces.removeValue(forKey: a.id)
++            case .added, .updated:
++                /*
++                 * The extent has its own transform within the anchor, so
++                 * the surface's real centre and rotation are the product
++                 * of the two, not the anchor alone.
++                 */
++                let worldFromExtent = a.originFromAnchorTransform
++                                      * a.geometry.extent.anchorFromExtentTransform
++                surfaces[a.id] = Surface(
++                    y: worldFromExtent.columns.3.y,
++                    extentFromWorld: worldFromExtent.inverse,
++                    halfWidth: a.geometry.extent.width / 2,
++                    halfDepth: a.geometry.extent.height / 2)
++            }
++        }
++    }
++
++    /// The height to rest an object of this height at, given where it is
++    /// being dragged to. Picks the highest surface that is under the
++    /// object and actually beneath the drag, so lifting it over a table
++    /// puts it on the table and dragging it off the edge drops it to the
++    /// floor. Returns nil when nothing is under it.
++    func restingY(x: Float, z: Float, draggedTo y: Float,
++                  objectHeight: Float) -> Float? {
++        var best: Float?
++        for s in surfaces.values where s.contains(x, z) {
++            /*
++             * Only surfaces at or below where the hand is, plus a little.
++             * Without that margin a table found slightly above the drag
++             * would snatch the console upward the moment it passed
++             * underneath, which feels like the object fighting back.
++             */
++            guard s.y <= y + 0.12 else { continue }
++            if best == nil || s.y > best! { best = s.y }
++        }
++        guard let top = best else {
++            /* Logged once in a while, because a silent nil here is
++             * indistinguishable from the feature not being built. */
++            misses += 1
++            if misses == 1 || misses % 500 == 0 {
++                fputs("[host] surfaces: nothing under the console "
++                      + "(\(surfaces.count) known, miss \(misses))\n",
++                      stderr)
++                fflush(stderr)
++            }
++            return nil
++        }
++        return top + objectHeight / 2
++    }
++}
+diff --git a/ui/xbawks-picker.swift b/ui/xbawks-picker.swift
+new file mode 100644
+index 0000000..1ae2184
+--- /dev/null
++++ b/ui/xbawks-picker.swift
+@@ -0,0 +1,252 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Copyright (C) 2026 A. Cervantez
++//
++//  xbawks-picker.swift
++//
++//  Discs as a Cover Flow deck. Ported from SaveCoverFlow in the Quake port,
++//  which took it from swiftui-gallery-seed. The three things that are not
++//  obvious are carried over verbatim rather than rediscovered:
++//
++//  1. `.contentMargins(..., for: .scrollContent)` is LOAD-BEARING and is not
++//     centring. Insetting by half a column less half a card shrinks the
++//     measured region to exactly one card, so only the centred card reaches
++//     `.identity` and every other card gets a tilt. Remove it as redundant
++//     and several cards sit flat in the middle with no Cover Flow at all.
++//  2. `ScrollTransitionPhase` gives three keyframes (-1, 0, +1), not a
++//     continuous value. No easing can live in that closure; the constants
++//     below are the entire design surface.
++//  3. `rotation3DEffect`'s `perspective:` label chooses the overload. With it
++//     you get the flat projection; without it Swift resolves to the
++//     RotationAxis3D overload, a true depth rotation that the window's depth
++//     budget may clip. Keeping the flat one.
++//
++//  Changed from the Quake deck, deliberately: the cards are PORTRAIT, because
++//  an Xbox case is portrait and a game cover is not a screenshot. The deck is
++//  Xbox green rather than neutral.
++//
++import SwiftUI
++
++enum XbawksTheme {
++    /// The dashboard's green, sampled from the jewel rather than the logo.
++    static let green      = Color(red: 0.42, green: 0.80, blue: 0.11)
++    static let deepGreen  = Color(red: 0.05, green: 0.16, blue: 0.03)
++    static let dimGreen   = Color(red: 0.16, green: 0.34, blue: 0.08)
++
++    static func face(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
++        let name: String
++        switch weight {
++        case .bold:      name = "Oxanium-Bold"
++        case .semibold:  name = "Oxanium-SemiBold"
++        case .medium:    name = "Oxanium-Medium"
++        default:         name = "Oxanium-Regular"
++        }
++        return .custom(name, size: size)
++    }
++}
++
++enum DeckMetrics {
++    /// Portrait, because a game cover is a box. 2:3 is close to a DVD case.
++    static let cardWidth: CGFloat  = 190
++    static let cardHeight: CGFloat = 275
++    static let tiltDegrees: CGFloat = 55
++    /// How much the flankers overlap each other: the negative stack spacing.
++    static let flankerOverlapFraction: CGFloat = 0.32
++    /// How far an off-centre card is pushed AWAY from the hero. Positive means
++    /// away; negative looks plausible in a still and collapses it in motion.
++    static let flankerPushAwayFraction: CGFloat = 0.30
++
++    /// A tilted card is TALLER than its flat self, because the near edge is
++    /// magnified toward the viewer. Give the container exactly cardHeight and
++    /// that is where the corners get cut. Headroom is the fix; the multiplier
++    /// is empirical because the magnification depends on `perspective`.
++    static var deckHeight: CGFloat { cardHeight * 1.35 }
++
++    static func contentMargin(forWidth width: CGFloat) -> CGFloat {
++        max(0, (width - cardWidth) / 2)
++    }
++}
++
++struct DiscEntry: Identifiable, Hashable {
++    let id: String          // the filename, which is also the id
++    var title: String       // without the extension
++    var coverURL: URL?      // <same name>.jpg or .png beside the disc
++    var isDashboard: Bool = false
++}
++
++/// What is in Documents/GAMES, with each disc's cover if one sits beside
++/// it. Shared, because the deck is shown in two places now: the launcher
++/// window on a cold start, and the panel above the console mid session.
++enum DiscLibrary {
++    static func scan() -> [DiscEntry] {
++        var found: [DiscEntry] = []
++        if let c = xemu_host_list_discs() {
++            defer { free(c) }
++            let home = ProcessInfo.processInfo.environment["HOME"] ?? ""
++            let dir = URL(fileURLWithPath: home)
++                .appendingPathComponent("Documents/GAMES")
++            for name in String(cString: c).split(separator: "\n")
++                            .map(String.init).sorted() {
++                let stem = (name as NSString).deletingPathExtension
++                var cover: URL? = nil
++                for ext in ["jpg", "jpeg", "png"] {
++                    let u = dir.appendingPathComponent(stem)
++                              .appendingPathExtension(ext)
++                    if FileManager.default.fileExists(atPath: u.path) {
++                        cover = u
++                        break
++                    }
++                }
++                found.append(DiscEntry(id: name, title: stem, coverURL: cover))
++            }
++        }
++        found.append(DiscEntry(id: "__dashboard__", title: "Dashboard",
++                               coverURL: nil, isDashboard: true))
++        return found
++    }
++}
++
++struct DiscCoverFlow: View {
++    let discs: [DiscEntry]
++    @Binding var selectedIndex: Int
++    @State private var scrollID: Int?
++
++    private var revision: [String] { discs.map(\.id) }
++
++    var body: some View {
++        GeometryReader { geo in
++            ScrollView(.horizontal) {
++                LazyHStack(spacing: -DeckMetrics.cardWidth
++                                    * DeckMetrics.flankerOverlapFraction) {
++                    ForEach(Array(discs.enumerated()), id: \.element.id) { index, disc in
++                        card(disc, at: index).id(index)
++                    }
++                }
++                .scrollTargetLayout()
++            }
++            .scrollTargetBehavior(.viewAligned)
++            .scrollPosition(id: $scrollID)
++            .scrollIndicators(.hidden)
++            // Not centring. See note 1 at the top.
++            .contentMargins(.horizontal,
++                            DeckMetrics.contentMargin(forWidth: geo.size.width),
++                            for: .scrollContent)
++            // No scrollClipDisabled, deliberately: it lets the deck spill
++            // across the whole window. The mask is what stops the clip being
++            // visible, by fading cards to nothing before the boundary.
++            .id(revision)
++        }
++        .frame(height: DeckMetrics.deckHeight)
++        .mask {
++            LinearGradient(stops: [.init(color: .clear, location: 0),
++                                   .init(color: .black, location: 0.06),
++                                   .init(color: .black, location: 0.94),
++                                   .init(color: .clear, location: 1)],
++                           startPoint: .leading, endPoint: .trailing)
++        }
++        .onChange(of: selectedIndex, initial: true) { _, index in
++            guard scrollID != index else { return }
++            withAnimation(.snappy(duration: 0.28)) { scrollID = index }
++        }
++        .onChange(of: scrollID) { _, id in
++            guard let id, id != selectedIndex else { return }
++            selectedIndex = id
++        }
++    }
++
++    private func card(_ disc: DiscEntry, at index: Int) -> some View {
++        let isCentre = index == selectedIndex
++        return face(disc, isCentre: isCentre)
++            .frame(width: DeckMetrics.cardWidth, height: DeckMetrics.cardHeight)
++            // Before the transform, so the gaze highlight follows the rotated
++            // geometry rather than an untilted rectangle.
++            .contentShape(.hoverEffect, RoundedRectangle(cornerRadius: 12))
++            .hoverEffect()
++            .zIndex(Double(discs.count - abs(index - selectedIndex)))
++            .scrollTransition(.interactive, axis: .horizontal) { content, phase in
++                content
++                    .rotation3DEffect(.degrees(phase.value * -DeckMetrics.tiltDegrees),
++                                      axis: (x: 0, y: 1, z: 0), perspective: 0.7)
++                    .scaleEffect(phase.isIdentity ? 1 : 0.78)
++                    .offset(x: phase.value * DeckMetrics.cardWidth
++                               * DeckMetrics.flankerPushAwayFraction)
++                    .opacity(1 - 0.25 * abs(phase.value))
++            }
++            // SELECTS, never loads. In the Quake deck a tap that loaded fired
++            // by accident, because the gesture that summons the window
++            // releases over the window the instant it appears. Loading gets
++            // its own button.
++            .onTapGesture { selectedIndex = index }
++            .accessibilityLabel(disc.title)
++    }
++
++    private func face(_ disc: DiscEntry, isCentre: Bool) -> some View {
++        ZStack(alignment: .bottom) {
++            // A solid, not a material: material is near-invisible against
++            // visionOS glass. Drawn under the cover too, so a cover that
++            // fails to decode shows the plain card rather than a hole.
++            RoundedRectangle(cornerRadius: 12)
++                .fill(LinearGradient(colors: [XbawksTheme.deepGreen,
++                                              Color(white: 0.04)],
++                                     startPoint: .topLeading,
++                                     endPoint: .bottomTrailing))
++
++            if disc.isDashboard {
++                VStack(spacing: 10) {
++                    Image(systemName: "house.fill")
++                        .font(.system(size: 44))
++                        .foregroundStyle(XbawksTheme.green)
++                    Text("DASHBOARD")
++                        .font(XbawksTheme.face(13, .bold))
++                        .foregroundStyle(XbawksTheme.green)
++                        .tracking(2)
++                }
++                .frame(maxHeight: .infinity)
++            } else if let cover = disc.coverURL,
++                      let image = UIImage(contentsOfFile: cover.path) {
++                Image(uiImage: image)
++                    .resizable()
++                    .aspectRatio(contentMode: .fill)
++                    // Pinned and cropped, so the PICTURE cannot decide how big
++                    // the CARD is. `.fill` may report a size larger than it
++                    // was offered and a ZStack takes its largest child.
++                    .frame(width: DeckMetrics.cardWidth,
++                           height: DeckMetrics.cardHeight)
++                    .clipped()
++            } else {
++                // No cover: the title, large, on the green.
++                Text(disc.title)
++                    .font(XbawksTheme.face(20, .bold))
++                    .foregroundStyle(XbawksTheme.green.opacity(0.9))
++                    .multilineTextAlignment(.center)
++                    .padding(16)
++                    .frame(maxHeight: .infinity)
++            }
++
++            caption(disc)
++        }
++        .clipShape(RoundedRectangle(cornerRadius: 12))
++        // An OVERLAY, not another ZStack child: a child sized to .infinity
++        // makes the stack as large as it is allowed to be.
++        .overlay {
++            RoundedRectangle(cornerRadius: 12)
++                .strokeBorder(isCentre ? XbawksTheme.green.opacity(0.75)
++                                       : .white.opacity(0.12),
++                              lineWidth: isCentre ? 2 : 1)
++        }
++        .shadow(color: isCentre ? XbawksTheme.green.opacity(0.35)
++                                : .black.opacity(0.3),
++                radius: isCentre ? 14 : 4, y: isCentre ? 6 : 2)
++    }
++
++    private func caption(_ disc: DiscEntry) -> some View {
++        Text(disc.isDashboard ? "No disc" : disc.title)
++            .font(XbawksTheme.face(12, .semibold))
++            .lineLimit(2)
++            .foregroundStyle(.white)
++            .padding(8)
++            .frame(maxWidth: .infinity, alignment: .leading)
++            .background(
++                LinearGradient(colors: [.black.opacity(0.0), .black.opacity(0.88)],
++                               startPoint: .top, endPoint: .bottom))
++    }
++}
 diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
 new file mode 100644
-index 0000000000..a8c6e0b859
+index 0000000..0ea6fc0
 --- /dev/null
 +++ b/ui/xemu-host-app.swift
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,575 @@
 +// The entry point, and now the screen.
 +//
 +// Measured on 2026-10-29: a spatial controller (the PSVR2 Sense pair)
@@ -1694,6 +2935,14 @@ index 0000000000..a8c6e0b859
 +    /// never shown now and the display link does not care.
 +    nonisolated(unsafe) static var ticker: XemuScreenViewController?
 +
++    /*
++     * Whether the screen is up. The launcher is rebuilt from scratch every
++     * time it is summoned, so it cannot remember this itself, and it needs
++     * to know: reopening the window to swap a disc must not try to open a
++     * space that is already open.
++     */
++    @MainActor static var spaceIsOpen = false
++
 +    init() {
 +        xemu_host_prepare()
 +        let vc = XemuScreenViewController()
@@ -1710,17 +2959,28 @@ index 0000000000..a8c6e0b859
 +         * the app could not be reopened), and it is gone while playing so
 +         * there is nothing of the app's to look at.
 +         */
-+        WindowGroup(id: "launcher") {
++        /*
++         * Window and not WindowGroup. A WindowGroup is a template the
++         * system will happily instantiate again every time openWindow is
++         * called, so pressing the console twice gave two decks, and ten
++         * times gave ten. Window is a single instance by definition: the
++         * second openWindow brings the existing one forward instead of
++         * making another. The framework enforces it, so no bookkeeping
++         * here can drift out of step with reality.
++         */
++        Window("XBAWKS", id: "launcher") {
 +            LauncherView()
 +        }
-+        .defaultSize(width: 480, height: 240)
++        .defaultSize(width: 760, height: 620)
 +
 +        ImmersiveSpace(id: "screen") {
 +            ScreenSpace()
 +                .onAppear {
++                    XemuHostApp.spaceIsOpen = true
 +                    fputs("[host] immersive space appeared\n", stderr); fflush(stderr)
 +                }
 +                .onDisappear {
++                    XemuHostApp.spaceIsOpen = false
 +                    fputs("[host] immersive space disappeared\n", stderr); fflush(stderr)
 +                }
 +        }
@@ -1731,26 +2991,183 @@ index 0000000000..a8c6e0b859
 +struct LauncherView: View {
 +    @Environment(\.openImmersiveSpace) private var openImmersive
 +    @Environment(\.dismissWindow) private var dismissWindow
-+    @State private var status = "opening the screen"
++    @State private var status = ""
++    @State private var discs: [DiscEntry] = []
++    @State private var selected = 0
++    @State private var started = xemu_host_started()
 +
 +    var body: some View {
-+        VStack(spacing: 16) {
-+            Text("XemuHost").font(.title2)
-+            Text(status).foregroundStyle(.secondary)
-+            Button("Resume") { Task { await open() } }
++        ZStack {
++            // Translucent green, over the system glass rather than instead of
++            // it, so the window still reads as a visionOS window.
++            XbawksTheme.deepGreen.opacity(0.55).ignoresSafeArea()
++
++            VStack(spacing: 18) {
++                Text("XBAWKS")
++                    .font(XbawksTheme.face(34, .bold))
++                    .foregroundStyle(XbawksTheme.green)
++                    .tracking(8)
++                    .shadow(color: XbawksTheme.green.opacity(0.5), radius: 12)
++
++                if started {
++                    /*
++                     * Summoned from the console mid session. The deck is
++                     * the same one, so a swap looks exactly like the first
++                     * choice did, and the screen is still running behind
++                     * this window the whole time.
++                     */
++                    Text(status).font(XbawksTheme.face(13))
++                        .foregroundStyle(.secondary)
++
++                    DiscCoverFlow(discs: discs, selectedIndex: $selected)
++
++                    HStack(spacing: 18) {
++                        Button {
++                            swap(discs.indices.contains(selected)
++                                 ? discs[selected] : nil)
++                        } label: {
++                            Text("SWAP DISC")
++                                .font(XbawksTheme.face(16, .bold))
++                                .tracking(3)
++                                .padding(.horizontal, 26).padding(.vertical, 6)
++                        }
++                        .tint(XbawksTheme.dimGreen)
++                        .disabled(discs.indices.contains(selected)
++                                  && discs[selected].isDashboard)
++
++                        Button {
++                            xemu_host_eject_disc()
++                            back()
++                        } label: {
++                            Text("EJECT")
++                                .font(XbawksTheme.face(16, .bold))
++                                .tracking(3)
++                                .padding(.horizontal, 26).padding(.vertical, 6)
++                        }
++                        .tint(XbawksTheme.dimGreen)
++                    }
++
++                    Text("Swapping resets the console, because it reads its "
++                         + "disc when it boots. Eject just opens the tray.")
++                        .font(XbawksTheme.face(11))
++                        .foregroundStyle(.secondary)
++                        .multilineTextAlignment(.center)
++                        .padding(.horizontal, 40)
++
++                    Button(XemuHostApp.spaceIsOpen ? "Back to the game"
++                                                   : "Resume") {
++                        if XemuHostApp.spaceIsOpen {
++                            back()
++                        } else {
++                            Task { await open() }
++                        }
++                    }
++                    .font(XbawksTheme.face(11))
++                    .buttonStyle(.plain)
++                    .foregroundStyle(XbawksTheme.green.opacity(0.8))
++                } else {
++                    DiscCoverFlow(discs: discs, selectedIndex: $selected)
++
++                    Button {
++                        Task { await start(discs.indices.contains(selected)
++                                           ? discs[selected] : nil) }
++                    } label: {
++                        Text(discs.indices.contains(selected) && discs[selected].isDashboard
++                             ? "BOOT DASHBOARD" : "INSERT DISC")
++                            .font(XbawksTheme.face(16, .bold))
++                            .tracking(3)
++                            .padding(.horizontal, 26).padding(.vertical, 6)
++                    }
++                    .tint(XbawksTheme.dimGreen)
++                    .disabled(discs.isEmpty)
++
++                    Text("Discs go in Files, under XBAWKS then GAMES. "
++                         + "A .jpg or .png with the same name is its cover.")
++                        .font(XbawksTheme.face(11))
++                        .foregroundStyle(.secondary)
++                        .multilineTextAlignment(.center)
++                        .padding(.horizontal, 40)
++
++                    Button("Rescan") { rescan() }
++                        .font(XbawksTheme.face(11))
++                        .buttonStyle(.plain)
++                        .foregroundStyle(XbawksTheme.green.opacity(0.8))
++                }
++            }
++            .padding(.vertical, 28)
 +        }
-+        .padding(32)
-+        .task { await open() }
++        .task {
++            rescan()
++            /*
++             * The screen opens straight away, so the console is in the
++             * room while a game is being chosen rather than appearing
++             * only once one has been. This window stays up on top of it,
++             * which is what we want during selection anyway: a controller
++             * belongs to the window being looked at.
++             *
++             * Not if it is already open. Summoned from the console mid
++             * session, opening it again either fails or dismisses the
++             * window that was just asked for.
++             */
++            if !XemuHostApp.spaceIsOpen {
++                let result = await openImmersive(id: "screen")
++                fputs("[host] launcher: screen \(result)\n", stderr)
++                fflush(stderr)
++            }
++        }
++    }
++
++    private func rescan() {
++        started = xemu_host_started()
++        discs = DiscLibrary.scan()
++        if selected >= discs.count { selected = max(0, discs.count - 1) }
++    }
++
++    @MainActor private func start(_ disc: DiscEntry?) async {
++        let name = (disc?.isDashboard ?? true) ? nil : disc?.id
++        fputs("[host] launcher: start requested, disc=\(name ?? "dashboard")\n",
++              stderr)
++        fflush(stderr)
++        // Explicit, rather than relying on Swift bridging an optional String
++        // into a const char *. If that bridge quietly produced NULL the app
++        // would sit forever on the picker with no sign of why, which is what
++        // it did.
++        if let name {
++            name.withCString { xemu_host_start_with_disc($0) }
++        } else {
++            xemu_host_start_with_disc(nil)
++        }
++        started = true
++        if XemuHostApp.spaceIsOpen {
++            dismissWindow(id: "launcher")
++        } else {
++            await open()
++        }
++    }
++
++    /// Hand the swap to C and get out of the way. The window has to go,
++    /// not just lose focus: a controller belongs to the app only while no
++    /// window of the app is being looked at.
++    @MainActor private func swap(_ disc: DiscEntry?) {
++        guard let disc, !disc.isDashboard else { return }
++        disc.id.withCString { xemu_host_load_disc($0) }
++        back()
++    }
++
++    @MainActor private func back() {
++        if XemuHostApp.spaceIsOpen {
++            dismissWindow(id: "launcher")
++        } else {
++            Task { await open() }
++        }
 +    }
 +
 +    @MainActor private func open() async {
 +        let result = await openImmersive(id: "screen")
 +        fputs("[host] launcher: immersive space \(result)\n", stderr); fflush(stderr)
 +        switch result {
-+        case .opened:
-+            dismissWindow(id: "launcher")
-+        default:
-+            status = "could not open the screen (\(result)); try Resume"
++        case .opened: dismissWindow(id: "launcher")
++        default: status = "could not open the screen (\(result)); try Resume"
 +        }
 +    }
 +}
@@ -1758,15 +3175,164 @@ index 0000000000..a8c6e0b859
 +/// A 4:3 screen two and a half metres ahead at eye height, two metres
 +/// wide, fed thirty times a second from the published frame.
 +struct ScreenSpace: View {
-+    private let screen = GuestScreen()
++    /*
++     * @State and not a let. A plain property is reinitialised on every
++     * re-evaluation of the view, and this view has state in it now, so it
++     * will be re-evaluated. That would build a second GuestScreen that
++     * nothing ever starts, while the frame pump kept feeding the first.
++     */
++    @State private var screen = GuestScreen()
++    @Environment(\.openWindow) private var openWindow
++
++    /*
++     * Placement is a held gesture, not a travelled one.
++     *
++     * It was decided by distance at first: move more than 20 mm and it is
++     * a move, less and it is a press. That reads badly in the hand,
++     * because poking a thing with a fingertip always travels, so every
++     * poke became a move. Time is the honest signal here. Nothing moves
++     * until the press has been held, so a poke and a quick pinch both
++     * mean "open", and only a deliberate hold picks the console up.
++     */
++    private static let holdToAdjust = 0.35   /* seconds */
++
++    @State private var pressBegan: Date?
++    @State private var adjusting = false
++    @State private var dragOrigin: SIMD3<Float>?
++    @State private var spinOrigin: simd_quatf?
++    @State private var surfaces = SurfaceFinder()
++
++    private static let consoleName = "xbawks-console"
 +
 +    var body: some View {
 +        RealityView { content in
 +            if let entity = screen.makeEntity() {
 +                content.add(entity)
 +            }
++            let console = await XbawksConsole.make()
++            console.position = ConsolePlacement.loadPosition()
++            console.orientation = ConsolePlacement.loadRotation()
++            content.add(console)
 +            screen.start()
++            Task { await surfaces.start() }
 +        }
++        /*
++         * Press or hold, one recogniser. Two of them cannot work: a drag
++         * that ends still looks like a tap to a tap recogniser, so the
++         * menu opened every time the console was repositioned.
++         */
++        .gesture(
++            DragGesture(minimumDistance: 0)
++                .targetedToAnyEntity()
++                .onChanged { value in
++                    guard let console = Self.console(of: value.entity) else {
++                        return
++                    }
++                    if pressBegan == nil { pressBegan = value.time }
++                    let held = value.time.timeIntervalSince(pressBegan!)
++                    if !adjusting {
++                        guard held >= Self.holdToAdjust else { return }
++                        /* Pick it up from where it is now, so it does not
++                         * jump by however far the hand drifted while the
++                         * hold was being counted. */
++                        adjusting = true
++                        dragOrigin = console.position
++                    }
++                    let move = value.convert(value.translation3D,
++                                             from: .local, to: .scene)
++                    var p = dragOrigin! + move
++                    /*
++                     * Put it down on whatever is really there. A console
++                     * sunk halfway into a table is the single thing that
++                     * most gives away that it is not an object, and it is
++                     * also just annoying to position.
++                     */
++                    if let rest = surfaces.restingY(
++                            x: p.x, z: p.z, draggedTo: p.y,
++                            objectHeight: ConsoleMetrics.height) {
++                        p.y = max(p.y, rest)
++                    }
++                    console.position = p
++                }
++                .onEnded { value in
++                    guard let console = Self.console(of: value.entity) else {
++                        return
++                    }
++                    let wasAdjusting = adjusting
++                    pressBegan = nil
++                    adjusting = false
++                    dragOrigin = nil
++
++                    if wasAdjusting {
++                        ConsolePlacement.save(position: console.position,
++                                              rotation: console.orientation)
++                        fputs("[host] console placed at \(console.position)\n",
++                              stderr)
++                    } else {
++                        /*
++                         * The window, not an in space panel. A window can
++                         * be grabbed and put where you want it, which is
++                         * the thing worth keeping; an attachment can only
++                         * sit where it is told. So the console summons the
++                         * window and the system places it, after which it
++                         * is yours to move.
++                         */
++                        openWindow(id: "launcher")
++                        fputs("[host] console pressed, deck requested\n",
++                              stderr)
++                    }
++                    fflush(stderr)
++                }
++        )
++        /* Turn it to face you. Persisted with the position, because a
++         * console pointing at the wall is no more use than one behind
++         * your knees. */
++        .simultaneousGesture(
++            RotateGesture3D(constrainedToAxis: .y)
++                .targetedToAnyEntity()
++                .onChanged { value in
++                    guard let console = Self.console(of: value.entity) else {
++                        return
++                    }
++                    if spinOrigin == nil { spinOrigin = console.orientation }
++                    /*
++                     * Turned on the spot, never tipped. An unconstrained
++                     * RotateGesture3D hands back a rotation about any
++                     * axis, so the console could end up on its side or
++                     * nose down, which a console on a shelf cannot do.
++                     * Constraining the gesture to vertical is half of
++                     * it. The sign is the other half and it took two
++                     * goes: the axis the gesture reports already carries
++                     * the direction of the twist, so negating the angle
++                     * on top of that turned it the wrong way.
++                     */
++                    let r = value.rotation
++                    let sign: Float = r.axis.y < 0 ? -1 : 1
++                    let yaw = simd_quatf(angle: Float(r.angle.radians) * sign,
++                                         axis: [0, 1, 0])
++                    console.orientation = yaw * spinOrigin!
++                }
++                .onEnded { value in
++                    guard let console = Self.console(of: value.entity) else {
++                        return
++                    }
++                    spinOrigin = nil
++                    ConsolePlacement.save(position: console.position,
++                                          rotation: console.orientation)
++                    fputs("[host] console turned\n", stderr); fflush(stderr)
++                }
++        )
++    }
++
++    /// The gesture can land on any descendant, including a single fin of
++    /// the model, so walk up to the thing that actually moves.
++    private static func console(of entity: Entity) -> Entity? {
++        var cur: Entity? = entity
++        while let c = cur {
++            if c.name == consoleName { return c }
++            cur = c.parent
++        }
++        return nil
 +    }
 +}
 +
@@ -1789,9 +3355,27 @@ index 0000000000..a8c6e0b859
 +        }
 +        var material = UnlitMaterial()
 +        material.color = .init(texture: .init(texture!))
-+        let mesh = MeshResource.generatePlane(width: 2.0, height: 1.5)
++        /*
++         * 2.8 m wide at 2.6 m away, which is about 56 degrees across, so
++         * a cinema screen rather than a television. 4:3 because that is
++         * what the console outputs.
++         *
++         * This is free. What is not free is the pixels behind it: the
++         * guest renders 640x480 and that is what gets stretched here, so
++         * a larger plane is a larger soft image, not a sharper one. The
++         * lever for sharpness is the surface scale factor, which is 1 on
++         * this build and multiplies pixel work by its square.
++         */
++        let mesh = MeshResource.generatePlane(width: 2.8, height: 2.1)
 +        let e = ModelEntity(mesh: mesh, materials: [material])
-+        e.position = [0, 1.4, -2.5]
++        e.position = [0, 1.5, -2.6]
++        /*
++         * Hidden until the first frame. The space now opens before a game
++         * is chosen, and a 2.8 m black slab hanging in the room next to a
++         * console that has not booted looks like a fault rather than a
++         * screen that is off.
++         */
++        e.isEnabled = false
 +        entity = e
 +        return e
 +    }
@@ -1861,6 +3445,7 @@ index 0000000000..a8c6e0b859
 +        if r == 1 {
 +            drawable.present()
 +            shown += 1
++            if shown == 1 { entity?.isEnabled = true }
 +            if shown <= 3 || shown % 600 == 0 {
 +                fputs("[host] screen: GPU frame \(shown) (\(w)x\(h))\n", stderr)
 +                fflush(stderr)
@@ -1885,6 +3470,7 @@ index 0000000000..a8c6e0b859
 +                                 withBytes: pixels, bytesPerRow: Int(w) * 4)
 +        drawable.present()
 +        shown += 1
++        if shown == 1 { entity?.isEnabled = true }
 +        if shown <= 3 || shown % 300 == 0 {
 +            fputs("[host] screen: frame \(shown) (seq \(seq), \(w)x\(h))\n", stderr)
 +            fflush(stderr)
@@ -1904,10 +3490,10 @@ index 0000000000..a8c6e0b859
 +}
 diff --git a/ui/xemu-host-bridge.h b/ui/xemu-host-bridge.h
 new file mode 100644
-index 0000000000..16c4d7ebd6
+index 0000000..ec21fa8
 --- /dev/null
 +++ b/ui/xemu-host-bridge.h
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,47 @@
 +/*
 + * What the Swift entry point sees of the Objective-C shell. Kept to the
 + * two classes it wraps and the one function it calls first.
@@ -1928,6 +3514,18 @@ index 0000000000..16c4d7ebd6
 + * into the Metal texture on the GPU: 1 copied, 0 nothing or size changed
 + * (ask present_size and rebuild), -1 unsupported (use the CPU path). */
 +void xemu_host_set_metal_present(bool on);
++
++/* Disc selection. list returns a malloc'd newline separated list of the
++ * .iso/.xiso files in Documents (free it); start_with_disc hands the
++ * chosen filename (or NULL for the dashboard) to the waiting emulator
++ * thread; started says whether that handoff already happened. */
++char *xemu_host_list_discs(void);
++void xemu_host_start_with_disc(const char *filename);
++bool xemu_host_started(void);
++
++/* Mid session disc changes. Both are safe to call from the UI thread. */
++void xemu_host_load_disc(const char *filename);
++void xemu_host_eject_disc(void);
 +int xemu_host_present_frame(void *mtl_texture, int w, int h);
 +bool xemu_host_present_size(int *w, int *h);
 +int xemu_host_guest_flips(void);
@@ -1945,7 +3543,7 @@ index 0000000000..16c4d7ebd6
 +@end
 diff --git a/ui/xemu-host-ios.m b/ui/xemu-host-ios.m
 new file mode 100644
-index 0000000000..ae6eac2ecc
+index 0000000..ae6eac2
 --- /dev/null
 +++ b/ui/xemu-host-ios.m
 @@ -0,0 +1,869 @@
@@ -2820,7 +4418,7 @@ index 0000000000..ae6eac2ecc
 +#endif /* TARGET_OS_VISION || TARGET_OS_IOS */
 diff --git a/ui/xemu-host-png.cc b/ui/xemu-host-png.cc
 new file mode 100644
-index 0000000000..1dd3732e61
+index 0000000..1dd3732
 --- /dev/null
 +++ b/ui/xemu-host-png.cc
 @@ -0,0 +1,27 @@
@@ -2853,10 +4451,10 @@ index 0000000000..1dd3732e61
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000000..093cb5ff14
+index 0000000..0b0f417
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,828 @@
+@@ -0,0 +1,1211 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -2880,6 +4478,7 @@ index 0000000000..093cb5ff14
 +#include "qemu/thread.h"
 +#include "qemu/atomic.h"
 +#include "qemu/rcu.h"
++#include <pthread.h>
 +#ifdef __APPLE__
 +#include <mach/mach.h>
 +#endif
@@ -2898,6 +4497,9 @@ index 0000000000..093cb5ff14
 +#include "xemu-version.h"
 +#include "xemu-notifications.h"
 +#include "xemu-snapshots.h"
++#include "hw/xbox/smbus.h"
++#include "qapi/qapi-commands-block.h"
++#include "qapi/error.h"
 +
 +const char *xemu_host_bundle_path(void);
 +extern int xemu_host_stage;
@@ -3016,6 +4618,7 @@ index 0000000000..093cb5ff14
 + * loop thread with the BQL, where they belong.
 + */
 +static bool g_background;
++static bool g_qemu_ready;   /* qemu_init has returned; the AIO context exists */
 +
 +static void pause_bh(void *opaque)
 +{
@@ -3033,6 +4636,15 @@ index 0000000000..093cb5ff14
 +void xemu_host_set_background(bool background)
 +{
 +    qatomic_set(&g_background, background);
++    /*
++     * The scene activates while the emulator thread is still parked
++     * waiting for a disc choice, so there is no AIO context to schedule
++     * a bottom half on yet. Scheduling one anyway dereferences null and
++     * takes the process down before the picker is even drawn.
++     */
++    if (!qatomic_read(&g_qemu_ready)) {
++        return;
++    }
 +    aio_bh_schedule_oneshot(qemu_get_aio_context(), pause_bh,
 +                            (void *)(uintptr_t)background);
 +}
@@ -3143,6 +4755,219 @@ index 0000000000..093cb5ff14
 +            (unsigned long long)(qemu_ram_get_used_length(rb) >> 20),
 +            (unsigned long long)(qemu_ram_get_max_length(rb) >> 20));
 +    return 0;
++}
++
++/*
++ * Disc selection. The launcher window lists what is in Documents and the
++ * emulator thread waits here until something is chosen, so changing games
++ * is a tap rather than a 5 GB reinstall. Static initialisers, because the
++ * window can answer before the emulator thread reaches the wait.
++ */
++static pthread_mutex_t g_disc_mu = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t  g_disc_cv = PTHREAD_COND_INITIALIZER;
++static char *g_selected_disc;      /* filename in Documents, or "" for none */
++static bool  g_disc_chosen;
++static bool  g_emulator_started;
++
++char *xemu_host_list_discs(void)
++{
++    const char *home = getenv("HOME");
++    if (!home) {
++        return g_strdup("");
++    }
++    /*
++     * Games live in Documents/GAMES, created on first run so the folder is
++     * already there to drop discs into. In Files this reads as
++     * XBAWKS > GAMES, because the app's own container is already named
++     * after the app; an inner folder called XBAWKS gave XBAWKS > XBAWKS.
++     *
++     * Rename the old one in place if it is still there. A rename is
++     * instant whatever the folder holds, which matters when it holds five
++     * gigabytes of discs that took ten minutes to copy over.
++     */
++    g_autofree char *docs = g_strdup_printf("%s/Documents/GAMES", home);
++    g_autofree char *legacy = g_strdup_printf("%s/Documents/XBAWKS", home);
++    if (g_file_test(legacy, G_FILE_TEST_IS_DIR) &&
++        !g_file_test(docs, G_FILE_TEST_IS_DIR)) {
++        if (g_rename(legacy, docs) == 0) {
++            fprintf(stderr, "[host] moved Documents/XBAWKS to Documents/GAMES\n");
++        }
++    }
++    g_mkdir_with_parents(docs, 0755);
++    GDir *dir = g_dir_open(docs, 0, NULL);
++    if (!dir) {
++        return g_strdup("");
++    }
++    GString *out = g_string_new(NULL);
++    const char *name;
++    while ((name = g_dir_read_name(dir))) {
++        if (g_str_has_suffix(name, ".iso") || g_str_has_suffix(name, ".xiso")) {
++            g_string_append(out, name);
++            g_string_append_c(out, '\n');
++        }
++    }
++    g_dir_close(dir);
++    return g_string_free(out, FALSE);
++}
++
++void xemu_host_start_with_disc(const char *filename)
++{
++    fprintf(stderr, "[host] disc chosen: %s\n",
++            filename && filename[0] ? filename : "(none, dashboard)");
++    fflush(stderr);
++    pthread_mutex_lock(&g_disc_mu);
++    g_free(g_selected_disc);
++    g_selected_disc = g_strdup(filename ? filename : "");
++    g_disc_chosen = true;
++    pthread_cond_signal(&g_disc_cv);
++    pthread_mutex_unlock(&g_disc_mu);
++}
++
++bool xemu_host_started(void)
++{
++    return qatomic_read(&g_emulator_started);
++}
++
++/*
++ * Swapping a disc without relaunching.
++ *
++ * Upstream has xemu_eject_disc and xemu_load_disc in ui/xemu.c, but that
++ * file is an SDL window and an ImGui menu bar and is not in this build,
++ * so this is the same sequence against the same primitives.
++ *
++ * Three things are not obvious and each one was a wrong first guess:
++ *
++ * 1. It runs in a bottom half. Every block layer call here asserts
++ *    GLOBAL_STATE_CODE(), which in this tree is an assert that the caller
++ *    holds the BQL, and asserts are compiled in. A bottom half on the main
++ *    AIO context runs on the main loop thread with the BQL already held,
++ *    which is the same reason pause_bh above exists. Calling this straight
++ *    from the SwiftUI thread aborts the process.
++ *
++ * 2. force is true. With force false a running title holds the tray shut,
++ *    because it issued ATAPI PREVENT ALLOW MEDIUM REMOVAL, and do_open_tray
++ *    returns EINPROGRESS after merely asking the guest to let go. The
++ *    medium does not change. That makes the first press look broken and the
++ *    second press work, which is upstream's behaviour and is not worth
++ *    reproducing: somebody pressing eject in this app has already decided.
++ *    The SMC button is pressed as well, so the guest still sees the event.
++ *
++ * 3. Changing the medium does not start the new game. The console reads its
++ *    disc when it boots, so a swap has to reset the machine afterwards or
++ *    the old title simply keeps running with a new disc under it. Eject on
++ *    its own does not reset, because that is a tray opening and nothing
++ *    more.
++ */
++typedef struct DiscRequest {
++    char *path;     /* NULL ejects */
++    bool reset;     /* reboot afterwards, so the new disc is what boots */
++} DiscRequest;
++
++static void disc_bh(void *opaque)
++{
++    DiscRequest *req = opaque;
++    Error *err = NULL;
++
++    /* The guest sees the physical button either way, because that is what
++     * the person did. */
++    xbox_smc_eject_button();
++
++    if (req->path) {
++        qmp_blockdev_change_medium("ide0-cd1", NULL, req->path, "raw",
++                                   true, true,   /* force the locked tray */
++                                   false, 0, &err);
++    } else {
++        qmp_eject("ide0-cd1", NULL, true, true, &err);
++    }
++
++    /*
++     * Unconditionally, and whether it worked or not, because this reads
++     * the drive's real state and writes it into the SMC register the Xbox
++     * kernel polls. Leaving it out means the guest's idea of the tray and
++     * the block layer's disagree, and on an eject the title keeps reading
++     * a drive with no disc in it. There is a FIXME upstream wishing this
++     * were a tray_moved callback; until it is, the caller does it.
++     */
++    xbox_smc_update_tray_state();
++
++    if (err) {
++        fprintf(stderr, "[host] disc: %s failed: %s\n",
++                req->path ? "load" : "eject", error_get_pretty(err));
++        error_free(err);
++    } else {
++        /*
++         * Only on success. Upstream blanks this before the eject it may
++         * refuse, which leaves the setting and the drive disagreeing, and
++         * the setting is what boots next time because it is saved at exit.
++         */
++        xemu_settings_set_string(&g_config.sys.files.dvd_path,
++                                 req->path ? req->path : "");
++        fprintf(stderr, "[host] disc: %s\n",
++                req->path ? req->path : "ejected");
++        if (req->reset) {
++            /*
++             * The reset is a request the main loop acts on later, while
++             * the medium already changed synchronously above, so the title
++             * gets an IDE media change error somewhere in between and
++             * handles it however it likes. Whether that lands on the new
++             * game or on the dashboard is worth knowing, so say what the
++             * machine was doing at the moment of asking.
++             */
++            fprintf(stderr, "[host] disc: resetting so it boots "
++                            "(runstate was %s)\n",
++                    runstate_is_running() ? "running" : "not running");
++            qemu_system_reset_request(SHUTDOWN_CAUSE_HOST_UI);
++        }
++    }
++    fflush(stderr);
++
++    g_free(req->path);
++    g_free(req);
++}
++
++/* The bottom half outlives the caller's string, so it owns a copy. */
++static void schedule_disc(char *path, bool reset)
++{
++    if (!qatomic_read(&g_qemu_ready)) {
++        fprintf(stderr, "[host] disc: ignored, the machine is not up yet\n");
++        fflush(stderr);
++        g_free(path);
++        return;
++    }
++    DiscRequest *req = g_new0(DiscRequest, 1);
++    req->path = path;
++    req->reset = reset;
++    aio_bh_schedule_oneshot(qemu_get_aio_context(), disc_bh, req);
++}
++
++void xemu_host_load_disc(const char *filename)
++{
++    const char *home = getenv("HOME");
++    if (!filename || !filename[0] || !home) {
++        return;
++    }
++    fprintf(stderr, "[host] disc: swapping to %s\n", filename);
++    fflush(stderr);
++    schedule_disc(g_strdup_printf("%s/Documents/GAMES/%s", home, filename),
++                  true);
++}
++
++void xemu_host_eject_disc(void)
++{
++    fprintf(stderr, "[host] disc: eject requested\n");
++    fflush(stderr);
++    schedule_disc(NULL, false);
++}
++
++/* Documents copy if one exists, else the bundle's. */
++static char *media_path(const char *home, const char *bundle, const char *file)
++{
++    char *doc = g_strdup_printf("%s/Documents/%s", home ? home : "", file);
++    if (home && g_file_test(doc, G_FILE_TEST_EXISTS)) {
++        return doc;
++    }
++    g_free(doc);
++    return g_strdup_printf("%s/media/%s", bundle, file);
 +}
 +
 +static int      g_argc;
@@ -3304,6 +5129,7 @@ index 0000000000..093cb5ff14
 +    footprint("before qemu_init");
 +    qemu_init(g_argc, g_argv);
 +    footprint("after qemu_init");
++    qatomic_set(&g_qemu_ready, true);
 +
 +    /*
 +     * One controller on port 1, filled by the shell. qemu_init returns
@@ -3398,18 +5224,46 @@ index 0000000000..093cb5ff14
 +         * is "Failed to generate EEPROM file" naming a path you have never
 +         * seen.
 +         */
++        /*
++         * Every piece of media prefers a copy in Documents, so the bundle
++         * can ship without any of it and installs stop costing minutes.
++         */
 +        xemu_settings_set_string(&g_config.sys.files.bootrom_path,
-+            g_strdup_printf("%s/media/mcpx-1.0.bin", bundle));
++            media_path(home, bundle, "mcpx-1.0.bin"));
 +        xemu_settings_set_string(&g_config.sys.files.flashrom_path,
-+            g_strdup_printf("%s/media/bios.bin", bundle));
-+        /* A disc in the drive boots instead of the dashboard. Read-only
-+         * is fine for a DVD, so it can stay in the bundle. */
++            media_path(home, bundle, "bios.bin"));
++
++        /*
++         * The disc is chosen in the launcher window, from Documents. Wait
++         * for it. A disc baked into the bundle (a development build made
++         * with XEMU_GAME) skips the wait and keeps the old behaviour.
++         */
 +        {
-+            g_autofree char *iso = g_strdup_printf("%s/media/game.iso", bundle);
-+            if (g_file_test(iso, G_FILE_TEST_EXISTS)) {
-+                xemu_settings_set_string(&g_config.sys.files.dvd_path, iso);
-+                fprintf(stderr, "[host] dvd      %s\n", iso);
++            g_autofree char *baked =
++                g_strdup_printf("%s/media/game.iso", bundle);
++            if (g_file_test(baked, G_FILE_TEST_EXISTS)) {
++                xemu_settings_set_string(&g_config.sys.files.dvd_path,
++                                         g_strdup(baked));
++                fprintf(stderr, "[host] dvd      %s (baked in)\n", baked);
++            } else {
++                fprintf(stderr, "[host] waiting for a disc choice\n");
++                fflush(stderr);
++                pthread_mutex_lock(&g_disc_mu);
++                while (!g_disc_chosen) {
++                    pthread_cond_wait(&g_disc_cv, &g_disc_mu);
++                }
++                pthread_mutex_unlock(&g_disc_mu);
++                if (g_selected_disc && g_selected_disc[0] && home) {
++                    g_autofree char *iso = g_strdup_printf(
++                        "%s/Documents/GAMES/%s", home, g_selected_disc);
++                    xemu_settings_set_string(&g_config.sys.files.dvd_path,
++                                             g_strdup(iso));
++                    fprintf(stderr, "[host] dvd      %s\n", iso);
++                } else {
++                    fprintf(stderr, "[host] no disc, booting the dashboard\n");
++                }
 +            }
++            qatomic_set(&g_emulator_started, true);
 +        }
 +        /*
 +         * The hard disk has to live somewhere writable. An app bundle is
@@ -3603,6 +5457,133 @@ index 0000000000..093cb5ff14
 +            }
 +            {
 +                /*
++                 * Why the renderer stopped, and how often. A full GPU
++                 * drain per reason, as a delta over the last five
++                 * seconds, so walking from one level to another says in
++                 * numbers which reason is responsible.
++                 */
++                extern unsigned long xemu_vk_finish_counts[9];
++                static const char *names[9] = {
++                    "vtxbuf", "surf_create", "surf_down", "buf_space",
++                    "fb_dirty", "present", "flip_stall", "flush", "stalled"
++                };
++                static unsigned long last[9];
++                char line[320];
++                int n = 0;
++                unsigned long total = 0;
++                for (int i = 0; i < 9; i++) {
++                    unsigned long d = xemu_vk_finish_counts[i] - last[i];
++                    last[i] = xemu_vk_finish_counts[i];
++                    total += d;
++                    if (d) {
++                        n += snprintf(line + n, sizeof(line) - n, " %s=%lu",
++                                      names[i], d);
++                    }
++                }
++                fprintf(stderr, "[host]   gpu drains in 5 s: %lu%s\n",
++                        total, n ? line : " none");
++
++                /*
++                 * The same breakdown in milliseconds. This is the number
++                 * that decides anything: a reason can be the most frequent
++                 * and still cost nothing, if by the time it drains the GPU
++                 * has already gone idle.
++                 */
++                extern unsigned long long xemu_vk_finish_ns[9];
++                static unsigned long long last_ns[9];
++                char tline[320];
++                int tn = 0;
++                unsigned long long total_ns = 0;
++                for (int i = 0; i < 9; i++) {
++                    unsigned long long dn = xemu_vk_finish_ns[i] - last_ns[i];
++                    last_ns[i] = xemu_vk_finish_ns[i];
++                    total_ns += dn;
++                    if (dn >= 1000000) {
++                        tn += snprintf(tline + tn, sizeof(tline) - tn,
++                                       " %s=%llums", names[i], dn / 1000000);
++                    }
++                }
++                fprintf(stderr, "[host]   gpu stalled in 5 s: %llums of 5000"
++                                " (%.0f%%)%s\n",
++                        total_ns / 1000000,
++                        (double)total_ns / 5e9 * 100.0,
++                        tn ? tline : "");
++
++                /*
++                 * And specifically the occlusion drains: how many were
++                 * taken, how many the rate limit skipped, the average
++                 * report queue depth when draining, and how close the
++                 * fixed 1024 query pool came to overflowing.
++                 */
++                {
++                    extern void pgraph_vk_report_stats(NV2AState *d,
++                        unsigned long *, unsigned long *, unsigned long *,
++                        unsigned *);
++                    static unsigned long ld, ls, ldep;
++                    unsigned long dr = 0, sk = 0, dep = 0;
++                    unsigned qif = 0;
++                    pgraph_vk_report_stats(g_nv2a_for_stats(), &dr, &sk, &dep,
++                                           &qif);
++                    unsigned long d_dr = dr - ld, d_sk = sk - ls,
++                                  d_dep = dep - ldep;
++                    ld = dr; ls = sk; ldep = dep;
++                    fprintf(stderr, "[host]   reports: %lu drains, %lu "
++                                    "skipped, avg queue %.1f, %u queries in "
++                                    "flight of 1024\n",
++                            d_dr, d_sk, d_dr ? (double)d_dep / d_dr : 0.0,
++                            qif);
++                    extern void pgraph_vk_report_triggers(NV2AState *d,
++                        unsigned long *, unsigned long *, unsigned long *);
++                    static unsigned long lc, lq, lp;
++                    unsigned long c = 0, q = 0, po = 0;
++                    pgraph_vk_report_triggers(g_nv2a_for_stats(), &c, &q, &po);
++                    fprintf(stderr, "[host]   drain trigger: clock %lu, "
++                                    "queue %lu, pool %lu\n",
++                            c - lc, q - lq, po - lp);
++                    lc = c; lq = q; lp = po;
++
++                    extern void pgraph_vk_vertex_stats(NV2AState *d,
++                        unsigned long *, unsigned long *);
++                    static unsigned long lvr, lva;
++                    unsigned long vr = 0, va = 0;
++                    pgraph_vk_vertex_stats(g_nv2a_for_stats(), &vr, &va);
++                    fprintf(stderr, "[host]   vertex: %lu real flushes, %lu "
++                                    "avoided by byte range\n",
++                            vr - lvr, va - lva);
++                    lvr = vr; lva = va;
++
++                    extern void pgraph_vk_vertex_volume(NV2AState *d,
++                        unsigned long long *, unsigned long long *,
++                        unsigned long *, unsigned long *);
++                    static unsigned long long lbd, lbr;
++                    static unsigned long lvdraws, lvremap;
++                    unsigned long long bd = 0, br = 0;
++                    unsigned long vdraws = 0, vremap = 0;
++                    pgraph_vk_vertex_volume(g_nv2a_for_stats(), &bd, &br,
++                                            &vdraws, &vremap);
++                    unsigned long long d_dirty = bd - lbd;
++                    unsigned long long d_remap = br - lbr;
++                    fprintf(stderr, "[host]   vertex bytes in 5 s: dirty "
++                                    "%llu KiB, if remapped %llu KiB (%.1fx), "
++                                    "%lu draws of which %lu already remap\n",
++                            d_dirty >> 10, d_remap >> 10,
++                            d_dirty ? (double)d_remap / (double)d_dirty : 0.0,
++                            vdraws - lvdraws, vremap - lvremap);
++                    lbd = bd; lbr = br; lvdraws = vdraws; lvremap = vremap;
++
++                    extern void pgraph_vk_hazard_shape(NV2AState *d,
++                        unsigned long *, unsigned long *);
++                    static unsigned long lhy, lhn;
++                    unsigned long hy = 0, hn = 0;
++                    pgraph_vk_hazard_shape(g_nv2a_for_stats(), &hy, &hn);
++                    fprintf(stderr, "[host]   vertex hazards in 5 s: %lu "
++                                    "could use the ring, %lu could not\n",
++                            hy - lhy, hn - lhn);
++                    lhy = hy; lhn = hn;
++                }
++            }
++            {
++                /*
 +                 * The guest's own speed. Presses reach its report and it
 +                 * misses them unless they are held, which is what a guest
 +                 * sampling input at a few frames a second would do.
@@ -3686,7 +5667,7 @@ index 0000000000..093cb5ff14
 +    return exit_status;
 +}
 diff --git a/ui/xemu-input.c b/ui/xemu-input.c
-index 4fbc863147..f3cff5b7cd 100644
+index 4fbc863..f3cff5b 100644
 --- a/ui/xemu-input.c
 +++ b/ui/xemu-input.c
 @@ -516,6 +516,8 @@ void xemu_input_update_controller(ControllerState *state)
@@ -3723,7 +5704,7 @@ index 4fbc863147..f3cff5b7cd 100644
  {
      // FIXME: Attempt to disable rumble when unbinding so it's not left
 diff --git a/ui/xemu-input.h b/ui/xemu-input.h
-index 7023e30e23..d805f3500e 100644
+index 7023e30..d805f35 100644
 --- a/ui/xemu-input.h
 +++ b/ui/xemu-input.h
 @@ -71,6 +71,8 @@ enum controller_state_axis_index {
@@ -3749,7 +5730,7 @@ index 7023e30e23..d805f3500e 100644
  bool xemu_input_bind_xmu(int player_index, int peripheral_port_index,
                           const char *filename, bool is_rebind);
 diff --git a/ui/xemu-settings.cc b/ui/xemu-settings.cc
-index 5f9148af8a..0189082edc 100644
+index 5f9148a..0189082 100644
 --- a/ui/xemu-settings.cc
 +++ b/ui/xemu-settings.cc
 @@ -19,7 +19,17 @@
@@ -3790,7 +5771,7 @@ index 5f9148af8a..0189082edc 100644
          base_path = g_strdup(base);
      } else {
 diff --git a/ui/xemu-snapshots.c b/ui/xemu-snapshots.c
-index 9d40864e66..0ae2f91c1c 100644
+index 9d40864..0ae2f91 100644
 --- a/ui/xemu-snapshots.c
 +++ b/ui/xemu-snapshots.c
 @@ -22,7 +22,6 @@
@@ -3833,7 +5814,7 @@ index 9d40864e66..0ae2f91c1c 100644
          g_free(*data);
      }
 diff --git a/ui/xemu-snapshots.h b/ui/xemu-snapshots.h
-index 9d793f0ced..33b7440f77 100644
+index 9d793f0..33b7440 100644
 --- a/ui/xemu-snapshots.h
 +++ b/ui/xemu-snapshots.h
 @@ -27,7 +27,6 @@ extern "C" {
@@ -3866,7 +5847,7 @@ index 9d793f0ced..33b7440f77 100644
  
  #ifdef __cplusplus
 diff --git a/util/osdep.c b/util/osdep.c
-index 9602b9d757..a4175ad05d 100644
+index 9602b9d..a4175ad 100644
 --- a/util/osdep.c
 +++ b/util/osdep.c
 @@ -34,8 +34,10 @@

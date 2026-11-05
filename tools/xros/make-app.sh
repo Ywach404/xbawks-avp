@@ -45,8 +45,8 @@ cat > "$APP/Info.plist" <<PLIST
 <dict>
 	<key>CFBundleExecutable</key><string>XemuHost</string>
 	<key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
-	<key>CFBundleName</key><string>XemuHost</string>
-	<key>CFBundleDisplayName</key><string>XemuHost</string>
+	<key>CFBundleName</key><string>Xbawks</string>
+	<key>CFBundleDisplayName</key><string>XBAWKS</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>0.1</string>
 	<key>CFBundleVersion</key><string>1</string>
@@ -57,6 +57,19 @@ cat > "$APP/Info.plist" <<PLIST
 	<key>GCSupportedGameControllers</key>
 	<array><dict><key>ProfileName</key><string>ExtendedGamepad</string></dict></array>
 	<key>UIDeviceFamily</key><array><integer>7</integer></array>
+	<!-- Plane detection, so the console can be put down on a real table
+	     instead of hovering through it. Without this string the
+	     authorisation request is denied before the user ever sees it. -->
+	<key>NSWorldSensingUsageDescription</key>
+	<string>Finds tables and floors so the console can rest on them.</string>
+	<!-- Oxanium, SIL OFL 1.1. The licence travels in Fonts/OFL.txt. -->
+	<key>UIAppFonts</key>
+	<array>
+		<string>Fonts/Oxanium-Regular.ttf</string>
+		<string>Fonts/Oxanium-Medium.ttf</string>
+		<string>Fonts/Oxanium-SemiBold.ttf</string>
+		<string>Fonts/Oxanium-Bold.ttf</string>
+	</array>
 	<!-- So the frame it writes can be pulled off with devicectl, and seen
 	     in Files without a cable. -->
 	<key>UIFileSharingEnabled</key><true/>
@@ -126,6 +139,17 @@ otool -l "$APP/XemuHost" | awk '/LC_RPATH/{f=1;next} f&&/path /{print $2;f=0}' |
 		*) install_name_tool -delete_rpath "$rp" "$APP/XemuHost" 2>/dev/null || true ;;
 	esac
 done
+
+# Oxanium, the interface face. SIL OFL 1.1, which permits embedding and
+# redistribution provided the licence travels with it, so OFL.txt goes in
+# beside the fonts rather than being referenced from somewhere else.
+mkdir -p "$APP/Fonts"
+for f in Regular Medium SemiBold Bold; do
+	src="$HOME/Library/Fonts/Oxanium-$f.ttf"
+	[[ -f "$src" ]] && cp "$src" "$APP/Fonts/" || echo "  warning: Oxanium-$f.ttf not installed"
+done
+[[ -f "$HOME/Library/Fonts/_licences/Oxanium-OFL.txt" ]] \
+	&& cp "$HOME/Library/Fonts/_licences/Oxanium-OFL.txt" "$APP/Fonts/OFL.txt"
 
 # Media: opt in, never by default.
 #
