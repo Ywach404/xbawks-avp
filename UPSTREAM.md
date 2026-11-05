@@ -44,6 +44,19 @@ in-tree under `ui/thirdparty`.
 explain each one here, because a patch that does six unrelated things defeats
 the format.
 
+Changes go into the tree first and are captured back with:
+
+```sh
+./tools/refresh-patch.sh            # rewrite 0002 from the working tree
+./tools/refresh-patch.sh --check    # exit 1 if 0002 is stale
+```
+
+Do not write a patch by hand and do not diff against the pin directly. 0001
+and 0002 overlap on 12 files, `renderer.h` and `draw.c` among them, so a plain
+diff from the pin produces a 0002 that has swallowed 0001. The script rebuilds
+"pin plus 0001" in a scratch repository, drops the tree on top and diffs, so
+what comes out is ours by construction rather than by judgement.
+
 ### 0001-apple-silicon-fork.patch
 
 **Not ours.** `github.com/zlixas/xemu` at `99db55071ad8c4ac02fcdd65eb159abe68b4ae37`,

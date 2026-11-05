@@ -1,12 +1,19 @@
 # xemu-avp DEVLOG
 
-Facts only: commands, results, measurements. Rationale sections are left as
-TODOs for the project owner.
+A working log of this port, kept as I went: what I measured, what it meant,
+and what I got wrong before I got it right. Entries are dated and in order,
+so the dead ends are still here rather than tidied away. Numbers are from my
+own headset unless a line says otherwise.
+
+Game titles named below are discs dumped from my own console, used to test
+the port. No game data, boot ROM, BIOS or disk image is part of this
+repository or of any build it produces.
 
 ## S0 -- JIT probe
 
-Probe written 2026-10-22, builds, validated on the simulator, **not yet run on
-the headset**. Code and protocol: `probes/jit-probe/`.
+Probe written 2026-10-22, builds, validated on the simulator. **It ran on the
+headset later the same day; the result is below.** Kept as written so the
+reasoning that led into it is still legible. Code and protocol: `probes/jit-probe/`.
 
 Five allocation paths (plain anonymous RWX with nothing else, which is what
 PPSSPP, DolphiniOS and UTM's debugged-JIT path do; MAP_JIT with the
@@ -51,7 +58,7 @@ DEV_TEAM=XXXXXXXXXX make run        # mode 1, plain
 DEV_TEAM=XXXXXXXXXX make run-debug  # modes 2 and 3
 ```
 
-Device result, 2026-10-22, the owner's Apple Vision Pro, visionOS 27, Xcode 27.0 (27A5218g),
+Device result, 2026-10-22, my Apple Vision Pro, visionOS 27, Xcode 27.0 (27A5218g),
 signed Apple Development, free personal team.
 
 **Zero of five paths executed, in every launch mode. Not once did any path
@@ -307,7 +314,7 @@ this port depends on is still unmeasured.
 
 ## 2026-10-22 -- first boot, and the first real numbers
 
-Owner supplied the system files. Copies used, originals untouched:
+I supplied the system files. Copies used, originals untouched:
 MCPX `mcpx-1.0.bin` (512 B), the BIOS image (1 MiB), HDD
 `xbox_hdd.qcow2` (2.0 GB on disk, 8 GiB virtual, original Dashboard).
 Copied to `_scratch/xemu-mac-ceiling/media/` because booting writes to the
@@ -473,7 +480,7 @@ Primary source for the claims is
 "Grand Theft Auto: San Andreas booted on the Vision Pro and ran perfectly" in
 ARMSX2 with JIT, alongside UTM booting Alpine through StikDebug, Node and V8,
 and a PS1 emulator's dynarec. The post carries screenshots plus a video demo.
-Owner reviewed the video on 2026-10-22 and judged the mechanism to work.
+I reviewed the video on 2026-10-22 and judged the mechanism to work.
 
 Two lines from that post matter more than the demo does:
 
@@ -619,7 +626,7 @@ here.
 
 ## 2026-10-22 -- S0 ANSWERED AGAIN: JIT works on visionOS 27
 
-Measured on the owner's Apple Vision Pro,
+Measured on my Apple Vision Pro,
 RealityDevice17,1, **visionOS 27.2**. Not xemu: UTM's official
 `UTM-visionOS.ipa` v5.0.8, somebody else's binary, through the exact code
 path a port would use.
@@ -2024,12 +2031,13 @@ space opened at launch, which is the shape the real app needs anyway.
 
 ### And then it was playable
 
-The last two rules, both found on the headset by the owner:
+The last two rules, both of which I found on the headset rather than in the
+documentation:
 
 1. **Gaze.** With the immersive space open the controllers were the
-   app's, except whenever the owner looked at the app's window: then
+   app's, except whenever I looked at the app's window: then
    visionOS made them that window's pointer again and the dashboard went
-   dead. Every "nothing works" report was the owner looking at the
+   dead. Every time I thought nothing worked, I had been looking at the
    dashboard, which is the one thing a dashboard invites.
 2. **So, no window.** The app now launches straight into a mixed
    immersive space (`UIApplicationPreferredDefaultSceneSessionRole` set
@@ -2084,7 +2092,7 @@ guest's block rate on this device wants a look before any game.
 
 ### A game boots
 
-Fuzion Frenzy, from the owner's own disc image bundled read-only as the
+Fuzion Frenzy, from my own disc image bundled read-only as the
 drive, boots in place of the dashboard: the publisher splash at ten
 seconds, then the game. Measured over 75 seconds: 30 to 70 guest flips a
 second, one code buffer flush, block rate swinging from 25 thousand to 3
@@ -2195,7 +2203,7 @@ What came out of the tree first, because a public remote reads everything:
 - The signing identity and the headset were written down in two scripts.
   Both are discovered now, from the keychain and from `devicectl`, with an
   environment variable to override and an error if neither finds anything.
-- The devlog named the owner, the headset's UDID, the Mac's serial and the
+- The devlog named me, the headset's UDID, the Mac's serial and the
   team id. It names none of them now.
 - One BIOS image was named by its filename in the scripts and twice in the
   devlog. The bundle takes whatever `.bin` is not the MCPX ROM and installs
@@ -2379,3 +2387,549 @@ against what those remotes actually hold: all clean.
 Deployed to all 29 repositories, one of which had no guard at all. Every
 previous hook is kept under `~/.config/git/hook-backups/<timestamp>/`,
 so the change is reversible with a copy back.
+
+## 2026-10-30 -- shipped
+
+`github.com/Ywach404/xbawks-avp` is public, with two clips of it running
+on the headset. The licence request for the console model went to xemu's
+maintainer today; the model stays out of the repository until there is
+an answer.
+
+Eight days from "an app cannot make its own memory executable on
+visionOS, so this is dead" to an original Xbox booting a retail disc,
+standalone, on the device, with the Sense controllers driving it. The
+claim being made publicly is the first standalone JIT based original
+Xbox emulator on the platform, qualified as far as can be found, which
+is the only honest way to say it: the search covered xemu's own ports,
+the Apparition proven app list, and the App Store emulators that list
+Xbox as experimental and run without a JIT.
+
+What that claim does not cover, and should not be allowed to drift into:
+
+- **One game is tested.** Fuzion Frenzy boots and plays. Nothing says
+  what a heavier 2002 title does.
+- **It is slower than the same emulator on a Mac**, noticeably in some
+  minigames, and the renderer still takes a full wait per presented
+  frame.
+- **It needs a debugger attach every launch**, and the attach wedges
+  often enough to cost a headset reboot.
+- **The process sits a few hundred megabytes under its memory ceiling**,
+  which is why a silent death is still the most likely failure.
+- **The picture is the guest's 640x480** stretched over two metres. The
+  internal scale is available and unused.
+
+Open, in the order each would improve things: the internal scale, which
+is now a one line setting with a real effect because the download is
+gone; a fence in place of the per frame renderer wait; trimming the
+renderer's remaining gigabytes; a recenter for the screen.
+
+## 2026-11-01 -- Halo runs, and 196 GPU drains per frame explain why it crawls
+
+Halo: Combat Evolved boots and plays. No crash, no assert, no device
+lost, five and a half minutes of continuous play, footprint flat at
+4,186 MiB against 3,632 after init. Memory, which was the expected
+failure, was never close.
+
+Frame rate was the problem: median 9 fps on the first measurement
+against Fuzion Frenzy's 35 to 73.
+
+### The observation that cracked it came from playing, not measuring
+
+I noticed that **Pillar of Autumn crawls and the second level is
+smooth**, which is backwards from what scene size predicts, and that the
+first level is already bad in its tutorial, a small room where nothing
+is happening.
+
+That killed two theories at zero cost before either was built:
+
+- **Not the poll-loop sleep** carried from the Apple Silicon fork. A
+  misfiring poll detector would not vary by level.
+- **Not cold caches.** The pipeline cache is created with
+  `pInitialData = NULL` and `vkGetPipelineCacheData` is never called, so
+  every launch recompiles every shader, and that looked like a strong
+  candidate for "first level slow". Replaying the first level in a warm
+  session was just as slow, which ended it. That test cost nothing and
+  saved building a shader cache that would have fixed nothing.
+
+### The instrument
+
+`pgraph_vk_finish` drains the whole GPU and fires from sixteen places for
+nine reasons, each already labelled. Counting them per reason and
+printing the five second delta turned nine candidates into one reading.
+
+```
+t= 10-40s   33 fps    stalled ~165 / 5s     menu and intro
+t= 50-275s   5 fps    stalled ~4,900 / 5s   Pillar of Autumn
+t=290-340s  33 fps    stalled ~100 / 5s     second level
+```
+
+Fast, slow, fast, and `stalled` tracks it inversely and exactly. Nothing
+else does: `vtxbuf` and `surf_down` are **higher** in the fast level
+(407 and 166) than in the slow one, so neither is the cause.
+
+Per frame, which is where it stops being a ratio and starts being absurd:
+
+| | fps | drains/s | per frame |
+|---|---|---|---|
+| second level | 33 | ~20 | ~0.6 |
+| Pillar of Autumn | 5 | ~980 | **~196** |
+
+### The cause, nine lines in reports.c
+
+```c
+if (*dma_get == *dma_put && r->in_command_buffer &&
+    !QSIMPLEQ_EMPTY(&r->report_queue)) {
+    pgraph_vk_finish(pg, VK_FINISH_REASON_STALLED);
+}
+```
+
+Whenever the command FIFO momentarily runs dry with any occlusion query
+outstanding, the renderer drains the entire GPU to collect results. Halo
+uses the NV2A zpass counter for visibility, and a ship interior full of
+occluders issues them constantly. The FIFO goes briefly idle about two
+hundred times a frame, and every time the pipeline stops.
+
+This retrospectively explains every earlier confusion. The tutorial room
+is slow because it is full of occluders, not because it is complex. Warm
+caches changed nothing because nothing was being compiled. And the vCPU
+sat at 70,000 blocks per second against a demonstrated 2,168,321 peak
+because it was waiting on two hundred needless drains per frame, not
+because it was saturated.
+
+### What this displaces
+
+The fence, which was the planned next step, addresses the present path:
+about 25 drains per five seconds. This is 4,900. The fence is still
+worth doing eventually and is no longer the priority.
+
+Next: collect report results asynchronously rather than draining to get
+them, and block only if the guest reads a result that is genuinely not
+ready. Games normally consume them a frame late, so most of these stalls
+should disappear rather than move.
+
+## 2026-11-01 -- 5 fps to 26, and the number that proved the mechanism
+
+Rate limiting the occlusion drain took Pillar of Autumn from **5 fps to
+between 14 and 33, median around 26**. The level that was unplayable is
+now in the same range as the one that was always smooth.
+
+| | before | after |
+|---|---|---|
+| frame rate | 5.0 fps | 14 to 33, median ~26 |
+| occlusion drains / 5 s | ~4,900 | 200 to 500 |
+| drains skipped / 5 s | n/a | 6,000 to 12,000 |
+
+### The number that settled it
+
+Average report queue depth when draining: **45 to 52.**
+
+That was the measurement most likely to kill the idea. If the guest had
+been waiting on each report in turn the queue would have sat at 1, and
+batching could not have helped. Instead the guest queues roughly fifty
+occlusion reports at a time, and the old code drained the entire GPU
+once for each of them. Fifty full pipeline stops to collect fifty
+answers that were all sitting in the same query pool.
+
+That one number is the whole bug, and it is the line worth keeping for
+the video: the emulator was asking the GPU the same question fifty times
+in a row and stopping the world for each answer.
+
+### What the fix actually is
+
+Not clever. The drain now happens at most 125 times a second instead of
+980, with two valves so correctness is never traded for speed: pool
+pressure above three quarters of the fixed 1024 query pool overrides the
+limit, and so does a report queue of 64 or more, which means the guest
+is queueing rather than blocking. Every drain already processed the
+whole queue, so batching writes the same values in the same order, only
+later.
+
+### Neither valve is being hit, so there is headroom left
+
+- **Queries in flight peaked at 32 of 1024**, about three percent. The
+  assert in `begin_query` is nowhere near.
+- `buf_space` appeared once in twenty two samples, so the compute buffer
+  cap from 2026-10-29 is not biting either.
+- `stalled` is still 200 to 500 per five seconds where the second level
+  manages on about 100, and the queue sits near the urgency threshold.
+
+So the 8 ms interval is conservative. Raising it has evidence behind it
+rather than hope.
+
+### And the next bottleneck has surfaced
+
+`vtxbuf`, vertex buffer dirty drains, has climbed to as much as 355 in a
+sample, from near zero before. It was always there and was hidden behind
+a hundred times as many occlusion drains. Not a regression: the next
+thing in the queue.
+
+## 2026-11-04 -- the disc picker, and an install that takes two seconds
+
+Changing games used to mean baking an ISO into the bundle and pushing
+5.3 GB to the headset, five and a half minutes, every single time. That
+cost more of today than any bug did.
+
+Now every piece of media resolves `Documents` first and falls back to
+the bundle, so the app ships with none of it. Discs live in
+`Documents/GAMES`, created on first run. The emulator thread parks
+until the launcher hands it a choice, and the launcher lists what it
+finds.
+
+| | before | after |
+|---|---|---|
+| bundle | 5.3 GB | 30 MB |
+| install | 5 min 30 s | **2.6 s** |
+| changing games | rebuild and reinstall | pick from a deck |
+
+A build made with `XEMU_GAME` still bakes the disc in and skips the
+wait, which keeps benchmarking reproducible.
+
+### The picker is the Quake port's Cover Flow deck
+
+Ported from `SaveCoverFlow`, with its three documented traps carried
+over rather than rediscovered: `contentMargins` is load bearing and is
+not centring, `ScrollTransitionPhase` gives three keyframes rather than
+a continuous value, and `rotation3DEffect`'s `perspective:` label is
+what selects the flat projection. Also kept: a tap selects and never
+loads, because in the original a tap that loaded fired by accident when
+the summon gesture released onto a card.
+
+Changed deliberately: portrait cards, because a game cover is a box and
+not a screenshot, and Xbox green over translucent glass with Oxanium.
+
+### Cover art resolves from the disc filename alone
+
+`libretro-thumbnails/Microsoft_-_Xbox` has 1,326 covers, no API key, no
+auth, and a deterministic filename to URL mapping. Every alternative
+needed a registered key, a 109 MB metadata zip, or a forum login.
+
+The matching is the actual work. Redump naming turns a colon into a
+dash and appends region and revision, so `Halo Combat Evolved` cannot
+be guessed into `Halo - Combat Evolved (USA).png`. Both sides are
+normalised by stripping parentheticals and punctuation and expanding an
+ampersand, which folds them onto one key, then ties break toward USA
+and the shortest filename so a revision or a prototype never wins.
+`tools/fetch-xbox-covers.py`, idempotent, writes through a `.part` file
+so an interrupted fetch cannot leave a truncated image the app would
+treat as a valid cover.
+
+The images are the publisher's artwork and are denied by `.gitignore`.
+The script is ours and is tracked; what it downloads is not.
+
+### Three things that cost time and will recur
+
+1. **zsh does not word-split an unquoted variable.** A `devicectl`
+   command held in `$D` and expanded unquoted became a single bogus
+   command name, so several pushes "failed silently" while the same
+   command typed out worked every time. Half an hour.
+2. **The JIT request moved.** Parking the emulator for a disc choice
+   means the `brk` fires after the user picks, not at launch, so
+   Apparition times out waiting for it. Launches need `--wait 0`. The
+   better fix is to allocate the JIT buffer before the disc wait.
+3. **A large copy starves the pairing connection.** Launching while
+   3.4 GB is going over the wire fails with a RemotePairing deadline,
+   which looks exactly like the attach wedge and is not.
+
+Also: `UIScene` lifecycle notifications now arrive before `qemu_init`
+for the first time, and the background handler was scheduling a bottom
+half on an AIO context that did not exist yet. Guarded.
+
+## 2026-11-04 -- a negative result: page granularity was not the problem
+
+`VK_FINISH_REASON_VERTEX_BUFFER_DIRTY` drains the whole GPU when the
+guest writes vertex data that recorded draws still reference. The
+hazard was detected per 4 KiB page, so the obvious suspicion was false
+positives: two unrelated structures sharing a page would look like a
+conflict and stop the pipeline for nothing.
+
+So the bitmap grew a byte range per page, `uploaded_lo` and
+`uploaded_hi`, and a flush now needs a real overlap. The counters say
+what happened:
+
+```
+vertex: 21 real flushes, 0 avoided by byte range
+vertex: 143 real flushes, 0 avoided by byte range
+vertex: 581 real flushes, 0 avoided by byte range
+```
+
+Zero. Not a few, none, in every sample across two levels. Every single
+one of those flushes was a genuine byte overlap. The guest really does
+overwrite bytes the GPU is really still reading.
+
+The experiment cost an afternoon and bought no frames, and it is still
+the most useful thing measured that day, because it closed a direction
+permanently. Sharper hazard detection cannot help here, which means any
+real fix has to stop the GPU reading from a shared mirror at all. That
+conclusion is worth more than a small win would have been, and the
+counters stay in because they now prove the ceiling is real rather than
+an artefact.
+
+## 2026-11-04 -- the patch series could not regenerate itself
+
+This repository is a commit pin plus a patch series, not a vendored
+tree, because the emulator source is 1.34 GB and what is ours is about
+2,400 lines. The cost of that choice is that every change has to be
+captured back out of the working tree into a patch before it can be
+committed, and there was no tool for it. Fifteen commits in, each one
+had rediscovered the method by hand.
+
+Doing it by hand is not merely slow, it is unsafe, for a reason that is
+invisible until you look. `0001-apple-silicon-fork.patch` and
+`0002-headless-host.patch` overlap on twelve files, `renderer.h` and
+`draw.c` among them. So the obvious move, diff the tree against the
+pin, produces a 0002 that has swallowed 0001 whole and silently claims
+somebody else's GPL fork as this project's work.
+
+`tools/refresh-patch.sh` rebuilds "pin plus 0001" in a scratch
+repository for exactly the paths that differ from the pin, commits that
+as the base, drops the tree on top and diffs. What comes out is ours by
+construction rather than by judgement, which matters because judgement
+is the thing in shortest supply at the end of a long session. It
+refuses to write an empty patch, it never touches the tree, and
+`--check` makes staleness a test.
+
+Writing it also found that the hand-maintained 0002 had rotted:
+thirty lines that added code and removed it again elsewhere, a residue
+of being edited in place for weeks. The round trip is verified by
+applying both patches to a fresh pin tree and comparing all 43 files
+byte for byte.
+
+## 2026-11-05 -- the console in the room
+
+Choosing a game was a startup step. The picker ran once before
+`qemu_init`, the emulator thread parked on a condition variable waiting
+for it, and after that the window was gone for good. Changing games
+meant relaunching the app, reattaching a debugger to prepare the JIT
+buffer, and often rebooting the headset because that attach wedges.
+That loop was the largest single cost in testing this port.
+
+The reason there was no in-session picker is the gaze rule, measured
+earlier: a spatial controller belongs to the app only while an
+immersive space is open and no window of the app is being looked at. A
+window therefore cannot be the thing that is always available.
+
+A RealityKit entity is not a window. So the console itself became the
+control. It sits in the room at true scale, and pressing it brings the
+deck back with the game still running behind it.
+
+### Three things about the emulator side, each a wrong first guess
+
+**The block layer calls run in a bottom half.** Every one of them
+asserts `GLOBAL_STATE_CODE()`, which in this tree is an assert that the
+caller holds the BQL, and asserts are compiled in. A bottom half on the
+main AIO context runs on the main loop thread with the BQL already
+held, which is why the background and foreground handler already works
+that way. Calling them from the SwiftUI thread aborts the process.
+
+**`force` has to be true.** With it false, a running title holds the
+tray shut, because it issued ATAPI PREVENT ALLOW MEDIUM REMOVAL, and
+`do_open_tray` returns `EINPROGRESS` having only asked the guest to let
+go. The medium does not change, so the first press looks broken and the
+second one works. That is upstream's behaviour and not worth
+reproducing. The SMC eject button is pressed as well, so the guest
+still sees the event.
+
+**Changing the medium does not start the new game.** The console reads
+its disc when it boots, so a swap has to reset the machine afterwards
+or the old title keeps running with a new disc underneath it. Eject on
+its own does not reset, because that is a tray opening and nothing
+more. On the device, eject returns to the dashboard and a swap boots
+the new game straight away, which is exactly the hardware's behaviour.
+
+Also: `dvd_path` is written only after the operation succeeds. Upstream
+blanks it before an eject the guest may refuse, which leaves the
+setting and the drive disagreeing, and the setting is what boots next
+time because it is saved at exit.
+
+### A window is a template unless you say otherwise
+
+Pressing the console twice gave two decks, and ten times gave ten.
+`WindowGroup` is a template the system instantiates again on every
+`openWindow`. `Window` is a single instance by definition and the
+second `openWindow` brings the existing one forward. The framework
+enforces it, which is better than a flag here that could drift out of
+step with what is actually on screen.
+
+### Placement is a held gesture, not a travelled one
+
+It was decided by distance first: move more than 20 mm and it is a
+move, less and it is a press. That reads badly in the hand, because
+poking a thing with a fingertip always travels, so every poke became a
+move and the console wandered when the intent was to open the deck.
+Time is the honest signal. Nothing moves until the press has been held
+350 ms, and the console is picked up from where it is at the moment the
+hold completes rather than jumping by however far the hand drifted
+while the hold counted.
+
+Rotation is constrained to vertical so it turns on the spot and cannot
+tip, and the sign took two attempts: the axis the gesture reports
+already carries the direction of the twist, so negating the angle on
+top of that reverses a sign that was already correct.
+
+### "It has no collision" was a position bug, and the log said so
+
+The console could be looked at and pressed, but poking it from the side
+hit nothing. The collision shape was not wrong, it was in the wrong
+place:
+
+```
+console: model extents  (0.32333, 0.09543, 0.26067)
+console: model centre   (0.0, -0.04337, -0.00063)
+```
+
+The model's geometry centre sits 4.3 cm below its own origin, on an
+object 9.5 cm tall, because a glTF export puts the origin wherever the
+authoring scene had it. The box was offset by nearly half the console's
+height. Centre the geometry on the root and measure the box from what
+is actually on screen, and it lands at 323 x 95 x 261 mm against a real
+console's 320 x 91 to 100 x 260.
+
+The other half of not feeling solid was the hover effect, which renders
+on the entity holding the geometry. On a bare root node it had nothing
+to draw, so looking at the console gave no sign it was a thing you
+could touch.
+
+### It rests on real tables now
+
+Plane detection rather than scene reconstruction, because a table is a
+horizontal plane with a known extent and that is exactly the question
+being asked. Containment is tested by inverting the surface's own
+transform rather than pulling a yaw angle out of it, since the extent
+carries its own rotation within the anchor and multiplying the two
+transforms cannot get the convention wrong the way extracting an angle
+can. There is a 12 cm margin above the hand before a surface claims the
+console, because without it a table found just above the drag snatches
+it upward the moment it passes underneath, which feels like the object
+fighting back. Authorisation can be refused and that is not an error:
+the console then moves freely, exactly as before.
+
+## 2026-11-05 -- 608x, and the plan it killed
+
+With the hazard-detection direction closed, the remaining way to stop
+vertex drains is to give each draw its own copy instead of a shared
+mirror of guest VRAM. The machinery for that already exists and runs
+every frame: `remap_unaligned_attributes` copies attribute data per
+draw into a 1.25 GiB ring and rebases the binding, and the only thing
+deciding which attributes get that treatment is an alignment test.
+
+The expected blocker turned out not to be one. There is exactly one
+`vkCmdDrawIndexed` in the renderer, it passes `firstIndex 0` and
+`vertexOffset 0`, and index values are never rebased anywhere, so a
+copy starting at element zero preserves the index to offset mapping for
+free. An `assert(start_vertex == 0)` in the existing path exists
+precisely to protect that.
+
+So the change was three lines, and the only risk was volume: today the
+memcpy moves only the bytes the guest dirtied, because the dirty bit is
+tested and cleared per range, while a per draw copy moves every
+referenced byte on every draw whether it changed or not. That ratio
+decides everything, so it was counted before anything was written:
+
+```
+vertex bytes in 5 s: dirty 6572 KiB, if remapped 3992718 KiB (607.5x),
+                     54569 draws of which 0 already remap
+```
+
+**608 times.** Four gigabytes every five seconds instead of six
+megabytes, on a device that has already had two fights with its memory
+ceiling. The guest redraws from mostly static vertex data about 350
+times a frame, and the dirty-bit filter is what makes that cheap. The
+shared mirror is not a flaw, it is the entire optimisation.
+
+In the heavy scenes the ratio falls to between 40 and 98 times, which
+is still far too high for the wholesale version but makes the targeted
+one worth costing: redirect only the hazardous write, leave the mirror
+holding the old bytes that recorded draws still read, and bring it up
+to date after the fence wait.
+
+The three lines were one commit away from being written. Measuring
+first cost twenty minutes and saved building the wrong thing.
+
+## 2026-11-05 -- timing the drains, and two mistakes it found
+
+Every optimisation so far had been aimed by counting drains. That was a
+hole in the method, and it should have been closed before the first one
+rather than after the third. A drain waits on a single fence for
+whatever the GPU still has outstanding, so two drains with the same
+label can differ by a hundredfold. Counts say where to look. Only the
+clock says whether looking there is worth anything.
+
+Per reason milliseconds, in the corridor where the frame rate collapses
+(a door opening, an explosion, lights and shadows):
+
+```
+gpu stalled in 5 s:  606ms of 5000 (12%)  flip_stall=477ms
+gpu stalled in 5 s: 4404ms of 5000 (88%)  buf_space=3156ms flip_stall=1189ms
+gpu stalled in 5 s: 2770ms of 5000 (55%)  stalled=2408ms vtxbuf=219ms
+```
+
+Two things fell out immediately.
+
+### A valve that argued urgency from the evidence of its absence
+
+`stalled` is the occlusion report drain, which was supposed to have
+been fixed. It was back, at 1656 to 2408 ms of every 5000, and the
+trigger breakdown named the culprit:
+
+```
+drain trigger: clock 0, queue 119, pool 0
+reports: 119 drains, 15822 skipped, avg queue 256.0, 35 queries in flight of 1024
+```
+
+Every one came from a rule added here: drain early if the report queue
+is deeper than 256. The query pool valve never fired once and queries
+in flight never passed 128 of 1024, so the queue rule was doing all of
+it, costing between a third and a half of the entire GPU stall budget.
+
+The reasoning behind it was backwards. A guest spinning on a single
+result has a queue one deep and has to be served immediately. A guest
+with three hundred queued is firing and forgetting and is not waiting
+on any of them. A deep queue is a reason to defer, not a reason to
+drain. The rule was inferring urgency from the proof that there was
+none.
+
+It is gone. What remains is the query pool, a fixed 1024 that asserts
+on overflow and so is a real limit rather than a guess, plus a 100 ms
+breaker for a guest that spin reads without ever flipping. The floor is
+unchanged: every flip finishes and every finish empties the whole
+queue.
+
+### The other spike was capacity, and nothing about it was a device limit
+
+`buf_space` cost 3156 ms of one window, 127 drains at about 25 ms each,
+in exactly the door-and-explosion moment. Two ceilings were being hit
+together: 1024 descriptor sets, one burned per draw and recyclable only
+once the GPU is done with them, and an 8 MiB uniform staging buffer at
+roughly 6.5 KiB per draw, which is about 1,290 draws. A corridor of
+lights plus a door plus an explosion is a lot of draws in one command
+buffer. Raised to 4096 sets and 32 MiB, with the framebuffer array
+going from 50 to 256 for the same reason at the price of a handle each.
+
+### What the two bought
+
+```
+fight samples   median    min     max
+before           24.8    11.8    29.4
+after            26.2    23.8    34.0
+```
+
+`stalled` and `buf_space` are now zero in every sample. The median
+barely moved and **the floor doubled**, which is exactly the shape of
+removing spiky stalls: it does not raise the ceiling, it removes the
+moments that feel like the game breaking. For scale, Halo on the
+original hardware targeted 30 fps and measured 29.51 average with a
+19 fps minimum, so the worst five seconds of a firefight here is now
+better than the console's worst.
+
+`vtxbuf` went up, 147 to 1352 ms before and 297 to 2081 ms after, and
+that is expected rather than a regression. Removing the other stalls
+lets more real work accumulate in each command buffer, so the drains
+that remain each wait on a bigger pile. Total stall time is roughly
+conserved while useful work per second goes up, which is what the frame
+rate shows.
+
+It is also what makes `vtxbuf` the whole remaining question: up to 42
+per cent of wall time, 385 drains at about 5.4 ms each. Most of what is
+left after that is `flip_stall`, and most of that is legitimate, since
+it is waiting on the frame that was just submitted rather than on an
+avoidable synchronisation.
