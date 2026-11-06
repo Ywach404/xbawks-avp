@@ -12,7 +12,14 @@ As far as I can find, it is the first standalone, JIT based original Xbox emulat
 
 Recorded through the headset's passthrough camera, so the room behind the screen is real. Both clips are from my own console's files and my own disc; Xbawks ships neither.
 
-[![Watch it running on the headset](https://img.youtube.com/vi/AnmeuEjDdMU/maxresdefault.jpg)](https://youtu.be/AnmeuEjDdMU)
+## Watch it run
+
+The loop at the top is five seconds. **This is the full thing.**
+
+[![XBAWKS: Xbox Emulator for Apple Vision Pro](https://img.youtube.com/vi/AnmeuEjDdMU/maxresdefault.jpg)](https://youtu.be/AnmeuEjDdMU)
+
+**[Click the image to watch on YouTube](https://youtu.be/AnmeuEjDdMU)**, shot
+on the headset rather than in a simulator, with sound.
 
 Ported and maintained by A. Cervantez. xemu and QEMU are the work of their respective projects and are GPL-2.0; so is everything here that touches them.
 
