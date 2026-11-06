@@ -472,6 +472,69 @@ index d87c875..1c9a688 100644
  }
  
  bool pgraph_vk_buffer_has_space_for(PGRAPHState *pg, int index,
+diff --git a/hw/xbox/nv2a/pgraph/vk/command.c b/hw/xbox/nv2a/pgraph/vk/command.c
+index 0e9fc9a..faae7d6 100644
+--- a/hw/xbox/nv2a/pgraph/vk/command.c
++++ b/hw/xbox/nv2a/pgraph/vk/command.c
+@@ -86,7 +86,20 @@ VkCommandBuffer pgraph_vk_begin_single_time_commands(PGRAPHState *pg)
+     return r->aux_command_buffer;
+ }
+ 
+-void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd)
++/*
++ * Every one of these is a vkQueueWaitIdle, which is a stronger stall than
++ * the single fence wait in pgraph_vk_finish: it waits for everything the
++ * queue has, from any submission. None of it has ever been counted. The
++ * drain instrumentation only ever covered pgraph_vk_finish, so every
++ * percentage reported so far has been a subset of the real total, and the
++ * boot animation sitting at 76 per cent with nothing but flip_stall in it
++ * is exactly the shape that would produce.
++ */
++unsigned long xemu_vk_waitidle_counts[4];
++unsigned long long xemu_vk_waitidle_ns[4];
++
++void pgraph_vk_end_single_time_commands_why(PGRAPHState *pg,
++                                            VkCommandBuffer cmd, int why)
+ {
+     PGRAPHVkState *r = pg->vk_renderer_state;
+ 
+@@ -101,7 +114,14 @@ void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd)
+     };
+     VK_CHECK(vkQueueSubmit(r->queue, 1, &submit_info, VK_NULL_HANDLE));
+     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_AUX);
++
++    int64_t t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+     VK_CHECK(vkQueueWaitIdle(r->queue));
++    if (why >= 0 && why < 4) {
++        xemu_vk_waitidle_counts[why]++;
++        xemu_vk_waitidle_ns[why] +=
++            qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - t0;
++    }
+ 
+     r->in_aux_command_buffer = false;
+ }
+diff --git a/hw/xbox/nv2a/pgraph/vk/display.c b/hw/xbox/nv2a/pgraph/vk/display.c
+index d0442cc..7d359e7 100644
+--- a/hw/xbox/nv2a/pgraph/vk/display.c
++++ b/hw/xbox/nv2a/pgraph/vk/display.c
+@@ -201,7 +201,7 @@ static void upload_pvideo_image(PGRAPHState *pg, PvideoState state)
+                                       VK_FORMAT_R8G8B8A8_UNORM,
+                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+-    pgraph_vk_end_single_time_commands(pg, cmd);
++    pgraph_vk_end_single_time_commands_why(pg, cmd, VK_WAIT_PRESENT);
+ }
+ 
+ static const char *display_frag_glsl =
+@@ -1049,7 +1049,7 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
+                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+ 
+     pgraph_vk_end_debug_marker(r, cmd);
+-    pgraph_vk_end_single_time_commands(pg, cmd);
++    pgraph_vk_end_single_time_commands_why(pg, cmd, VK_WAIT_PRESENT);
+     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_5);
+ 
+ #if HAVE_IOSURFACE_DISPLAY
 diff --git a/hw/xbox/nv2a/pgraph/vk/draw.c b/hw/xbox/nv2a/pgraph/vk/draw.c
 index f332788..47a0744 100644
 --- a/hw/xbox/nv2a/pgraph/vk/draw.c
@@ -852,7 +915,7 @@ index d69a31a..f5725a3 100644
  #endif
  }
 diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.h b/hw/xbox/nv2a/pgraph/vk/renderer.h
-index b805a76..8e0dfb3 100644
+index b805a76..ef9d812 100644
 --- a/hw/xbox/nv2a/pgraph/vk/renderer.h
 +++ b/hw/xbox/nv2a/pgraph/vk/renderer.h
 @@ -44,7 +44,17 @@
@@ -1011,7 +1074,26 @@ index b805a76..8e0dfb3 100644
      bool query_in_flight;
      uint32_t zpass_pixel_count_result;
      QSIMPLEQ_HEAD(, QueryReport) report_queue; // FIXME: Statically allocate
-@@ -531,6 +614,9 @@ void pgraph_vk_surface_flush(NV2AState *d);
+@@ -501,7 +584,17 @@ VkDeviceSize pgraph_vk_append_to_buffer(PGRAPHState *pg, int index, void **data,
+ void pgraph_vk_init_command_buffers(PGRAPHState *pg);
+ void pgraph_vk_finalize_command_buffers(PGRAPHState *pg);
+ VkCommandBuffer pgraph_vk_begin_single_time_commands(PGRAPHState *pg);
+-void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd);
++/* Why a full queue wait happened, so its cost can be attributed. */
++enum {
++    VK_WAIT_PRESENT = 0,
++    VK_WAIT_SURFACE = 1,
++    VK_WAIT_TEXTURE = 2,
++    VK_WAIT_OTHER   = 3,
++};
++void pgraph_vk_end_single_time_commands_why(PGRAPHState *pg,
++                                            VkCommandBuffer cmd, int why);
++#define pgraph_vk_end_single_time_commands(pg, cmd) \
++    pgraph_vk_end_single_time_commands_why((pg), (cmd), VK_WAIT_OTHER)
+ 
+ // image.c
+ void pgraph_vk_transition_image_layout(PGRAPHState *pg, VkCommandBuffer cmd,
+@@ -531,6 +624,9 @@ void pgraph_vk_surface_flush(NV2AState *d);
  void pgraph_vk_process_pending_downloads(NV2AState *d);
  void pgraph_vk_surface_download_if_dirty(NV2AState *d, SurfaceBinding *surface);
  SurfaceBinding *pgraph_vk_surface_get_within(NV2AState *d, hwaddr addr);
@@ -1021,7 +1103,7 @@ index b805a76..8e0dfb3 100644
  void pgraph_vk_wait_for_surface_download(SurfaceBinding *e);
  void pgraph_vk_download_dirty_surfaces(NV2AState *d);
  void pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg, hwaddr start, hwaddr size);
-@@ -582,6 +668,17 @@ void pgraph_vk_clear_report_value(NV2AState *d);
+@@ -582,6 +678,17 @@ void pgraph_vk_clear_report_value(NV2AState *d);
  void pgraph_vk_get_report(NV2AState *d, uint32_t parameter);
  void pgraph_vk_process_pending_reports(NV2AState *d);
  void pgraph_vk_process_pending_reports_internal(NV2AState *d);
@@ -1239,9 +1321,36 @@ index c860a9b..d293e38 100644
 +    *pool = r->drain_by_pool;
  }
 diff --git a/hw/xbox/nv2a/pgraph/vk/surface.c b/hw/xbox/nv2a/pgraph/vk/surface.c
-index 9d438f2..10ae89a 100644
+index 9d438f2..de11b84 100644
 --- a/hw/xbox/nv2a/pgraph/vk/surface.c
 +++ b/hw/xbox/nv2a/pgraph/vk/surface.c
+@@ -444,7 +444,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
+ 
+     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_1);
+     pgraph_vk_end_debug_marker(r, cmd);
+-    pgraph_vk_end_single_time_commands(pg, cmd);
++    pgraph_vk_end_single_time_commands_why(pg, cmd, VK_WAIT_SURFACE);
+ 
+     void *mapped_memory_ptr = NULL;
+     VK_CHECK(vmaMapMemory(r->allocator,
+@@ -829,7 +829,7 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
+ 
+     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_3);
+     pgraph_vk_end_debug_marker(r, cmd);
+-    pgraph_vk_end_single_time_commands(pg, cmd);
++    pgraph_vk_end_single_time_commands_why(pg, cmd, VK_WAIT_SURFACE);
+     nv2a_profile_inc_counter(NV2A_PROF_SURF_CREATE);
+ }
+ 
+@@ -1267,7 +1267,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
+ 
+     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_2);
+     pgraph_vk_end_debug_marker(r, cmd);
+-    pgraph_vk_end_single_time_commands(pg, cmd);
++    pgraph_vk_end_single_time_commands_why(pg, cmd, VK_WAIT_SURFACE);
+ 
+     surface->initialized = true;
+ }
 @@ -1758,3 +1758,203 @@ void pgraph_vk_surface_flush(NV2AState *d)
  
      pgraph_vk_reload_surface_scale_factor(pg);
@@ -1431,7 +1540,7 @@ index 9d438f2..10ae89a 100644
 +                pg, cmd, surface->image, surface->host_fmt.vk_format,
 +                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 +                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-+            pgraph_vk_end_single_time_commands(pg, cmd);
++            pgraph_vk_end_single_time_commands_why(pg, cmd, VK_WAIT_SURFACE);
 +            result = 1;
 +            if (shown++ < 3) {
 +                fprintf(stderr, "[vk] present: %s %ux%u surface format %d\n",
@@ -1447,9 +1556,27 @@ index 9d438f2..10ae89a 100644
 +    qemu_event_set(&r->present_complete);
 +}
 diff --git a/hw/xbox/nv2a/pgraph/vk/texture.c b/hw/xbox/nv2a/pgraph/vk/texture.c
-index 5647275..bbae3cb 100644
+index 5647275..cc46c66 100644
 --- a/hw/xbox/nv2a/pgraph/vk/texture.c
 +++ b/hw/xbox/nv2a/pgraph/vk/texture.c
+@@ -583,7 +583,7 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
+ 
+     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_4);
+     pgraph_vk_end_debug_marker(r, cmd);
+-    pgraph_vk_end_single_time_commands(pg, cmd);
++    pgraph_vk_end_single_time_commands_why(pg, cmd, VK_WAIT_TEXTURE);
+ 
+     // Release decoded texture data
+     for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
+@@ -1022,7 +1022,7 @@ static void create_dummy_texture(PGRAPHState *pg)
+                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+ 
+     pgraph_vk_end_debug_marker(r, cmd);
+-    pgraph_vk_end_single_time_commands(pg, cmd);
++    pgraph_vk_end_single_time_commands_why(pg, cmd, VK_WAIT_TEXTURE);
+ 
+     r->dummy_texture = (TextureBinding){
+         .key.scale = 1.0,
 @@ -1546,8 +1546,24 @@ void pgraph_vk_init_textures(PGRAPHState *pg)
  {
      PGRAPHVkState *r = pg->vk_renderer_state;
@@ -2241,10 +2368,10 @@ index ea46bf0..fd185c8 100644
  system_ss.add(when: pixman, if_true: files('console-vc.c'), if_false: files('console-vc-stubs.c'))
 diff --git a/ui/xbawks-console.swift b/ui/xbawks-console.swift
 new file mode 100644
-index 0000000..896c313
+index 0000000..47a0519
 --- /dev/null
 +++ b/ui/xbawks-console.swift
-@@ -0,0 +1,404 @@
+@@ -0,0 +1,573 @@
 +/*
 + * The console in the room, and the button that swaps a disc.
 + *
@@ -2315,12 +2442,47 @@ index 0000000..896c313
 +        return FileManager.default.fileExists(atPath: url.path) ? url : nil
 +    }
 +
++    /// Whether the console has been switched off for a measurement.
++    ///
++    /// The boot sequence is reported as slower since the model arrived.
++    /// Construction is 0.09s so that is not it, but the model is 23 meshes
++    /// rendered in stereo every frame against a GPU the emulator is
++    /// already stalling on, and there is no way to measure that from
++    /// inside. So it can be turned off by touching a file, which makes it
++    /// an A and B test on one build instead of two.
++    static var disabled: Bool {
++        guard let docs = FileManager.default.urls(for: .documentDirectory,
++                                                  in: .userDomainMask).first
++        else { return false }
++        /*
++         * The content decides, not the presence. devicectl can copy a file
++         * on to the device but cannot delete one, so a presence check only
++         * toggles in one direction and the second half of the comparison
++         * would need a rebuild. A "0" in the file turns the console back
++         * on, so one build can run both conditions as many times as the
++         * question needs.
++         */
++        let url = docs.appendingPathComponent("no-console")
++        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
++            return false
++        }
++        let flag = text.trimmingCharacters(in: .whitespacesAndNewlines)
++        return !flag.isEmpty && flag != "0"
++    }
++
 +    /// The tappable console. Returns the fallback box if there is no model,
 +    /// so the disc swap works for anyone, with or without the asset.
 +    static func make(_ way: Colourway = .matteBlack) async -> Entity {
 +        let root = Entity()
 +        root.name = "xbawks-console"
 +        var hasModel = false
++
++        if disabled {
++            fputs("[host] console: disabled by Documents/no-console, "
++                  + "nothing will be drawn\n", stderr)
++            fflush(stderr)
++            return root
++        }
 +
 +        if let url = modelURL {
 +            do {
@@ -2384,8 +2546,16 @@ index 0000000..896c313
 +                extents = measured
 +            }
 +        }
++        /*
++         * A 15 mm margin. The box is measured from the geometry, which is
++         * honest but makes a 95 mm tall object a mean target for a
++         * fingertip. The earlier complaint about pokes landing in empty
++         * air was a box offset by 43 mm, not a box slightly larger than
++         * the console, so a little padding costs nothing.
++         */
++        let pad = SIMD3<Float>(repeating: 0.015)
 +        root.components.set(CollisionComponent(
-+            shapes: [ShapeResource.generateBox(size: extents)],
++            shapes: [ShapeResource.generateBox(size: extents + pad)],
 +            isStatic: true))
 +        root.components.set(PhysicsBodyComponent(mode: .static))
 +        root.components.set(InputTargetComponent())
@@ -2528,6 +2698,22 @@ index 0000000..896c313
 +        return simd_quatf(angle: atan2(forward.x, forward.z), axis: [0, 1, 0])
 +    }
 +
++    private static let panelKey = "xbawks.panel.offset"
++
++    /// Where the deck sits relative to the console, so a nudge survives a
++    /// relaunch like the console's own placement does.
++    static func loadPanelOffset() -> SIMD2<Float> {
++        guard let a = UserDefaults.standard.array(forKey: panelKey) as? [Double],
++              a.count == 2 else {
++            return SIMD2<Float>(0, 0)
++        }
++        return SIMD2<Float>(Float(a[0]), Float(a[1]))
++    }
++
++    static func savePanelOffset(_ o: SIMD2<Float>) {
++        UserDefaults.standard.set([Double(o.x), Double(o.y)], forKey: panelKey)
++    }
++
 +    static func save(position p: SIMD3<Float>, rotation q: simd_quatf) {
 +        UserDefaults.standard.set([Double(p.x), Double(p.y), Double(p.z)],
 +                                  forKey: posKey)
@@ -2570,7 +2756,22 @@ index 0000000..896c313
 +    private var session: ARKitSession?
 +    private var misses = 0
 +
-+    func start() async {
++    private var started = false
++
++    /*
++     * Started on the first attempt to move the console, not when the space
++     * opens. Plane detection is continuous work, and having it run through
++     * the guest's boot sequence was costing frames at exactly the moment
++     * the emulator has the least to spare. Nothing needs a surface until
++     * somebody picks the console up.
++     */
++    func startIfNeeded() async {
++        guard !started else { return }
++        started = true
++        await start()
++    }
++
++    private func start() async {
 +        let session = ARKitSession()
 +        self.session = session
 +
@@ -2647,6 +2848,101 @@ index 0000000..896c313
 +            return nil
 +        }
 +        return top + objectHeight / 2
++    }
++}
++
++/*
++ * The deck, above the console, as a RealityKit attachment.
++ *
++ * This moved between a window and an attachment three times before the
++ * log settled it. Opening a window mid session sends the immersive space
++ * to the background, which pauses the emulator, tears down the scene and
++ * rebuilds the console at its last saved position. A window is therefore
++ * not an option at all while a game is running, whatever its placement
++ * behaviour. The launcher window still exists for a cold start, where
++ * there is no space to disturb.
++ *
++ * So: an attachment, billboarded so it faces whoever is looking at it,
++ * with a grab bar because it cannot be moved the way a window can.
++ */
++struct SwapPanel: View {
++    @Binding var selected: Int
++    let discs: [DiscEntry]
++    let onSwap: (DiscEntry) -> Void
++    let onEject: () -> Void
++    let onClose: () -> Void
++    /// Drag delta in points, and whether the drag has finished.
++    let onNudge: (SIMD2<Float>, Bool) -> Void
++
++    private var current: DiscEntry? {
++        discs.indices.contains(selected) ? discs[selected] : nil
++    }
++
++    var body: some View {
++        VStack(spacing: 12) {
++            Capsule()
++                .fill(XbawksTheme.green.opacity(0.45))
++                .frame(width: 110, height: 6)
++                .contentShape(Capsule().inset(by: -14))
++                .gesture(
++                    DragGesture()
++                        .onChanged { v in nudge(v, false) }
++                        .onEnded { v in nudge(v, true) }
++                )
++                .hoverEffect()
++                .padding(.bottom, 2)
++
++            Text("XBAWKS")
++                .font(XbawksTheme.face(18, .bold))
++                .foregroundStyle(XbawksTheme.green)
++                .tracking(8)
++                .shadow(color: XbawksTheme.green.opacity(0.5), radius: 12)
++
++            DiscCoverFlow(discs: discs, selectedIndex: $selected)
++
++            HStack(spacing: 16) {
++                Button {
++                    if let d = current, !d.isDashboard { onSwap(d) }
++                } label: {
++                    Text("SWAP DISC")
++                        .font(XbawksTheme.face(15, .bold)).tracking(3)
++                        .padding(.horizontal, 22).padding(.vertical, 6)
++                }
++                .tint(XbawksTheme.dimGreen)
++                .disabled(current?.isDashboard ?? true)
++
++                Button { onEject() } label: {
++                    Text("EJECT")
++                        .font(XbawksTheme.face(15, .bold)).tracking(3)
++                        .padding(.horizontal, 22).padding(.vertical, 6)
++                }
++                .tint(XbawksTheme.dimGreen)
++
++                Button("Close") { onClose() }
++                    .font(XbawksTheme.face(12))
++                    .buttonStyle(.plain)
++                    .foregroundStyle(XbawksTheme.green.opacity(0.8))
++            }
++
++            Text("Drag the bar to move this. Hold the console to move it, "
++                 + "two hands to turn it. Swapping resets and boots the new "
++                 + "disc; eject opens the tray.")
++                .font(XbawksTheme.face(10))
++                .foregroundStyle(.secondary)
++                .multilineTextAlignment(.center)
++        }
++        .padding(20)
++        .frame(width: 680)
++        .background(XbawksTheme.deepGreen.opacity(0.55),
++                    in: RoundedRectangle(cornerRadius: 26))
++        .overlay(RoundedRectangle(cornerRadius: 26)
++            .stroke(XbawksTheme.green.opacity(0.35), lineWidth: 1))
++        .glassBackgroundEffect()
++    }
++
++    private func nudge(_ v: DragGesture.Value, _ done: Bool) {
++        onNudge(SIMD2<Float>(Float(v.translation.width),
++                             Float(-v.translation.height)), done)
 +    }
 +}
 diff --git a/ui/xbawks-picker.swift b/ui/xbawks-picker.swift
@@ -2909,10 +3205,10 @@ index 0000000..1ae2184
 +}
 diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
 new file mode 100644
-index 0000000..0ea6fc0
+index 0000000..f297d9f
 --- /dev/null
 +++ b/ui/xemu-host-app.swift
-@@ -0,0 +1,575 @@
+@@ -0,0 +1,628 @@
 +// The entry point, and now the screen.
 +//
 +// Measured on 2026-10-29: a spatial controller (the PSVR2 Sense pair)
@@ -2934,6 +3230,15 @@ index 0000000..0ea6fc0
 +    /// because it was one when the frame lived in a window; its view is
 +    /// never shown now and the display link does not care.
 +    nonisolated(unsafe) static var ticker: XemuScreenViewController?
++
++    /// Wall clock from app start, so the boot sequence can be timed rather
++    /// than guessed at. Startup frame rate has now been blamed on two
++    /// different things without either being measured.
++    nonisolated(unsafe) static let launchedAt = Date()
++
++    static func sinceLaunch() -> String {
++        String(format: "%.2fs", Date().timeIntervalSince(launchedAt))
++    }
 +
 +    /*
 +     * Whether the screen is up. The launcher is rebuilt from scratch every
@@ -2977,6 +3282,8 @@ index 0000000..0ea6fc0
 +            ScreenSpace()
 +                .onAppear {
 +                    XemuHostApp.spaceIsOpen = true
++                    fputs("[host] boot \(XemuHostApp.sinceLaunch()): "
++                          + "screen appeared\n", stderr)
 +                    fputs("[host] immersive space appeared\n", stderr); fflush(stderr)
 +                }
 +                .onDisappear {
@@ -3175,78 +3482,128 @@ index 0000000..0ea6fc0
 +/// A 4:3 screen two and a half metres ahead at eye height, two metres
 +/// wide, fed thirty times a second from the published frame.
 +struct ScreenSpace: View {
-+    /*
-+     * @State and not a let. A plain property is reinitialised on every
-+     * re-evaluation of the view, and this view has state in it now, so it
-+     * will be re-evaluated. That would build a second GuestScreen that
-+     * nothing ever starts, while the frame pump kept feeding the first.
-+     */
 +    @State private var screen = GuestScreen()
-+    @Environment(\.openWindow) private var openWindow
-+
-+    /*
-+     * Placement is a held gesture, not a travelled one.
-+     *
-+     * It was decided by distance at first: move more than 20 mm and it is
-+     * a move, less and it is a press. That reads badly in the hand,
-+     * because poking a thing with a fingertip always travels, so every
-+     * poke became a move. Time is the honest signal here. Nothing moves
-+     * until the press has been held, so a poke and a quick pinch both
-+     * mean "open", and only a deliberate hold picks the console up.
-+     */
-+    private static let holdToAdjust = 0.35   /* seconds */
-+
-+    @State private var pressBegan: Date?
-+    @State private var adjusting = false
-+    @State private var dragOrigin: SIMD3<Float>?
-+    @State private var spinOrigin: simd_quatf?
 +    @State private var surfaces = SurfaceFinder()
 +
++    @State private var discs: [DiscEntry] = []
++    @State private var selected = 0
++    @State private var showPanel = false
++    @State private var panelOffset = ConsolePlacement.loadPanelOffset()
++
++    /*
++     * Which gesture owns the console. A two handed turn also drives the
++     * drag, which would then set the position from where that drag began,
++     * so the console snapped back to its last placed spot every time it
++     * was rotated. One claim at a time.
++     */
++    private enum Claim { case moving, turning }
++    @State private var claim: Claim?
++    @State private var pressBegan: Date?
++    @State private var dragOrigin: SIMD3<Float>?
++    @State private var spinOrigin: simd_quatf?
++
++    /// Long enough that a quick flick is not a move.
++    private static let holdToAdjust = 0.25
++
 +    private static let consoleName = "xbawks-console"
++    private static let panelID = "swap-panel"
 +
 +    var body: some View {
-+        RealityView { content in
++        RealityView { content, attachments in
 +            if let entity = screen.makeEntity() {
 +                content.add(entity)
 +            }
++            let t0 = Date()
 +            let console = await XbawksConsole.make()
 +            console.position = ConsolePlacement.loadPosition()
 +            console.orientation = ConsolePlacement.loadRotation()
 +            content.add(console)
++            fputs("[host] boot \(XemuHostApp.sinceLaunch()): console ready "
++                  + "(\(String(format: "%.2fs", -t0.timeIntervalSinceNow)) "
++                  + "to build it)\n", stderr)
++            fflush(stderr)
++
++            if let panel = attachments.entity(for: Self.panelID) {
++                panel.name = Self.panelID
++                panel.position = Self.panelPosition(panelOffset)
++                /* Faces whoever is looking at it, so turning the console
++                 * does not swing the deck away. */
++                panel.components.set(BillboardComponent())
++                panel.isEnabled = false
++                console.addChild(panel)
++            }
++
 +            screen.start()
-+            Task { await surfaces.start() }
++        } update: { _, attachments in
++            guard let panel = attachments.entity(for: Self.panelID) else {
++                return
++            }
++            panel.isEnabled = showPanel
++            panel.position = Self.panelPosition(panelOffset)
++        } attachments: {
++            Attachment(id: Self.panelID) {
++                SwapPanel(selected: $selected,
++                          discs: discs,
++                          onSwap: { disc in
++                              disc.id.withCString { xemu_host_load_disc($0) }
++                              showPanel = false
++                          },
++                          onEject: {
++                              xemu_host_eject_disc()
++                              showPanel = false
++                          },
++                          onClose: { showPanel = false },
++                          onNudge: { delta, done in
++                              let o = panelOffset + delta * 0.001
++                              panelOffset = o
++                              if done { ConsolePlacement.savePanelOffset(o) }
++                          })
++            }
 +        }
 +        /*
-+         * Press or hold, one recogniser. Two of them cannot work: a drag
-+         * that ends still looks like a tap to a tap recogniser, so the
-+         * menu opened every time the console was repositioned.
++         * Three separate recognisers, which is the shape Apple's own
++         * samples use for tap plus drag on an entity. The version before
++         * this put a long press in front of the drag and killed both the
++         * move and the turn outright; the version before that ran a zero
++         * distance drag alongside the tap, which competed for the same
++         * pinch and made tapping take several goes. A plain DragGesture
++         * has a 10 point minimum of its own, so a stationary pinch never
++         * starts it and the tap gets it cleanly.
 +         */
 +        .gesture(
-+            DragGesture(minimumDistance: 0)
++            SpatialTapGesture()
++                .targetedToAnyEntity()
++                .onEnded { value in
++                    guard claim == nil,
++                          Self.console(of: value.entity) != nil else { return }
++                    discs = DiscLibrary.scan()
++                    if selected >= discs.count {
++                        selected = max(0, discs.count - 1)
++                    }
++                    showPanel.toggle()
++                    fputs("[host] console tapped, deck \(showPanel)\n",
++                          stderr)
++                    fflush(stderr)
++                }
++        )
++        .gesture(
++            DragGesture()
 +                .targetedToAnyEntity()
 +                .onChanged { value in
-+                    guard let console = Self.console(of: value.entity) else {
-+                        return
-+                    }
++                    guard claim != .turning,
++                          let console = Self.console(of: value.entity)
++                    else { return }
 +                    if pressBegan == nil { pressBegan = value.time }
-+                    let held = value.time.timeIntervalSince(pressBegan!)
-+                    if !adjusting {
-+                        guard held >= Self.holdToAdjust else { return }
-+                        /* Pick it up from where it is now, so it does not
-+                         * jump by however far the hand drifted while the
-+                         * hold was being counted. */
-+                        adjusting = true
++                    if claim != .moving {
++                        guard value.time.timeIntervalSince(pressBegan!)
++                                >= Self.holdToAdjust else { return }
++                        claim = .moving
 +                        dragOrigin = console.position
++                        Task { await surfaces.startIfNeeded() }
 +                    }
-+                    let move = value.convert(value.translation3D,
-+                                             from: .local, to: .scene)
-+                    var p = dragOrigin! + move
-+                    /*
-+                     * Put it down on whatever is really there. A console
-+                     * sunk halfway into a table is the single thing that
-+                     * most gives away that it is not an object, and it is
-+                     * also just annoying to position.
-+                     */
++                    var p = dragOrigin! + value.convert(value.translation3D,
++                                                        from: .local,
++                                                        to: .scene)
 +                    if let rest = surfaces.restingY(
 +                            x: p.x, z: p.z, draggedTo: p.y,
 +                            objectHeight: ConsoleMetrics.height) {
@@ -3255,68 +3612,50 @@ index 0000000..0ea6fc0
 +                    console.position = p
 +                }
 +                .onEnded { value in
-+                    guard let console = Self.console(of: value.entity) else {
-+                        return
-+                    }
-+                    let wasAdjusting = adjusting
-+                    pressBegan = nil
-+                    adjusting = false
-+                    dragOrigin = nil
-+
-+                    if wasAdjusting {
-+                        ConsolePlacement.save(position: console.position,
-+                                              rotation: console.orientation)
-+                        fputs("[host] console placed at \(console.position)\n",
-+                              stderr)
-+                    } else {
-+                        /*
-+                         * The window, not an in space panel. A window can
-+                         * be grabbed and put where you want it, which is
-+                         * the thing worth keeping; an attachment can only
-+                         * sit where it is told. So the console summons the
-+                         * window and the system places it, after which it
-+                         * is yours to move.
-+                         */
-+                        openWindow(id: "launcher")
-+                        fputs("[host] console pressed, deck requested\n",
-+                              stderr)
-+                    }
++                    defer { pressBegan = nil; dragOrigin = nil }
++                    guard claim == .moving,
++                          let console = Self.console(of: value.entity)
++                    else { return }
++                    claim = nil
++                    ConsolePlacement.save(position: console.position,
++                                          rotation: console.orientation)
++                    fputs("[host] console placed at \(console.position)\n",
++                          stderr)
 +                    fflush(stderr)
 +                }
 +        )
-+        /* Turn it to face you. Persisted with the position, because a
-+         * console pointing at the wall is no more use than one behind
-+         * your knees. */
-+        .simultaneousGesture(
-+            RotateGesture3D(constrainedToAxis: .y)
++        .gesture(
++            /*
++             * Unconstrained, with the yaw taken out afterwards. Pinning
++             * the gesture to the vertical axis made it refuse most real
++             * two handed twists, which never line up exactly with an
++             * axis; it fired twice in a whole session. Accept any
++             * rotation, then use only the part that turns it on the spot.
++             */
++            RotateGesture3D()
 +                .targetedToAnyEntity()
 +                .onChanged { value in
-+                    guard let console = Self.console(of: value.entity) else {
-+                        return
-+                    }
++                    guard claim != .moving,
++                          let console = Self.console(of: value.entity)
++                    else { return }
++                    claim = .turning
 +                    if spinOrigin == nil { spinOrigin = console.orientation }
-+                    /*
-+                     * Turned on the spot, never tipped. An unconstrained
-+                     * RotateGesture3D hands back a rotation about any
-+                     * axis, so the console could end up on its side or
-+                     * nose down, which a console on a shelf cannot do.
-+                     * Constraining the gesture to vertical is half of
-+                     * it. The sign is the other half and it took two
-+                     * goes: the axis the gesture reports already carries
-+                     * the direction of the twist, so negating the angle
-+                     * on top of that turned it the wrong way.
-+                     */
++                    /* Vertical only, so it turns on the spot. The axis
++                     * already carries the direction of the twist, so the
++                     * angle must not be negated on top of it. */
++                    /* Project the gesture onto vertical: the component
++                     * of its axis along Y, times its angle. */
 +                    let r = value.rotation
-+                    let sign: Float = r.axis.y < 0 ? -1 : 1
-+                    let yaw = simd_quatf(angle: Float(r.angle.radians) * sign,
-+                                         axis: [0, 1, 0])
-+                    console.orientation = yaw * spinOrigin!
++                    let yaw = Float(r.angle.radians) * Float(r.axis.y)
++                    console.orientation =
++                        simd_quatf(angle: yaw, axis: [0, 1, 0]) * spinOrigin!
 +                }
 +                .onEnded { value in
-+                    guard let console = Self.console(of: value.entity) else {
-+                        return
-+                    }
-+                    spinOrigin = nil
++                    defer { spinOrigin = nil }
++                    guard claim == .turning,
++                          let console = Self.console(of: value.entity)
++                    else { return }
++                    claim = nil
 +                    ConsolePlacement.save(position: console.position,
 +                                          rotation: console.orientation)
 +                    fputs("[host] console turned\n", stderr); fflush(stderr)
@@ -3324,8 +3663,14 @@ index 0000000..0ea6fc0
 +        )
 +    }
 +
-+    /// The gesture can land on any descendant, including a single fin of
-+    /// the model, so walk up to the thing that actually moves.
++    /// 28 cm up and a little forward, plus whatever the bar was dragged
++    /// to, in the console's own frame so it travels with it.
++    private static func panelPosition(_ o: SIMD2<Float>) -> SIMD3<Float> {
++        [o.x, 0.28 + o.y, 0.04]
++    }
++
++    /// A gesture can land on any descendant, including one fin of the
++    /// model, so walk up to the thing that actually moves.
 +    private static func console(of entity: Entity) -> Entity? {
 +        var cur: Entity? = entity
 +        while let c = cur {
@@ -3445,7 +3790,11 @@ index 0000000..0ea6fc0
 +        if r == 1 {
 +            drawable.present()
 +            shown += 1
-+            if shown == 1 { entity?.isEnabled = true }
++            if shown == 1 {
++                entity?.isEnabled = true
++                fputs("[host] boot \(XemuHostApp.sinceLaunch()): "
++                      + "first GPU frame\n", stderr)
++            }
 +            if shown <= 3 || shown % 600 == 0 {
 +                fputs("[host] screen: GPU frame \(shown) (\(w)x\(h))\n", stderr)
 +                fflush(stderr)
@@ -4451,10 +4800,10 @@ index 0000000..1dd3732
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000..0b0f417
+index 0000000..70642bb
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,1211 @@
+@@ -0,0 +1,1247 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -5508,6 +5857,42 @@ index 0000000..0b0f417
 +                        total_ns / 1000000,
 +                        (double)total_ns / 5e9 * 100.0,
 +                        tn ? tline : "");
++
++                /*
++                 * And the full queue waits, which nothing has ever
++                 * counted. These are vkQueueWaitIdle rather than a single
++                 * fence, so they wait for everything the queue holds from
++                 * any submission. If this is large then every stall
++                 * percentage printed above has been a subset.
++                 */
++                extern unsigned long xemu_vk_waitidle_counts[4];
++                extern unsigned long long xemu_vk_waitidle_ns[4];
++                static const char *wnames[4] = {
++                    "present", "surface", "texture", "other"
++                };
++                static unsigned long lwc[4];
++                static unsigned long long lwn[4];
++                char wline[256];
++                int wn = 0;
++                unsigned long wtotal = 0;
++                unsigned long long wns = 0;
++                for (int i = 0; i < 4; i++) {
++                    unsigned long dc = xemu_vk_waitidle_counts[i] - lwc[i];
++                    unsigned long long dn = xemu_vk_waitidle_ns[i] - lwn[i];
++                    lwc[i] = xemu_vk_waitidle_counts[i];
++                    lwn[i] = xemu_vk_waitidle_ns[i];
++                    wtotal += dc;
++                    wns += dn;
++                    if (dc) {
++                        wn += snprintf(wline + wn, sizeof(wline) - wn,
++                                       " %s=%lu/%llums", wnames[i], dc,
++                                       dn / 1000000);
++                    }
++                }
++                fprintf(stderr, "[host]   queue waits in 5 s: %lu costing "
++                                "%llums (%.0f%%)%s\n",
++                        wtotal, wns / 1000000,
++                        (double)wns / 5e9 * 100.0, wn ? wline : "");
 +
 +                /*
 +                 * And specifically the occlusion drains: how many were
