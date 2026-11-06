@@ -1,5 +1,7 @@
 # Xbawks
 
+![Xbawks running on an Apple Vision Pro](docs/media/promo.gif)
+
 An original Xbox emulator for Apple Vision Pro, running on the headset itself. It is a port of [xemu](https://xemu.app), which is a fork of QEMU, with a visionOS shell around it: a JIT that works within the platform's rules, a screen inside an immersive space, and the PSVR2 Sense controllers as the gamepad.
 
 As far as I can find, it is the first standalone, JIT based original Xbox emulator on the platform. The dashboard boots, a retail disc boots, and the game runs at its own frame rate on the headset's M5.
@@ -9,6 +11,8 @@ As far as I can find, it is the first standalone, JIT based original Xbox emulat
 ![A game running from a disc image](docs/media/gameplay.gif)
 
 Recorded through the headset's passthrough camera, so the room behind the screen is real. Both clips are from my own console's files and my own disc; Xbawks ships neither.
+
+[![Watch it running on the headset](https://img.youtube.com/vi/AnmeuEjDdMU/maxresdefault.jpg)](https://youtu.be/AnmeuEjDdMU)
 
 Ported and maintained by A. Cervantez. xemu and QEMU are the work of their respective projects and are GPL-2.0; so is everything here that touches them.
 
