@@ -485,7 +485,7 @@ index 6915676..0341930 100644
  {
      NV2AState *d = g_nv2a;
 diff --git a/hw/xbox/nv2a/pgraph/vk/buffer.c b/hw/xbox/nv2a/pgraph/vk/buffer.c
-index d87c875..1c9a688 100644
+index d87c875..122d16f 100644
 --- a/hw/xbox/nv2a/pgraph/vk/buffer.c
 +++ b/hw/xbox/nv2a/pgraph/vk/buffer.c
 @@ -18,6 +18,9 @@
@@ -541,12 +541,14 @@ index d87c875..1c9a688 100644
      };
  
      r->storage_buffers[BUFFER_UNIFORM_STAGING] = (StorageBuffer){
-@@ -169,6 +191,8 @@ void pgraph_vk_finalize_buffers(NV2AState *d)
+@@ -169,6 +191,10 @@ void pgraph_vk_finalize_buffers(NV2AState *d)
  
      g_free(r->uploaded_bitmap);
      r->uploaded_bitmap = NULL;
 +    g_free(r->uploaded_lo); r->uploaded_lo = NULL;
 +    g_free(r->uploaded_hi); r->uploaded_hi = NULL;
++    g_free(r->vertex_scratch); r->vertex_scratch = NULL;
++    r->vertex_scratch_size = 0;
  }
  
  bool pgraph_vk_buffer_has_space_for(PGRAPHState *pg, int index,
@@ -614,7 +616,7 @@ index 198f675..666c40a 100644
  
  #if HAVE_IOSURFACE_DISPLAY
 diff --git a/hw/xbox/nv2a/pgraph/vk/draw.c b/hw/xbox/nv2a/pgraph/vk/draw.c
-index f803e43..ff101e5 100644
+index f803e43..f97858c 100644
 --- a/hw/xbox/nv2a/pgraph/vk/draw.c
 +++ b/hw/xbox/nv2a/pgraph/vk/draw.c
 @@ -18,6 +18,7 @@
@@ -681,7 +683,17 @@ index f803e43..ff101e5 100644
  }
  
  void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
-@@ -1663,8 +1698,39 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
+@@ -1534,6 +1569,9 @@ static void end_draw(PGRAPHState *pg)
+         end_render_pass(r);
+     }
+ 
++    /* The draw is in the command buffer now; its reads count from here. */
++    pgraph_vk_commit_vertex_reads(pg);
++
+     r->in_draw = false;
+ }
+ 
+@@ -1663,11 +1701,52 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
          if (memory_region_test_and_clear_dirty(d->vram, addr, size,
                                                 DIRTY_MEMORY_NV2A)) {
              NV2A_VK_DPRINTF("Memory dirty. Synchronizing...");
@@ -721,7 +733,20 @@ index f803e43..ff101e5 100644
          }
      }
  
-@@ -1940,6 +2006,33 @@ typedef struct VertexBufferRemap {
++    /*
++     * Hold every range this draw reads, dirty or not, until the draw has
++     * been recorded. Registering here, inside or right after the loop,
++     * loses them to any finish between now and the record.
++     */
++    r->num_vertex_ram_pending = 0;
++    for (int i = 0; i < num_syncs && i < ARRAY_SIZE(r->vertex_ram_pending); i++) {
++        r->vertex_ram_pending[r->num_vertex_ram_pending++] = merged[i];
++    }
++
+     r->num_vertex_ram_buffer_syncs = 0;
+ 
+     NV2A_VK_DGROUP_END();
+@@ -1940,6 +2019,33 @@ typedef struct VertexBufferRemap {
      } map[NV2A_VERTEXSHADER_ATTRIBUTES];
  } VertexBufferRemap;
  
@@ -755,7 +780,7 @@ index f803e43..ff101e5 100644
  static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
                                                      uint32_t num_vertices)
  {
-@@ -1947,6 +2040,8 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
+@@ -1947,6 +2053,8 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
  
      VertexBufferRemap remap = {0};
  
@@ -764,7 +789,7 @@ index f803e43..ff101e5 100644
      VkDeviceAddress output_offset = 0;
  
      for (int attr_id = 0; attr_id < NV2A_VERTEXSHADER_ATTRIBUTES; attr_id++) {
-@@ -1991,6 +2086,9 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
+@@ -1991,6 +2099,9 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
      }
  
      remap.buffer_space_required = output_offset;
@@ -993,7 +1018,7 @@ index d69a31a..f5725a3 100644
  #endif
  }
 diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.h b/hw/xbox/nv2a/pgraph/vk/renderer.h
-index 9d8fefe..12ab2ae 100644
+index 9d8fefe..7190ed7 100644
 --- a/hw/xbox/nv2a/pgraph/vk/renderer.h
 +++ b/hw/xbox/nv2a/pgraph/vk/renderer.h
 @@ -44,7 +44,17 @@
@@ -1078,7 +1103,7 @@ index 9d8fefe..12ab2ae 100644
      int descriptor_set_index;
  
      StorageBuffer storage_buffers[BUFFER_COUNT];
-@@ -393,6 +423,35 @@ typedef struct PGRAPHVkState {
+@@ -393,6 +423,56 @@ typedef struct PGRAPHVkState {
      MemorySyncRequirement vertex_ram_buffer_syncs[NV2A_VERTEXSHADER_ATTRIBUTES];
      size_t num_vertex_ram_buffer_syncs;
      unsigned long *uploaded_bitmap;
@@ -1089,7 +1114,28 @@ index 9d8fefe..12ab2ae 100644
 +     * clearing themselves.
 +     */
 +    uint16_t *uploaded_lo, *uploaded_hi;
-+    unsigned long vtx_flush_real, vtx_flush_avoided;
++    unsigned long vtx_flush_real, vtx_flush_avoided, vtx_flush_identical;
++
++    /*
++     * The ranges the draw being set up will read, held until that draw has
++     * actually been recorded, then registered. Registering earlier, inside
++     * the sync loop, meant a finish anywhere between sync and record (a
++     * real hazard on a later range of the same draw, or a staging or
++     * descriptor cap in the record path) cleared them before the draw
++     * existed, and the draw was then recorded with its reads untracked.
++     * The drain on every overlap hid that for weeks by keeping any such
++     * window microseconds wide.
++     */
++    MemorySyncRequirement vertex_ram_pending[16];
++    size_t num_vertex_ram_pending;
++
++    /*
++     * A snapshot of an overlapping write, so that the comparison and the
++     * copy see one read of guest memory rather than two with the vCPU free
++     * to store in between.
++     */
++    uint8_t *vertex_scratch;
++    size_t vertex_scratch_size;
 +    /*
 +     * Measurement for the decision about routing all vertex data through
 +     * the inline ring. bytes_dirty is what is copied today, which is only
@@ -1114,7 +1160,7 @@ index 9d8fefe..12ab2ae 100644
      size_t bitmap_size;
  
      VkVertexInputAttributeDescription vertex_attribute_descriptions[NV2A_VERTEXSHADER_ATTRIBUTES];
-@@ -408,6 +467,26 @@ typedef struct PGRAPHVkState {
+@@ -408,6 +488,26 @@ typedef struct PGRAPHVkState {
      SurfaceBinding *color_binding, *zeta_binding;
      bool downloads_pending;
      QemuEvent downloads_complete;
@@ -1141,7 +1187,7 @@ index 9d8fefe..12ab2ae 100644
      bool download_dirty_surfaces_pending;
      QemuEvent dirty_surfaces_download_complete; // common
  
-@@ -437,6 +516,10 @@ typedef struct PGRAPHVkState {
+@@ -437,6 +537,13 @@ typedef struct PGRAPHVkState {
      int max_queries_in_flight; // FIXME: Move out to constant
      int num_queries_in_flight;
      bool new_query_needed;
@@ -1149,10 +1195,13 @@ index 9d8fefe..12ab2ae 100644
 +    unsigned long report_drains, report_drains_skipped;
 +    unsigned long report_queue_depth_sum;
 +    unsigned long drain_by_clock, drain_by_queue, drain_by_pool;
++    /* Queue depth at the last FIFO idle that was not served; the same
++     * depth at the next idle means the guest is waiting on it. */
++    unsigned last_idle_depth;
      bool query_in_flight;
      uint32_t zpass_pixel_count_result;
      QSIMPLEQ_HEAD(, QueryReport) report_queue; // FIXME: Statically allocate
-@@ -502,7 +585,17 @@ VkDeviceSize pgraph_vk_append_to_buffer(PGRAPHState *pg, int index, void **data,
+@@ -502,7 +609,17 @@ VkDeviceSize pgraph_vk_append_to_buffer(PGRAPHState *pg, int index, void **data,
  void pgraph_vk_init_command_buffers(PGRAPHState *pg);
  void pgraph_vk_finalize_command_buffers(PGRAPHState *pg);
  VkCommandBuffer pgraph_vk_begin_single_time_commands(PGRAPHState *pg);
@@ -1171,7 +1220,17 @@ index 9d8fefe..12ab2ae 100644
  
  // image.c
  void pgraph_vk_transition_image_layout(PGRAPHState *pg, VkCommandBuffer cmd,
-@@ -535,6 +628,9 @@ void pgraph_vk_surface_flush(NV2AState *d);
+@@ -517,6 +634,9 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
+                                       unsigned int inline_stride,
+                                       unsigned int provoking_element);
+ void pgraph_vk_bind_vertex_attributes_inline(NV2AState *d);
++void pgraph_vk_note_vertex_range_read(PGRAPHState *pg, hwaddr offset,
++                                      VkDeviceSize size);
++void pgraph_vk_commit_vertex_reads(PGRAPHState *pg);
+ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset, void *data,
+                                     VkDeviceSize size);
+ VkDeviceSize pgraph_vk_update_index_buffer(PGRAPHState *pg, void *data,
+@@ -535,6 +655,9 @@ void pgraph_vk_surface_flush(NV2AState *d);
  void pgraph_vk_process_pending_downloads(NV2AState *d);
  void pgraph_vk_surface_download_if_dirty(NV2AState *d, SurfaceBinding *surface);
  SurfaceBinding *pgraph_vk_surface_get_within(NV2AState *d, hwaddr addr);
@@ -1181,7 +1240,7 @@ index 9d8fefe..12ab2ae 100644
  void pgraph_vk_wait_for_surface_download(SurfaceBinding *e);
  void pgraph_vk_download_dirty_surfaces(NV2AState *d);
  unsigned int pgraph_vk_mark_surfaces_in_range_for_upload(NV2AState *d,
-@@ -589,6 +685,17 @@ void pgraph_vk_clear_report_value(NV2AState *d);
+@@ -589,6 +712,17 @@ void pgraph_vk_clear_report_value(NV2AState *d);
  void pgraph_vk_get_report(NV2AState *d, uint32_t parameter);
  void pgraph_vk_process_pending_reports(NV2AState *d);
  void pgraph_vk_process_pending_reports_internal(NV2AState *d);
@@ -1195,15 +1254,15 @@ index 9d8fefe..12ab2ae 100644
 +                             unsigned long *draws,
 +                             unsigned long *draws_remapped);
 +void pgraph_vk_vertex_stats(NV2AState *d, unsigned long *real,
-+                            unsigned long *avoided);
++                            unsigned long *avoided, unsigned long *identical);
  
  typedef enum FinishReason {
      VK_FINISH_REASON_VERTEX_BUFFER_DIRTY,
 diff --git a/hw/xbox/nv2a/pgraph/vk/reports.c b/hw/xbox/nv2a/pgraph/vk/reports.c
-index c860a9b..d293e38 100644
+index c860a9b..5d16315 100644
 --- a/hw/xbox/nv2a/pgraph/vk/reports.c
 +++ b/hw/xbox/nv2a/pgraph/vk/reports.c
-@@ -142,9 +142,105 @@ void pgraph_vk_process_pending_reports_internal(NV2AState *d)
+@@ -142,9 +142,106 @@ void pgraph_vk_process_pending_reports_internal(NV2AState *d)
      }
  
      r->num_queries_in_flight = 0;
@@ -1305,11 +1364,12 @@ index c860a9b..d293e38 100644
 + * whole queue.
 + */
 +#define REPORT_SERVICE_BREAKER_NS 100000000 /* 100 ms, see above */
++#define REPORT_WAITING_MAX_DEPTH  32        /* a waiter has few in flight */
 +
  void pgraph_vk_process_pending_reports(NV2AState *d)
  {
      PGRAPHState *pg = &d->pgraph;
-@@ -153,8 +249,85 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
+@@ -153,8 +250,122 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
      uint32_t *dma_get = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET];
      uint32_t *dma_put = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT];
  
@@ -1319,7 +1379,7 @@ index c860a9b..d293e38 100644
 +    if (!(*dma_get == *dma_put && r->in_command_buffer &&
 +          !QSIMPLEQ_EMPTY(&r->report_queue))) {
 +        return;
-     }
++    }
 +
 +    /* Depth is still counted, capped, because it is the number that
 +     * showed the old valve was wrong and it is worth being able to see. */
@@ -1334,16 +1394,52 @@ index c860a9b..d293e38 100644
 +    bool pool_pressure =
 +        r->num_queries_in_flight * 4 >= r->max_queries_in_flight * 3;
 +
-+    if (!pool_pressure) {
++    /*
++     * 2026-11-10: a guest that is waiting for a result has to be served
++     * now, and this is how to tell one from a guest that is not.
++     *
++     * Blinx issues a handful of occlusion queries and then stops
++     * submitting until it has the answers: the FIFO goes idle with the
++     * same reports pending, 100 to 190 times a second. Served only at the
++     * flip, the guest reads a stale count, decides the enemy is occluded,
++     * and does not draw it. The enemies vanished and reappeared frame to
++     * frame. It never showed before because 150 vertex drains a frame were
++     * servicing this queue by accident.
++     *
++     * Halo issues 237 a frame and never waits: between two idles the queue
++     * has grown. So the signature of waiting is the FIFO going idle twice
++     * with the queue unchanged in between. That drains at most once per
++     * distinct state of the queue, which is nothing for a producer and
++     * exactly one drain per answer for a waiter.
++     */
++    /*
++     * Measured the same day, on the first version of this: Halo tripped it
++     * 40 to 90 times a second and lost three frames a second to it. Halo
++     * issues about 7,000 queries a second across about 1,000 idles, so an
++     * idle with nothing new in between happens by chance often enough to
++     * matter. What separates the two games is how much is outstanding: a
++     * waiter has a handful in flight (Blinx, 8 to 10) and a producer has
++     * dozens (Halo, 45 to 72 at the drains). So the queue has to be
++     * unchanged and small. A waiter with a deep queue still has the 100 ms
++     * breaker, which is slow but correct.
++     */
++    bool guest_waiting = (depth == r->last_idle_depth) &&
++                         depth <= REPORT_WAITING_MAX_DEPTH;
++    r->last_idle_depth = depth;
++
++    if (!pool_pressure && !guest_waiting) {
 +        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 +        if (now - r->last_report_service_ns < REPORT_SERVICE_BREAKER_NS) {
 +            r->report_drains_skipped++;
 +            return;
 +        }
 +        r->drain_by_clock++;
-+    } else {
++    } else if (pool_pressure) {
 +        r->drain_by_pool++;
-+    }
++    } else {
++        r->drain_by_queue++;   /* the guest was waiting */
+     }
++    r->last_idle_depth = 0;
 +
 +    r->report_drains++;
 +    r->report_queue_depth_sum += depth;
@@ -1383,11 +1479,12 @@ index c860a9b..d293e38 100644
 +}
 +
 +void pgraph_vk_vertex_stats(NV2AState *d, unsigned long *real,
-+                            unsigned long *avoided)
++                            unsigned long *avoided, unsigned long *identical)
 +{
 +    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
 +    *real = r->vtx_flush_real;
 +    *avoided = r->vtx_flush_avoided;
++    *identical = r->vtx_flush_identical;
 +}
 +
 +void pgraph_vk_report_triggers(NV2AState *d, unsigned long *clock,
@@ -1681,10 +1778,10 @@ index f1550f7..b954d62 100644
      r->texture_format_properties = g_malloc0_n(
          ARRAY_SIZE(kelvin_color_format_vk_map), sizeof(VkFormatProperties));
 diff --git a/hw/xbox/nv2a/pgraph/vk/vertex.c b/hw/xbox/nv2a/pgraph/vk/vertex.c
-index 1e84101..c720715 100644
+index 1e84101..05ccae2 100644
 --- a/hw/xbox/nv2a/pgraph/vk/vertex.c
 +++ b/hw/xbox/nv2a/pgraph/vk/vertex.c
-@@ -53,16 +53,66 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
+@@ -53,15 +53,161 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
      size_t end_bit = TARGET_PAGE_ALIGN(offset + size) / TARGET_PAGE_SIZE;
      size_t nbits = end_bit - start_bit;
  
@@ -1701,8 +1798,34 @@ index 1e84101..c720715 100644
 +     * only on a true overlap. Conservative in both directions: anything
 +     * that does overlap, or that cannot be checked, still flushes.
 +     */
-+    bool hazard = false;
-+    for (size_t p = start_bit; p < end_bit && !hazard; p++) {
++    /*
++     * And then, 2026-11-10: a true overlap is still not a hazard if the
++     * bytes being written are the bytes already there. The GPU reading the
++     * old values and the GPU reading the new values read the same values,
++     * so there is nothing to wait for.
++     *
++     * This is not a guess. Blinx on Deja Vu Canals runs at 6 to 10 fps
++     * with the GPU stalled 92 per cent of the time, all of it here: about
++     * 5,000 drains per 5 s, around 150 a frame, with the GPU otherwise
++     * idle. Each drain uploads about 8 KiB, two pages. Upstream measured
++     * the same shape on Dead or Alive (PR #2956) and found roughly 92 per
++     * cent of every "vertex data changed" upload rewrites identical bytes:
++     * the guest keeps per object state next to its vertex data and writes
++     * the whole block back each frame. So the comparison is over exactly
++     * the bytes a recorded draw reads, which is the overlap of this write
++     * with the uploaded range on each page, and nothing wider.
++     */
++    /*
++     * Two passes. The first only asks whether this write lands on bytes a
++     * recorded draw reads. If it does, the write is snapshotted before
++     * anything is compared, because the sync runs on the pfifo thread while
++     * the vCPU keeps storing into guest memory: a compare that reads guest
++     * memory and a copy that reads it again a moment later can see two
++     * different versions, and the second one lands under live GPU reads.
++     * One snapshot, compared and copied from, cannot.
++     */
++    bool overlapped = false;
++    for (size_t p = start_bit; p < end_bit && !overlapped; p++) {
 +        if (!test_bit(p, r->uploaded_bitmap)) {
 +            continue;
 +        }
@@ -1712,7 +1835,49 @@ index 1e84101..c720715 100644
 +        hwaddr w_hi = w_end < page_start + TARGET_PAGE_SIZE
 +                          ? w_end - page_start : TARGET_PAGE_SIZE;
 +        if (w_lo < r->uploaded_hi[p] && r->uploaded_lo[p] < w_hi) {
++            overlapped = true;
++        }
++    }
++
++    const uint8_t *src = data;
++    bool hazard = false;
++    if (overlapped) {
++        /* Anything this large under a pending draw is not worth the copy
++         * to find out; just drain. In practice an overlapping write is a
++         * few KiB. */
++        const size_t snapshot_limit = 4u << 20;
++        if (size > snapshot_limit) {
 +            hazard = true;
++        } else {
++            if (r->vertex_scratch_size < size) {
++                r->vertex_scratch = g_realloc(r->vertex_scratch, size);
++                r->vertex_scratch_size = size;
++            }
++            memcpy(r->vertex_scratch, data, size);
++            src = r->vertex_scratch;
++
++            const uint8_t *mirror =
++                r->storage_buffers[BUFFER_VERTEX_RAM].mapped;
++            for (size_t p = start_bit; p < end_bit && !hazard; p++) {
++                if (!test_bit(p, r->uploaded_bitmap)) {
++                    continue;
++                }
++                hwaddr page_start = (hwaddr)p * TARGET_PAGE_SIZE;
++                hwaddr w_lo = offset > page_start ? offset - page_start : 0;
++                hwaddr w_end = offset + size;
++                hwaddr w_hi = w_end < page_start + TARGET_PAGE_SIZE
++                                  ? w_end - page_start : TARGET_PAGE_SIZE;
++                if (!(w_lo < r->uploaded_hi[p] && r->uploaded_lo[p] < w_hi)) {
++                    continue;
++                }
++                hwaddr o_lo = MAX(w_lo, (hwaddr)r->uploaded_lo[p]);
++                hwaddr o_hi = MIN(w_hi, (hwaddr)r->uploaded_hi[p]);
++                hwaddr abs_lo = page_start + o_lo;
++                if (memcmp(src + (abs_lo - offset), mirror + abs_lo,
++                           o_hi - o_lo) != 0) {
++                    hazard = true;
++                }
++            }
 +        }
 +    }
 +
@@ -1721,6 +1886,9 @@ index 1e84101..c720715 100644
          // before updating RAM buffer.
 +        r->vtx_flush_real++;
          pgraph_vk_finish(pg, VK_FINISH_REASON_VERTEX_BUFFER_DIRTY);
++    } else if (overlapped) {
++        /* On bytes a draw reads, but the same bytes: nothing to wait for. */
++        r->vtx_flush_identical++;
 +    } else if (find_next_bit(r->uploaded_bitmap, start_bit + nbits,
 +                             start_bit) < end_bit) {
 +        /* A page was touched but the bytes do not overlap: no flush. */
@@ -1728,13 +1896,39 @@ index 1e84101..c720715 100644
      }
  
      nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_1);
-     memcpy(r->storage_buffers[BUFFER_VERTEX_RAM].mapped + offset, data, size);
- 
+-    memcpy(r->storage_buffers[BUFFER_VERTEX_RAM].mapped + offset, data, size);
++    memcpy(r->storage_buffers[BUFFER_VERTEX_RAM].mapped + offset, src, size);
++
 +    /*
-+     * Record what each page now holds. A page whose bit is already set
-+     * widens its range; one that is not starts fresh. pgraph_vk_finish
-+     * clears the bitmap, which is what invalidates these.
++     * Deliberately not registered here. The draw that needs these bytes has
++     * not been recorded yet; its ranges are committed once it has been,
++     * from end_draw, so that a finish in between cannot lose them.
 +     */
++}
++
++/*
++ * Record that a recorded draw reads this range, so a later write to it is
++ * checked. A page whose bit is already set widens its range; one that is
++ * not starts fresh. pgraph_vk_finish clears the bitmap, which is what
++ * invalidates these.
++ *
++ * Called for every range a draw needs, not only the ones that were dirty
++ * and got uploaded. That distinction was the hole: a draw reading a range
++ * already current in the mirror uploaded nothing and left no trace, so a
++ * later write to it was never checked and landed under a pending draw.
++ * Upstream measured that at 3.36 unguarded writes a frame (PR #2988). It
++ * was masked while the identical-bytes check did not exist, because the
++ * constant draining closed every stale window within microseconds; with
++ * most drains gone the window opened and enemies in Blinx flickered.
++ */
++void pgraph_vk_note_vertex_range_read(PGRAPHState *pg, hwaddr offset,
++                                      VkDeviceSize size)
++{
++    PGRAPHVkState *r = pg->vk_renderer_state;
++    size_t start_bit = offset / TARGET_PAGE_SIZE;
++    size_t end_bit = TARGET_PAGE_ALIGN(offset + size) / TARGET_PAGE_SIZE;
++    size_t nbits = end_bit - start_bit;
++
 +    for (size_t p = start_bit; p < end_bit; p++) {
 +        hwaddr page_start = (hwaddr)p * TARGET_PAGE_SIZE;
 +        hwaddr w_lo = offset > page_start ? offset - page_start : 0;
@@ -1749,10 +1943,28 @@ index 1e84101..c720715 100644
 +            r->uploaded_hi[p] = w_hi;
 +        }
 +    }
-+
+ 
      bitmap_set(r->uploaded_bitmap, start_bit, nbits);
  }
- 
+@@ -315,3 +461,18 @@ void pgraph_vk_bind_vertex_attributes_inline(NV2AState *d)
+         }
+     }
+ }
++
++/*
++ * Register the ranges of the draw that has just been recorded. Called from
++ * end_draw, so the draw is in the command buffer and the bitmap it lands
++ * in is the one that buffer will be checked against.
++ */
++void pgraph_vk_commit_vertex_reads(PGRAPHState *pg)
++{
++    PGRAPHVkState *r = pg->vk_renderer_state;
++    for (size_t i = 0; i < r->num_vertex_ram_pending; i++) {
++        pgraph_vk_note_vertex_range_read(pg, r->vertex_ram_pending[i].addr,
++                                         r->vertex_ram_pending[i].size);
++    }
++    r->num_vertex_ram_pending = 0;
++}
 diff --git a/hw/xbox/xid.c b/hw/xbox/xid.c
 index 396d811..f55b735 100644
 --- a/hw/xbox/xid.c
@@ -4878,10 +5090,10 @@ index 0000000..1dd3732
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000..70642bb
+index 0000000..097fd3f
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,1247 @@
+@@ -0,0 +1,1248 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -6001,19 +6213,20 @@ index 0000000..70642bb
 +                    unsigned long c = 0, q = 0, po = 0;
 +                    pgraph_vk_report_triggers(g_nv2a_for_stats(), &c, &q, &po);
 +                    fprintf(stderr, "[host]   drain trigger: clock %lu, "
-+                                    "queue %lu, pool %lu\n",
++                                    "waiting %lu, pool %lu\n",
 +                            c - lc, q - lq, po - lp);
 +                    lc = c; lq = q; lp = po;
 +
 +                    extern void pgraph_vk_vertex_stats(NV2AState *d,
-+                        unsigned long *, unsigned long *);
-+                    static unsigned long lvr, lva;
-+                    unsigned long vr = 0, va = 0;
-+                    pgraph_vk_vertex_stats(g_nv2a_for_stats(), &vr, &va);
++                        unsigned long *, unsigned long *, unsigned long *);
++                    static unsigned long lvr, lva, lvi;
++                    unsigned long vr = 0, va = 0, vi = 0;
++                    pgraph_vk_vertex_stats(g_nv2a_for_stats(), &vr, &va, &vi);
 +                    fprintf(stderr, "[host]   vertex: %lu real flushes, %lu "
-+                                    "avoided by byte range\n",
-+                            vr - lvr, va - lva);
-+                    lvr = vr; lva = va;
++                                    "avoided by byte range, %lu identical "
++                                    "bytes\n",
++                            vr - lvr, va - lva, vi - lvi);
++                    lvr = vr; lva = va; lvi = vi;
 +
 +                    extern void pgraph_vk_vertex_volume(NV2AState *d,
 +                        unsigned long long *, unsigned long long *,
