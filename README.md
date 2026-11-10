@@ -26,11 +26,31 @@ Ported and maintained by A. Cervantez. xemu and QEMU are the work of their respe
 ## What it does today
 
 - Boots the Xbox dashboard and a retail game from a disc image, standalone, no Mac streaming.
-- Presents the picture on a two metre screen in a mixed immersive space, fed straight from the GPU.
+- Presents the picture on a 2.8 metre screen in a mixed immersive space, fed straight from the GPU.
+- Puts a true scale Xbox in the room. It rests on real tables, you can move it and turn it, and pressing it brings up a Cover Flow deck of your discs. Swapping a disc resets the console and boots the new one, as the hardware would; eject returns to the dashboard.
 - Takes input from a pair of PSVR2 Sense controllers (or an extended gamepad): sticks, face buttons, analog triggers.
 - Pauses when you leave and resumes when you come back.
 
-What it does not do yet: run at the internal scale it could (the screen shows the guest's 640x480), save state, show a menu, or let you move the screen. The devlog has the measurements behind every one of those.
+What it does not do yet: run at the internal scale it could (the screen shows the guest's 640x480), save state, or let you move the screen. The devlog has the measurements behind every one of those.
+
+## What runs
+
+Measured on the headset on 2026-11-10, each title played for a few minutes from my own discs. Frame rates are the median over the session; the original hardware ran Halo at 29.5 fps average. All of these are discs I own; the build carries none of them.
+
+| Title | Result | Notes |
+|---|---|---|
+| Halo: Combat Evolved | Plays | 29.4 fps, matching the original console. Cutscenes drift from their audio when a scene runs slow. |
+| Dead or Alive 2 Ultimate | Plays | 60 fps, its full cap. The title upstream used to measure the vertex work this port carries. |
+| Jet Set Radio Future | Plays | 60 fps. The boost effect dips to about 25 for its duration, a known cost upstream too. |
+| Doom 3 | Plays | 32 fps, locked, the flattest line of anything here. One stutter on the first rocket impact, then never again: a pipeline compiling on first use. |
+| Project Gotham Racing 2 | Plays | 28 fps on a 30 fps target. Looks right; feels a little less smooth than it should. |
+| Blinx: The Time Sweeper | Plays | 27 fps on Deja Vu Canals, which ran at 6 before the vertex work. |
+| Cel Damage | Plays | Slower than it should be; sync-heavy in a way not yet cracked. |
+| Fuzion Frenzy | Plays | Launch title, no issues seen in a short run. |
+| Halo 2 | Starts | 32 fps for the first three minutes, then memory climbs to 8 GB in the Cairo Station firefight and the system kills it. HUD shield bar and ammo boxes missing from the start, no zoom view, armour pops in. |
+| The Elder Scrolls III: Morrowind | Starts | Reaches the prison ship after the intro and hangs there, the guest spinning on a device that never answers. Loading is very slow. Audio DSP is interpreted on this platform, which is the first suspect. |
+
+"Plays" means I played it and nothing looked wrong. "Starts" means it got to gameplay and then failed in a way that is recorded in the devlog with the numbers.
 
 ## Why it needs a debugger to start
 

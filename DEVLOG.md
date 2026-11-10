@@ -2933,3 +2933,149 @@ per cent of wall time, 385 drains at about 5.4 ms each. Most of what is
 left after that is `flip_stall`, and most of that is legitimate, since
 it is waiting on the frame that was just submitted rather than on an
 avoidable synchronisation.
+
+## 2026-11-10 -- the pin moves, Blinx goes from 6 to 27, and the first compatibility pass
+
+### Six weeks of upstream, and one conflict with the platform
+
+The pin moved from 2026-09-21 to 2026-11-02: 42 commits, 27 of them
+nv2a renderer work and almost all of it correctness rather than speed.
+vsh register carryover, Y16 and R6G5B5 and A4R4G4B4 texture formats,
+spotlight falloff, specular parameters, texgen view model, clamped
+passthru values, material ambient and emissive. Those decide whether a
+title renders correctly, and the compatibility pass below was about to
+test six new ones, so testing against a September pin would have meant
+chasing bugs upstream had already fixed.
+
+One real conflict. Upstream's VGA fallback fix gave the null renderer a
+GL context and a one pixel black texture. This build has no OpenGL at all
+and presents through Vulkan into a Metal texture, so five `epoxy_gl*`
+symbols failed to link. Guarded with `CONFIG_OPENGL`, which the tree
+already uses elsewhere, rather than deleted.
+
+Patch 0001, the Apple Silicon fork, had to be rebased too, which I had
+not anticipated: it carries the upstream context it was cut against and
+goes stale the moment the pin moves. Three hunks in the OpenGL renderer
+conflicted where upstream had swapped an assert macro and a fence call
+inside code the fork rewrites wholesale. Resolved in the fork's favour.
+Two mistakes on the way are now in `UPSTREAM.md` so nobody repeats them:
+a scratch repository lacks the blobs a three way merge needs and quietly
+degrades to rejecting every drifted hunk, and `git add -A` stages the
+untracked but unignored build directory, after which a `checkout --force`
+deletes the whole build tree. That second one cost a full rebuild.
+
+Verified by applying both patches to a fresh tree at the new pin and
+comparing all 91 files byte for byte. Halo on the headset: same frame
+rate, same stall profile, zero errors.
+
+### Blinx, and three fixes for a symptom I had never looked at
+
+Blinx on Deja Vu Canals ran at 6 to 10 fps with the GPU stalled 92 per
+cent of the time, all of it vertex buffer drains: about 5,000 per 5 s,
+150 a frame, with the GPU otherwise idle. Each drain uploaded about
+8 KiB, two pages. Upstream had measured the same shape on Dead or Alive
+and found roughly 92 per cent of every "vertex data changed" upload
+rewrites bytes identical to what was already there: the guest keeps per
+object state next to its vertex data and writes the whole block back.
+
+So an overlap written with identical bytes is no longer a hazard. The
+comparison runs over exactly the bytes a recorded draw reads, and drains
+only on a difference. The level went to 26 to 35 fps, and the enemies
+flickered.
+
+I then built three fixes for that flicker, each from careful reasoning
+about how a draw could read stale geometry, each reverted when the
+flicker survived. The second of them was a real correctness improvement
+anyway: reads are registered once a draw is actually in the command
+buffer, from `end_draw`, because a finish between the sync and the
+record used to clear them, which upstream had measured at 3.36 unguarded
+writes a frame. The third snapshotted an overlapping write so the compare
+and the copy see one read of memory the vCPU is still writing. Both
+stayed. Neither fixed the flicker.
+
+Two consecutive frames from a screen recording ended it in a minute. The
+enemy was not moving or tearing. It was absent in one frame and back in
+the next: a draw that did not happen. The report counters then said why
+in one line:
+
+```
+fast build   8 to 10 queries in flight, 208 to 953 skipped per 5 s, 0 drains
+slow build   0 in flight, 0 skipped
+```
+
+Blinx issues a handful of occlusion queries and waits for the answers.
+The FIFO goes idle with the same reports pending 100 to 190 times a
+second, and the limiter skipped every one until the flip, so the guest
+read a stale pixel count, decided the enemy was occluded, and skipped the
+draw. It had never shown before because the 150 vertex drains a frame
+had been servicing the report queue by accident. I removed the drains and
+removed the accidental servicing with them. The three vertex attempts
+were aimed at something that was never broken.
+
+The limiter now drains when the FIFO goes idle twice with the queue
+unchanged in between and no deeper than 32. A waiting guest's queue does
+not change between idles and is shallow; Halo's, which issues 237 a
+frame and never waits, grows between idles and sits at 45 to 72. The
+first version lacked the depth cap and cost Halo three frames a second,
+which nobody could feel and the counters caught in one sample.
+
+```
+Blinx, Deja Vu Canals   6 to 10 fps  ->  27.2 median, p10 22.0
+Halo, Pillar of Autumn  27.8 median  ->  29.4, against the console's 29.51
+```
+
+Two things worth saying plainly. The word "flicker" was doing all the
+work, and I modelled it for three attempts without looking at it; missing,
+moved, torn and smeared are four different bugs in four different places,
+and the frames cost nothing. And a cost that has been there a long time
+acquires dependents: nothing in the code said the report queue was
+serviced by the vertex drains, because nobody designed it that way, it
+was just true, and the things that happen inside a wait you delete are
+exactly the things with no test.
+
+### The first compatibility pass
+
+Six new discs, each played for a few minutes. Results are in the README
+table; the numbers and what they mean are here.
+
+**Dead or Alive 2 Ultimate: 66 fps median, the full 60 fps cap.** This is
+the title upstream used to measure the exact vertex work above; the
+identical-bytes skip ran 18,000 to 21,000 times per 5 s against 18 to 82
+real drains. As clean a confirmation as exists.
+
+**Jet Set Radio Future: 66.8 median, p10 63.6.** The boost dips to about
+25 for its duration, which upstream documents too (#995, with a fix open
+in PR #3096), though here the dip window reads as raw GPU time rather than
+the depth downloads they describe.
+
+**Doom 3: 32.0 median, p10 31.8**, locked for four minutes, 8 to 11 per
+cent stalled. Rated Perfect upstream, so it was the control, and it came
+back clean. One stutter on the first rocket impact and never again:
+synchronous pipeline creation on a new shader combination.
+
+**Project Gotham Racing 2: 28.4 median on a 30 fps target.** The first
+title to exercise surface downloads for real, about 750 ms per 5 s for
+the car paint reflections, and it waits on occlusion results the way
+Blinx does. Both paths work.
+
+**Halo 2: 32 fps for three minutes, then killed.** Physical footprint
+reached 8.0 GB in the Cairo Station boarding firefight, the guest
+collapsed to 3 to 5 fps with the GPU idle, and a jetsam event followed
+four seconds later. DOA2 sits at 4.1 GB; something in Halo 2's streaming
+grows without bound. The HUD shield bar and ammo boxes are missing from
+the first second, there is no zoom view, and NPC armour pops in.
+
+**Morrowind: hangs on the prison ship after the intro.** Zero frames for
+two and a half minutes with the vCPU running at 12,000 blocks a second
+and the translation count frozen, no new code: a poll loop on a device
+that never answers. Every build here runs with the APU DSP interpreted,
+because its JIT needs executable memory the platform refuses, and
+Morrowind is streaming dialogue at that exact moment. Hypothesis, not a
+finding, and the first thing to test.
+
+The pass also found two holes in the app rather than in any game.
+Launching from the icon with no debugger exits with "JIT needs a debugger
+attached" in the log and nothing on screen. And after that cold relaunch,
+two cards in the deck rendered overlapping with no gap.
+
+Ten minutes of two new games found more than three weeks of Halo had.
