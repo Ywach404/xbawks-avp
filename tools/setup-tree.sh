@@ -16,7 +16,7 @@ TREE="$ROOT/third_party/xemu"
 UPSTREAM_URL="https://github.com/xemu-project/xemu.git"
 
 # The single definition of the pin. UPSTREAM.md quotes it; this decides it.
-PIN="478b4f496102379c7eaa7f3ec10e714a703c4300"
+PIN="6095054b7d02dfac25fdc4a8ba9300358046e860"
 
 mode="${1:-}"
 

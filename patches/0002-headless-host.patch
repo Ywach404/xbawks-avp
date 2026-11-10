@@ -232,7 +232,7 @@ index 3429547..9187e85 100644
  
  dsp = declare_dependency(
 diff --git a/hw/xbox/nv2a/nv2a.c b/hw/xbox/nv2a/nv2a.c
-index 1565c05..2121ed9 100644
+index d6a2c2d..b597b3f 100644
 --- a/hw/xbox/nv2a/nv2a.c
 +++ b/hw/xbox/nv2a/nv2a.c
 @@ -77,6 +77,23 @@ DMAObject nv_dma_load(NV2AState *d, hwaddr dma_obj_address)
@@ -320,11 +320,89 @@ index fc52f60..ca105c5 100644
  subdir('glsl')
  subdir('vk')
  specific_ss.add(nv2a_vsh_cpu)
+diff --git a/hw/xbox/nv2a/pgraph/null/renderer.c b/hw/xbox/nv2a/pgraph/null/renderer.c
+index d4b7ea7..fcc504c 100644
+--- a/hw/xbox/nv2a/pgraph/null/renderer.c
++++ b/hw/xbox/nv2a/pgraph/null/renderer.c
+@@ -22,13 +22,24 @@
+ #include "qemu/thread.h"
+ #include "hw/xbox/nv2a/nv2a_int.h"
+ 
++/*
++ * The null renderer grew a GL context and a one pixel black texture
++ * upstream, to give the VGA fallback something to show. This build has no
++ * OpenGL at all (-Dopengl=disabled) and presents through Vulkan into a
++ * Metal texture, so none of it can link and none of it is wanted. Guarded
++ * rather than deleted, so the file still matches upstream on a desktop.
++ */
++#ifdef CONFIG_OPENGL
+ #include "gloffscreen.h"
+ 
+ static GloContext *g_null_gl_context;
++#endif
+ 
+ static void early_context_init(void)
+ {
++#ifdef CONFIG_OPENGL
+     g_null_gl_context = glo_context_create();
++#endif
+ }
+ 
+ static void pgraph_null_init(NV2AState *d, Error **errp)
+@@ -43,11 +54,13 @@ static void pgraph_null_finalize(NV2AState *d)
+     PGRAPHState *pg = &d->pgraph;
+     PGRAPHNullState *r = pg->null_renderer_state;
+     if (r) {
++#ifdef CONFIG_OPENGL
+         if (r->blank_texture) {
+             glo_set_current(g_null_gl_context);
+             glDeleteTextures(1, &r->blank_texture);
+             glo_set_current(NULL);
+         }
++#endif
+         g_free(r);
+         pg->null_renderer_state = NULL;
+     }
+@@ -147,6 +160,7 @@ static int pgraph_null_get_framebuffer_surface(NV2AState *d)
+     PGRAPHState *pg = &d->pgraph;
+     PGRAPHNullState *r = pg->null_renderer_state;
+     if (r) {
++#ifdef CONFIG_OPENGL
+         if (!r->blank_texture) {
+             static const uint8_t black_pixel[4] = { 0, 0, 0, 255 };
+             glGenTextures(1, &r->blank_texture);
+@@ -158,6 +172,7 @@ static int pgraph_null_get_framebuffer_surface(NV2AState *d)
+         }
+ 
+         return r->blank_texture;
++#endif
+     }
+ 
+     return 0;
+diff --git a/hw/xbox/nv2a/pgraph/null/renderer.h b/hw/xbox/nv2a/pgraph/null/renderer.h
+index ee4b44f..d520e92 100644
+--- a/hw/xbox/nv2a/pgraph/null/renderer.h
++++ b/hw/xbox/nv2a/pgraph/null/renderer.h
+@@ -21,10 +21,14 @@
+ #define HW_XBOX_NV2A_PGRAPH_NULL_RENDERER_H
+ 
+ #include "qemu/osdep.h"
++#ifdef CONFIG_OPENGL
+ #include <epoxy/gl.h>
++#endif
+ 
+ struct PGRAPHNullState {
++#ifdef CONFIG_OPENGL
+     GLuint blank_texture;
++#endif
+ };
+ 
+ #endif // HW_XBOX_NV2A_PGRAPH_NULL_RENDERER_H
 diff --git a/hw/xbox/nv2a/pgraph/pgraph.c b/hw/xbox/nv2a/pgraph/pgraph.c
-index 1e8ce7d..e12a724 100644
+index 6915676..0341930 100644
 --- a/hw/xbox/nv2a/pgraph/pgraph.c
 +++ b/hw/xbox/nv2a/pgraph/pgraph.c
-@@ -254,15 +254,20 @@ void pgraph_clear_dirty_reg_map(PGRAPHState *pg)
+@@ -272,15 +272,20 @@ void pgraph_clear_dirty_reg_map(PGRAPHState *pg)
  
  static CONFIG_DISPLAY_RENDERER get_default_renderer(void)
  {
@@ -350,7 +428,7 @@ index 1e8ce7d..e12a724 100644
  #endif
      fprintf(stderr, "Warning: No available renderer\n");
      return CONFIG_DISPLAY_RENDERER_NULL;
-@@ -355,6 +360,55 @@ void pgraph_destroy(PGRAPHState *pg)
+@@ -375,6 +380,55 @@ void pgraph_destroy(PGRAPHState *pg)
      qemu_mutex_destroy(&pg->lock);
  }
  
@@ -514,10 +592,10 @@ index 0e9fc9a..faae7d6 100644
      r->in_aux_command_buffer = false;
  }
 diff --git a/hw/xbox/nv2a/pgraph/vk/display.c b/hw/xbox/nv2a/pgraph/vk/display.c
-index d0442cc..7d359e7 100644
+index 198f675..666c40a 100644
 --- a/hw/xbox/nv2a/pgraph/vk/display.c
 +++ b/hw/xbox/nv2a/pgraph/vk/display.c
-@@ -201,7 +201,7 @@ static void upload_pvideo_image(PGRAPHState *pg, PvideoState state)
+@@ -203,7 +203,7 @@ static void upload_pvideo_image(PGRAPHState *pg, PvideoState state)
                                        VK_FORMAT_R8G8B8A8_UNORM,
                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -526,7 +604,7 @@ index d0442cc..7d359e7 100644
  }
  
  static const char *display_frag_glsl =
-@@ -1049,7 +1049,7 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
+@@ -1051,7 +1051,7 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
  
      pgraph_vk_end_debug_marker(r, cmd);
@@ -536,7 +614,7 @@ index d0442cc..7d359e7 100644
  
  #if HAVE_IOSURFACE_DISPLAY
 diff --git a/hw/xbox/nv2a/pgraph/vk/draw.c b/hw/xbox/nv2a/pgraph/vk/draw.c
-index f332788..47a0744 100644
+index f803e43..ff101e5 100644
 --- a/hw/xbox/nv2a/pgraph/vk/draw.c
 +++ b/hw/xbox/nv2a/pgraph/vk/draw.c
 @@ -18,6 +18,7 @@
@@ -603,7 +681,7 @@ index f332788..47a0744 100644
  }
  
  void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
-@@ -1662,8 +1697,39 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
+@@ -1663,8 +1698,39 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
          if (memory_region_test_and_clear_dirty(d->vram, addr, size,
                                                 DIRTY_MEMORY_NV2A)) {
              NV2A_VK_DPRINTF("Memory dirty. Synchronizing...");
@@ -643,7 +721,7 @@ index f332788..47a0744 100644
          }
      }
  
-@@ -1939,6 +2005,33 @@ typedef struct VertexBufferRemap {
+@@ -1940,6 +2006,33 @@ typedef struct VertexBufferRemap {
      } map[NV2A_VERTEXSHADER_ATTRIBUTES];
  } VertexBufferRemap;
  
@@ -677,7 +755,7 @@ index f332788..47a0744 100644
  static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
                                                      uint32_t num_vertices)
  {
-@@ -1946,6 +2039,8 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
+@@ -1947,6 +2040,8 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
  
      VertexBufferRemap remap = {0};
  
@@ -686,7 +764,7 @@ index f332788..47a0744 100644
      VkDeviceAddress output_offset = 0;
  
      for (int attr_id = 0; attr_id < NV2A_VERTEXSHADER_ATTRIBUTES; attr_id++) {
-@@ -1990,6 +2085,9 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
+@@ -1991,6 +2086,9 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
      }
  
      remap.buffer_space_required = output_offset;
@@ -729,7 +807,7 @@ index cbda578..2ec96d6 100644
          pgraph_vk_gpu_properties.no_geometry_shader = true;
          fprintf(stderr, "VK: no geometry shader support, using fast depth\n");
 diff --git a/hw/xbox/nv2a/pgraph/vk/instance.c b/hw/xbox/nv2a/pgraph/vk/instance.c
-index 7f7d5ab..d000506 100644
+index 430a40b..04307f9 100644
 --- a/hw/xbox/nv2a/pgraph/vk/instance.c
 +++ b/hw/xbox/nv2a/pgraph/vk/instance.c
 @@ -160,6 +160,7 @@ add_optional_instance_extension_names(PGRAPHState *pg,
@@ -915,7 +993,7 @@ index d69a31a..f5725a3 100644
  #endif
  }
 diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.h b/hw/xbox/nv2a/pgraph/vk/renderer.h
-index b805a76..ef9d812 100644
+index 9d8fefe..12ab2ae 100644
 --- a/hw/xbox/nv2a/pgraph/vk/renderer.h
 +++ b/hw/xbox/nv2a/pgraph/vk/renderer.h
 @@ -44,7 +44,17 @@
@@ -1074,7 +1152,7 @@ index b805a76..ef9d812 100644
      bool query_in_flight;
      uint32_t zpass_pixel_count_result;
      QSIMPLEQ_HEAD(, QueryReport) report_queue; // FIXME: Statically allocate
-@@ -501,7 +584,17 @@ VkDeviceSize pgraph_vk_append_to_buffer(PGRAPHState *pg, int index, void **data,
+@@ -502,7 +585,17 @@ VkDeviceSize pgraph_vk_append_to_buffer(PGRAPHState *pg, int index, void **data,
  void pgraph_vk_init_command_buffers(PGRAPHState *pg);
  void pgraph_vk_finalize_command_buffers(PGRAPHState *pg);
  VkCommandBuffer pgraph_vk_begin_single_time_commands(PGRAPHState *pg);
@@ -1093,7 +1171,7 @@ index b805a76..ef9d812 100644
  
  // image.c
  void pgraph_vk_transition_image_layout(PGRAPHState *pg, VkCommandBuffer cmd,
-@@ -531,6 +624,9 @@ void pgraph_vk_surface_flush(NV2AState *d);
+@@ -535,6 +628,9 @@ void pgraph_vk_surface_flush(NV2AState *d);
  void pgraph_vk_process_pending_downloads(NV2AState *d);
  void pgraph_vk_surface_download_if_dirty(NV2AState *d, SurfaceBinding *surface);
  SurfaceBinding *pgraph_vk_surface_get_within(NV2AState *d, hwaddr addr);
@@ -1102,8 +1180,8 @@ index b805a76..ef9d812 100644
 +bool pgraph_vk_present_size(NV2AState *d, int *w, int *h);
  void pgraph_vk_wait_for_surface_download(SurfaceBinding *e);
  void pgraph_vk_download_dirty_surfaces(NV2AState *d);
- void pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg, hwaddr start, hwaddr size);
-@@ -582,6 +678,17 @@ void pgraph_vk_clear_report_value(NV2AState *d);
+ unsigned int pgraph_vk_mark_surfaces_in_range_for_upload(NV2AState *d,
+@@ -589,6 +685,17 @@ void pgraph_vk_clear_report_value(NV2AState *d);
  void pgraph_vk_get_report(NV2AState *d, uint32_t parameter);
  void pgraph_vk_process_pending_reports(NV2AState *d);
  void pgraph_vk_process_pending_reports_internal(NV2AState *d);
@@ -1321,10 +1399,10 @@ index c860a9b..d293e38 100644
 +    *pool = r->drain_by_pool;
  }
 diff --git a/hw/xbox/nv2a/pgraph/vk/surface.c b/hw/xbox/nv2a/pgraph/vk/surface.c
-index 9d438f2..de11b84 100644
+index f61079b..33cb545 100644
 --- a/hw/xbox/nv2a/pgraph/vk/surface.c
 +++ b/hw/xbox/nv2a/pgraph/vk/surface.c
-@@ -444,7 +444,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
+@@ -463,7 +463,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
  
      nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_1);
      pgraph_vk_end_debug_marker(r, cmd);
@@ -1333,7 +1411,7 @@ index 9d438f2..de11b84 100644
  
      void *mapped_memory_ptr = NULL;
      VK_CHECK(vmaMapMemory(r->allocator,
-@@ -829,7 +829,7 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
+@@ -851,7 +851,7 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
  
      nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_3);
      pgraph_vk_end_debug_marker(r, cmd);
@@ -1342,7 +1420,7 @@ index 9d438f2..de11b84 100644
      nv2a_profile_inc_counter(NV2A_PROF_SURF_CREATE);
  }
  
-@@ -1267,7 +1267,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
+@@ -1289,7 +1289,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
  
      nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_2);
      pgraph_vk_end_debug_marker(r, cmd);
@@ -1351,7 +1429,7 @@ index 9d438f2..de11b84 100644
  
      surface->initialized = true;
  }
-@@ -1758,3 +1758,203 @@ void pgraph_vk_surface_flush(NV2AState *d)
+@@ -1774,3 +1774,203 @@ void pgraph_vk_surface_flush(NV2AState *d)
  
      pgraph_vk_reload_surface_scale_factor(pg);
  }
@@ -1556,7 +1634,7 @@ index 9d438f2..de11b84 100644
 +    qemu_event_set(&r->present_complete);
 +}
 diff --git a/hw/xbox/nv2a/pgraph/vk/texture.c b/hw/xbox/nv2a/pgraph/vk/texture.c
-index 5647275..cc46c66 100644
+index f1550f7..b954d62 100644
 --- a/hw/xbox/nv2a/pgraph/vk/texture.c
 +++ b/hw/xbox/nv2a/pgraph/vk/texture.c
 @@ -583,7 +583,7 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
@@ -1568,7 +1646,7 @@ index 5647275..cc46c66 100644
  
      // Release decoded texture data
      for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
-@@ -1022,7 +1022,7 @@ static void create_dummy_texture(PGRAPHState *pg)
+@@ -1025,7 +1025,7 @@ static void create_dummy_texture(PGRAPHState *pg)
                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
  
      pgraph_vk_end_debug_marker(r, cmd);
@@ -1577,7 +1655,7 @@ index 5647275..cc46c66 100644
  
      r->dummy_texture = (TextureBinding){
          .key.scale = 1.0,
-@@ -1546,8 +1546,24 @@ void pgraph_vk_init_textures(PGRAPHState *pg)
+@@ -1553,8 +1553,24 @@ void pgraph_vk_init_textures(PGRAPHState *pg)
  {
      PGRAPHVkState *r = pg->vk_renderer_state;
  
@@ -1761,7 +1839,7 @@ index e3881aa..e89eed5 100644
   * MAP_JIT protection of the current thread: -1 unknown, 0 write, 1 execute.
   * pthread_jit_write_protect_np() is costly and cpu_tb_exec() requests execute
 diff --git a/meson.build b/meson.build
-index 909017c..defc108 100644
+index 6944aef..e9712ef 100644
 --- a/meson.build
 +++ b/meson.build
 @@ -1882,10 +1882,17 @@ if not get_option('coreaudio').auto() or (host_os == 'darwin' and have_system)

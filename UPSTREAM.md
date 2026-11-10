@@ -25,8 +25,8 @@ apply.
 ## The pin
 
 - Upstream: `github.com/xemu-project/xemu`
-- Commit: `478b4f496102379c7eaa7f3ec10e714a703c4300`
-- Upstream date: 2026-09-28
+- Commit: `6095054b7d02dfac25fdc4a8ba9300358046e860`
+- Upstream date: 2026-11-02
 - `git describe`: `pre-release` (xemu does not tag releases in-tree)
 - Licence: GPL-2.0. QEMU's `LICENSE` and `COPYING` apply and xemu adds no
   separate licence. Upstream licence headers are preserved on every file.
@@ -37,6 +37,30 @@ file quotes it; that script decides it. Never restate it anywhere else.
 Submodules are 15 QEMU firmware ROMs and CI tooling, none xemu-specific. The
 xemu third-party code (ImGui, fpng, stb_image, fatx, Font Awesome) lives
 in-tree under `ui/thirdparty`.
+
+### Moving it
+
+Both patches have to be rebased, not just ours, because 0001 carries the
+upstream context it was cut against and goes stale the moment the pin
+moves. `refresh-patch.sh` only regenerates 0002 and will refuse outright
+when 0001 no longer applies, which is the correct failure and the signal
+that this is the job.
+
+The method, in the order that works:
+
+1. Check out the new pin in the tree and apply 0001 with `--3way`. It has
+   to be the real tree: a scratch repository lacks the blobs a three way
+   merge needs and falls back to a plain apply, which rejects every hunk
+   that merely drifted and silently loses them.
+2. Resolve whatever conflicts remain, then regenerate 0001 by staging
+   **only the files 0001 itself lists**. Never `git add -A`: the build
+   directory is untracked but not ignored, so staging everything puts
+   thousands of object files in the patch, and a later `git checkout
+   --force` then deletes the build tree because the index now claims it.
+3. Snapshot that state as the base, restore our work on top, and
+   regenerate 0002 against the base.
+4. Verify by applying both patches to a fresh tree at the new pin and
+   comparing every file byte for byte.
 
 ## The series
 
@@ -61,8 +85,12 @@ what comes out is ours by construction rather than by judgement.
 
 **Not ours.** `github.com/zlixas/xemu` at `99db55071ad8c4ac02fcdd65eb159abe68b4ae37`,
 branch `m4-perf`, 2026-10-03. GPL-2.0, same as xemu, so it is liftable with
-attribution. 56 files, +2270, -142. Verified 2026-10-24 to reconstruct that
-fork's source tree exactly.
+attribution. 56 files, +2273, -145. Verified 2026-10-24 to reconstruct
+that fork's source tree exactly against the pin of that date. Rebased
+2026-11-10 onto the current pin: three hunks in the OpenGL renderer had
+drifted, where upstream had replaced an assert macro and a fence call inside
+code the fork rewrites entirely, and were resolved in the fork's favour and
+kept verbatim. The delta is the fork's; the tree it applies to has moved.
 
 It is here because **upstream's Vulkan renderer cannot create a device on
 Metal**: it requires `geometryShader` unconditionally and Metal has no
