@@ -13,13 +13,13 @@ cd "$(dirname "$0")/../.."
 ROOT="$(pwd)"
 BUILD="$ROOT/third_party/xemu/build-xros"
 SYSROOT="${XROS_SYSROOT:-$ROOT/../_scratch/xros-sysroot}"
-APP="$ROOT/build-app/XemuHost.app"
-# Reusing an App ID that already has a provisioning profile on disk. Issuing
-# a new one needs Apple's servers, which is a dependency worth not having:
-# a free account gets ten App IDs a week and gsa.apple.com returns 503 often
-# enough to stop an evening dead. JITProbe's App ID is free, since S0 is
-# answered and the app is uninstalled.
-BUNDLE_ID="${XEMU_BUNDLE_ID:-local.jitprobe.s0}"
+APP="$ROOT/build-app/Xbawks.app"
+# The app's own identifier. It can be overridden for one run, which is how
+# an existing install keeps its data container: a different bundle id is a
+# different app to installd, with an empty Documents folder, so a headset
+# that already holds the BIOS, the disc images and the hard disk image with
+# its saves can be built against the old id until its files are moved.
+BUNDLE_ID="${XEMU_BUNDLE_ID:-com.acervantez.xbawks}"
 
 BIN="$BUILD/qemu-system-i386"
 [[ -f "$BIN" ]] || { echo "no visionOS binary. See tools/xros/README.md" >&2; exit 1; }
@@ -34,16 +34,16 @@ if [[ -f "$BUILD/build.ninja" ]]; then
 fi
 
 rm -rf "$APP"; mkdir -p "$APP/Frameworks"
-cp "$BIN" "$APP/XemuHost"
+cp "$BIN" "$APP/Xbawks"
 
-cmp -s "$BIN" "$APP/XemuHost" || { echo "copy mismatch" >&2; exit 1; }
+cmp -s "$BIN" "$APP/Xbawks" || { echo "copy mismatch" >&2; exit 1; }
 
 cat > "$APP/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleExecutable</key><string>XemuHost</string>
+	<key>CFBundleExecutable</key><string>Xbawks</string>
 	<key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
 	<key>CFBundleName</key><string>Xbawks</string>
 	<key>CFBundleDisplayName</key><string>XBAWKS</string>
@@ -100,7 +100,7 @@ if [[ -d "$SR/Frameworks/MoltenVK.framework" ]]; then
 fi
 
 # An iOS-family bundle has Frameworks beside the executable, not above it.
-install_name_tool -add_rpath "@executable_path/Frameworks" "$APP/XemuHost" 2>/dev/null || true
+install_name_tool -add_rpath "@executable_path/Frameworks" "$APP/Xbawks" 2>/dev/null || true
 for f in "$APP/Frameworks"/*.dylib; do
 	[[ -f "$f" ]] || continue
 	install_name_tool -id "@rpath/$(basename "$f")" "$f" 2>/dev/null || true
@@ -115,7 +115,7 @@ done
 # Frameworks because it belongs to the OS. dyld gives up before main().
 #
 # So: bundled means @rpath, everything else goes back to /usr/lib.
-for f in "$APP/XemuHost" "$APP/Frameworks"/*.dylib; do
+for f in "$APP/Xbawks" "$APP/Frameworks"/*.dylib; do
 	[[ -f "$f" ]] || continue
 	otool -L "$f" | tail -n +2 | awk '{print $1}' | while read -r dep; do
 		base="$(basename "$dep")"
@@ -133,10 +133,10 @@ done
 
 # The link leaves an absolute rpath into the build-time sysroot. Harmless on
 # this machine and meaningless on a headset.
-otool -l "$APP/XemuHost" | awk '/LC_RPATH/{f=1;next} f&&/path /{print $2;f=0}' | while read -r rp; do
+otool -l "$APP/Xbawks" | awk '/LC_RPATH/{f=1;next} f&&/path /{print $2;f=0}' | while read -r rp; do
 	case "$rp" in
 		@*) continue ;;
-		*) install_name_tool -delete_rpath "$rp" "$APP/XemuHost" 2>/dev/null || true ;;
+		*) install_name_tool -delete_rpath "$rp" "$APP/Xbawks" 2>/dev/null || true ;;
 	esac
 done
 
@@ -200,7 +200,7 @@ echo "  frameworks: $(ls "$APP/Frameworks" | wc -l | xargs)"
 if [[ -d "$APP/media" ]] && [[ -n "$(ls -A "$APP/media" 2>/dev/null)" ]]; then
 	# And remove any IPA left from an earlier medialess build, so a stale
 	# one cannot be picked up and uploaded in place of the refused one.
-	rm -f "$ROOT/build-app/XemuHost.ipa"
+	rm -f "$ROOT/build-app/Xbawks.ipa"
 	echo
 	echo "  no IPA: the bundle carries media ($(ls "$APP/media" | tr '\n' ' '))"
 	echo "  install the .app directly:"
@@ -209,7 +209,7 @@ if [[ -d "$APP/media" ]] && [[ -n "$(ls -A "$APP/media" 2>/dev/null)" ]]; then
 	echo "  built $APP"
 	exit 0
 fi
-IPA="$ROOT/build-app/XemuHost.ipa"
+IPA="$ROOT/build-app/Xbawks.ipa"
 rm -rf "$ROOT/build-app/Payload" "$IPA"
 mkdir -p "$ROOT/build-app/Payload"
 cp -R "$APP" "$ROOT/build-app/Payload/"

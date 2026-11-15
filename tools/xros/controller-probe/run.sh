@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Build, bundle, sign, install and launch the controller probe. It reuses
-# the XemuHost bundle id and profile, so it replaces XemuHost on the device
+# the app's bundle id and profile, so it replaces Xbawks on the device
 # until make-app.sh and sign-install.sh put it back.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 ROOT="$(pwd)"
 SDK="$(xcrun -sdk xros --show-sdk-path)"
 APP="$ROOT/build-app/ControllerProbe.app"
-BUNDLE_ID="${XEMU_BUNDLE_ID:-local.jitprobe.s0}"
+BUNDLE_ID="${XEMU_BUNDLE_ID:-com.acervantez.xbawks}"
 # The first physical Vision Pro devicectl knows about, unless told otherwise.
 UDID="${XROS_UDID:-$(xcrun devicectl list devices 2>/dev/null | awk '/physical/ && /Vision Pro/ {print $(NF-4); exit}')}"
 [[ -n "$UDID" ]] || { echo "no Vision Pro found; set XROS_UDID" >&2; exit 1; }

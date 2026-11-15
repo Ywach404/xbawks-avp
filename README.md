@@ -76,7 +76,7 @@ You need a Mac with Xcode, a Vision Pro on visionOS 26 or later, a free Apple de
 ```sh
 tools/xros/make-app.sh        # cross compile and assemble the bundle
 tools/xros/sign-install.sh    # sign with your profile
-xcrun devicectl device install app --device <udid> build-app/XemuHost.app
+xcrun devicectl device install app --device <udid> build-app/Xbawks.app
 apparition jit <bundle id>    # launch; attaches, prepares, detaches
 ```
 

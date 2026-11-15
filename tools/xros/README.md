@@ -57,9 +57,9 @@ branches that `ios` loses quietly.
 ## From a binary to a running app
 
 ```sh
-tools/xros/make-app.sh          # rebuilds, assembles build-app/XemuHost.app, copies media
+tools/xros/make-app.sh          # rebuilds, assembles build-app/Xbawks.app; media only if named
 tools/xros/sign-install.sh      # signs with the first Apple Development identity in the keychain
-xcrun devicectl device install app --device <udid> build-app/XemuHost.app
+xcrun devicectl device install app --device <udid> build-app/Xbawks.app
 apparition jit <bundle id>      # launches; attaches, prepares the JIT buffer, detaches
 ```
 
@@ -90,10 +90,20 @@ directly for a device run, which is what `sign-install.sh` and
 
 None of these files is in the repository and none of them should be.
 
-The provisioning profile comes from Xcode. On a free account it lasts seven
-days; `DEV_TEAM=<team id> make device` in `probes/jit-probe` refreshes it, and
-`sign-install.sh` picks up whatever matching profile is on disk, exact or team
-wildcard. The bundle id has to be one a profile exists for.
+The provisioning profile comes from Xcode's own store on the Mac.
+`sign-install.sh` takes an exact profile for the bundle id if one exists,
+and otherwise the team wildcard, rewriting the signed application
+identifier to the real bundle id because installd refuses an upgrade whose
+identifier does not match the installed app. A paid team profile lasts a
+year; a free account's lasts seven days and is refreshed by building any
+app with that bundle id in Xcode.
+
+The bundle id defaults to `com.acervantez.xbawks`. `XEMU_BUNDLE_ID=<id>`
+overrides it for one build. That matters on a headset that already holds
+the BIOS, the discs and the hard disk image with its saves: those live in
+the app's data container, a different bundle id is a different app with an
+empty container, and nothing migrates one to the other. Build against the
+old id until the files have been moved across in Files, then switch.
 
 Apparition attaches once and detaches; the app runs on its own afterwards. If
 a launch sits at "Launching" and never attaches, the headset's debug service

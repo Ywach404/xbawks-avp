@@ -4,8 +4,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT="$(pwd)"
-APP="${XEMU_APP:-$ROOT/build-app/XemuHost.app}"
-BUNDLE_ID="${XEMU_BUNDLE_ID:-local.jitprobe.s0}"
+APP="${XEMU_APP:-$ROOT/build-app/Xbawks.app}"
+BUNDLE_ID="${XEMU_BUNDLE_ID:-com.acervantez.xbawks}"
 # The first Apple Development identity in the keychain, unless told otherwise.
 IDENTITY="${XEMU_IDENTITY:-$(security find-identity -p codesigning -v 2>/dev/null \
 	| grep -m1 -o '"Apple Development: [^"]*"' | tr -d '"')}"

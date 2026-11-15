@@ -3495,7 +3495,7 @@ index 0000000..1ae2184
 +}
 diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
 new file mode 100644
-index 0000000..f297d9f
+index 0000000..9de704b
 --- /dev/null
 +++ b/ui/xemu-host-app.swift
 @@ -0,0 +1,628 @@
@@ -3513,8 +3513,8 @@ index 0000000..f297d9f
 +import RealityKit
 +import Metal
 +
-+@main struct XemuHostApp: App {
-+    @UIApplicationDelegateAdaptor(XemuHostAppDelegate.self) var delegate
++@main struct XbawksApp: App {
++    @UIApplicationDelegateAdaptor(XbawksAppDelegate.self) var delegate
 +
 +    /// Reads the controllers on a display link. It is a view controller
 +    /// because it was one when the frame lived in a window; its view is
@@ -3542,7 +3542,7 @@ index 0000000..f297d9f
 +        xemu_host_prepare()
 +        let vc = XemuScreenViewController()
 +        vc.loadViewIfNeeded()
-+        XemuHostApp.ticker = vc
++        XbawksApp.ticker = vc
 +    }
 +
 +    var body: some SwiftUI.Scene {
@@ -3571,13 +3571,13 @@ index 0000000..f297d9f
 +        ImmersiveSpace(id: "screen") {
 +            ScreenSpace()
 +                .onAppear {
-+                    XemuHostApp.spaceIsOpen = true
-+                    fputs("[host] boot \(XemuHostApp.sinceLaunch()): "
++                    XbawksApp.spaceIsOpen = true
++                    fputs("[host] boot \(XbawksApp.sinceLaunch()): "
 +                          + "screen appeared\n", stderr)
 +                    fputs("[host] immersive space appeared\n", stderr); fflush(stderr)
 +                }
 +                .onDisappear {
-+                    XemuHostApp.spaceIsOpen = false
++                    XbawksApp.spaceIsOpen = false
 +                    fputs("[host] immersive space disappeared\n", stderr); fflush(stderr)
 +                }
 +        }
@@ -3651,9 +3651,9 @@ index 0000000..f297d9f
 +                        .multilineTextAlignment(.center)
 +                        .padding(.horizontal, 40)
 +
-+                    Button(XemuHostApp.spaceIsOpen ? "Back to the game"
++                    Button(XbawksApp.spaceIsOpen ? "Back to the game"
 +                                                   : "Resume") {
-+                        if XemuHostApp.spaceIsOpen {
++                        if XbawksApp.spaceIsOpen {
 +                            back()
 +                        } else {
 +                            Task { await open() }
@@ -3706,7 +3706,7 @@ index 0000000..f297d9f
 +             * session, opening it again either fails or dismisses the
 +             * window that was just asked for.
 +             */
-+            if !XemuHostApp.spaceIsOpen {
++            if !XbawksApp.spaceIsOpen {
 +                let result = await openImmersive(id: "screen")
 +                fputs("[host] launcher: screen \(result)\n", stderr)
 +                fflush(stderr)
@@ -3735,7 +3735,7 @@ index 0000000..f297d9f
 +            xemu_host_start_with_disc(nil)
 +        }
 +        started = true
-+        if XemuHostApp.spaceIsOpen {
++        if XbawksApp.spaceIsOpen {
 +            dismissWindow(id: "launcher")
 +        } else {
 +            await open()
@@ -3752,7 +3752,7 @@ index 0000000..f297d9f
 +    }
 +
 +    @MainActor private func back() {
-+        if XemuHostApp.spaceIsOpen {
++        if XbawksApp.spaceIsOpen {
 +            dismissWindow(id: "launcher")
 +        } else {
 +            Task { await open() }
@@ -3808,7 +3808,7 @@ index 0000000..f297d9f
 +            console.position = ConsolePlacement.loadPosition()
 +            console.orientation = ConsolePlacement.loadRotation()
 +            content.add(console)
-+            fputs("[host] boot \(XemuHostApp.sinceLaunch()): console ready "
++            fputs("[host] boot \(XbawksApp.sinceLaunch()): console ready "
 +                  + "(\(String(format: "%.2fs", -t0.timeIntervalSinceNow)) "
 +                  + "to build it)\n", stderr)
 +            fflush(stderr)
@@ -4082,7 +4082,7 @@ index 0000000..f297d9f
 +            shown += 1
 +            if shown == 1 {
 +                entity?.isEnabled = true
-+                fputs("[host] boot \(XemuHostApp.sinceLaunch()): "
++                fputs("[host] boot \(XbawksApp.sinceLaunch()): "
 +                      + "first GPU frame\n", stderr)
 +            }
 +            if shown <= 3 || shown % 600 == 0 {
@@ -4129,7 +4129,7 @@ index 0000000..f297d9f
 +}
 diff --git a/ui/xemu-host-bridge.h b/ui/xemu-host-bridge.h
 new file mode 100644
-index 0000000..ec21fa8
+index 0000000..b2ddfd5
 --- /dev/null
 +++ b/ui/xemu-host-bridge.h
 @@ -0,0 +1,47 @@
@@ -4174,7 +4174,7 @@ index 0000000..ec21fa8
 +uint64_t xemu_host_frame_take(uint64_t last_seq, void **bgra, int *w, int *h);
 +
 +/* Spawns the emulator thread from didFinishLaunching. */
-+@interface XemuHostAppDelegate : UIResponder <UIApplicationDelegate>
++@interface XbawksAppDelegate : UIResponder <UIApplicationDelegate>
 +@end
 +
 +/* Shows the guest's frame and reads the controllers on a display link. */
@@ -4182,7 +4182,7 @@ index 0000000..ec21fa8
 +@end
 diff --git a/ui/xemu-host-ios.m b/ui/xemu-host-ios.m
 new file mode 100644
-index 0000000..ae6eac2
+index 0000000..846c443
 --- /dev/null
 +++ b/ui/xemu-host-ios.m
 @@ -0,0 +1,869 @@
@@ -4986,7 +4986,7 @@ index 0000000..ae6eac2
 +
 +@end
 +
-+@implementation XemuHostAppDelegate
++@implementation XbawksAppDelegate
 +
 +- (BOOL)application:(UIApplication *)application
 +    didFinishLaunchingWithOptions:(NSDictionary *)options
@@ -5033,7 +5033,7 @@ index 0000000..ae6eac2
 + */
 +void xemu_host_prepare(void)
 +{
-+    static char *argv0[] = { "XemuHost", NULL };
++    static char *argv0[] = { "Xbawks", NULL };
 +    g_argc = 1;
 +    g_argv = argv0;
 +    /*
