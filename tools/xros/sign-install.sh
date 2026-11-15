@@ -5,7 +5,11 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT="$(pwd)"
 APP="${XEMU_APP:-$ROOT/build-app/Xbawks.app}"
-BUNDLE_ID="${XEMU_BUNDLE_ID:-com.acervantez.xbawks}"
+# The id the app was built with, unless told otherwise. make-app.sh already
+# honoured XEMU_BUNDLE_ID when it wrote the Info.plist, so reading it back
+# here means the override is given once. Signing with a different id than
+# the plist carries is how installd rejects the upgrade (2026-11-13).
+BUNDLE_ID="${XEMU_BUNDLE_ID:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist" 2>/dev/null || echo com.acervantez.xbawks)}"
 # The first Apple Development identity in the keychain, unless told otherwise.
 IDENTITY="${XEMU_IDENTITY:-$(security find-identity -p codesigning -v 2>/dev/null \
 	| grep -m1 -o '"Apple Development: [^"]*"' | tr -d '"')}"
