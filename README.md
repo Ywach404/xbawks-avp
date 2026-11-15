@@ -6,6 +6,13 @@ An original Xbox emulator for Apple Vision Pro, running on the headset itself. I
 
 As far as I can find, it is the first standalone, JIT based original Xbox emulator on the platform. The dashboard boots, a retail disc boots, and the game runs at its own frame rate on the headset's M5.
 
+**What you need, before anything else:**
+
+- **[Apparition](https://apparition.illixion.com) on a Mac on the same network, every time you launch.** visionOS will not let an app make its own memory executable, and an emulator's JIT needs exactly that. Apparition attaches as a debugger for about two seconds at launch, prepares the code buffer, and detaches; without it the emulator refuses to start and says so in its log. This is not optional and there is no workaround on current visionOS. See [Why it needs a debugger to start](#why-it-needs-a-debugger-to-start).
+- **Your own console's files.** Xbawks ships no Microsoft code and no game data: no boot ROM, no BIOS, no disc images. You supply them from your own hardware. See [What you bring](#what-you-bring).
+
+The full story of how it got here, every measurement and every wrong turn, is in [`DEVLOG.md`](DEVLOG.md).
+
 ![The Xbox dashboard running in an immersive space](docs/media/dashboard.gif)
 
 ![A game running from a disc image](docs/media/gameplay.gif)
@@ -60,7 +67,7 @@ One rule that took days to find and is written nowhere: the buffer has to be cre
 
 ## Why there is no window
 
-With the immersive space open, the Sense controllers belong to the app, except while you are looking at one of the app's windows; then visionOS turns them back into that window's pointer. So the game is a plane inside the space, and the only window is a small launcher that opens the space and gets out of the way.
+With the immersive space open, the Sense controllers belong to the app, except while you are looking at one of the app's windows; then visionOS turns them back into that window's pointer. So the game is a plane inside the space, and the only window is a small launcher that opens the space and gets out of the way. Everything you touch during play is an object in the room instead: the console itself is the control, and the disc deck it brings up is attached to it, because a window opened mid session sends the whole space to the background and pauses the machine.
 
 ## Building and installing
 
@@ -75,7 +82,13 @@ apparition jit <bundle id>    # launch; attaches, prepares, detaches
 
 ## What you bring
 
-Xbawks ships no game data. Like xemu, it needs an MCPX boot ROM, a BIOS image, a hard disk image and your own disc images, which you obtain from your own console. They are never part of this repository, and `.gitignore` refuses them as a backstop.
+Xbawks ships no game data and no Microsoft code, and it never downloads any. Like xemu, it needs four things you supply yourself, placed in the app's `Documents` folder in Files:
+
+- an **MCPX boot ROM** and a **BIOS image**, both Microsoft's, dumped from your own console
+- a **hard disk image**, which xemu's own tooling creates blank, and which then holds your saves
+- your **disc images**, dumped from discs you own, in `Documents/GAMES`
+
+None of these are part of this repository or of any build it produces. The build script copies nothing unless a variable names it explicitly for that run, and refuses to produce an IPA at all if it did; `.gitignore` denies the files and a push guard refuses them on every remote, as backstops. Run the build with nothing set and list the output: that is the test, and it is what the repository is held to.
 
 ## Layout
 
