@@ -159,6 +159,80 @@ index 410bf21..1667131 100755
  
    rm -rf meson-private meson-info meson-logs
  
+diff --git a/hw/ide/core.c b/hw/ide/core.c
+index 26fb5a6..460f744 100644
+--- a/hw/ide/core.c
++++ b/hw/ide/core.c
+@@ -42,6 +42,34 @@
+ #include "system/replay.h"
+ #include "system/runstate.h"
+ #include "ide-internal.h"
++#include "hw/ide/pci.h"
++
++/*
++ * One drive's state for the host sampler: a guest that has gone quiet
++ * waiting for a disc read shows up here as a command left in flight,
++ * BUSY or DRQ set with nothing moving, or a DMA that was started and
++ * never finished. Called under the big lock.
++ */
++void xemu_ide_state_line(BlockBackend *blk, char *buf, size_t len)
++{
++    DeviceState *ds = blk_get_attached_dev(blk);
++    if (!ds) {
++        snprintf(buf, len, "unattached");
++        return;
++    }
++    IDEDevice *dev = IDE_DEVICE(ds);
++    IDEBus *bus = IDE_BUS(qdev_get_parent_bus(ds));
++    IDEState *s = &bus->ifs[dev->unit];
++    BMDMAState *bm = bus->dma ? container_of(bus->dma, BMDMAState, dma) : NULL;
++    snprintf(buf, len,
++             "st=%02x err=%02x nsec=%x lba=%d pkt=%d elem=%d atapi_dma=%d "
++             "pio_aio=%d xfer=%d sel=%d bm_cmd=%02x bm_st=%02x",
++             s->status, s->error, s->nsector, s->lba,
++             s->packet_transfer_size, s->elementary_transfer_size,
++             s->atapi_dma, s->pio_aiocb != NULL,
++             s->end_transfer_func != NULL, bus->unit,
++             bm ? bm->cmd : 0, bm ? bm->status : 0);
++}
+ #include "trace.h"
+ 
+ /* These values were based on a Seagate ST3500418AS but have been modified
+diff --git a/hw/xbox/mcpx/apu/apu.c b/hw/xbox/mcpx/apu/apu.c
+index 1ee6dc4..f284573 100644
+--- a/hw/xbox/mcpx/apu/apu.c
++++ b/hw/xbox/mcpx/apu/apu.c
+@@ -23,6 +23,30 @@
+ 
+ MCPXAPUState *g_state; // Used via debug handlers
+ 
++/* Frames the APU has run since reset. Frozen means the guest's audio
++ * clock, its FIFO cursors and its notifiers are all frozen with it. */
++unsigned long xemu_apu_frame_count(void)
++{
++    return g_state ? (unsigned long)g_state->ep_frame_div : 0;
++}
++
++/* The interrupt and front end registers the guest's audio driver lives by. */
++void xemu_apu_state_line(char *buf, size_t len)
++{
++    extern unsigned xemu_apu_voices[2];
++    MCPXAPUState *d = g_state;
++    if (!d) {
++        buf[0] = 0;
++        return;
++    }
++    snprintf(buf, len,
++             "ists=%x ien=%x fectl=%x sectl=%x irq_pending=%d "
++             "voices active=%u idle=%u",
++             d->regs[NV_PAPU_ISTS], d->regs[NV_PAPU_IEN],
++             d->regs[NV_PAPU_FECTL], d->regs[NV_PAPU_SECTL],
++             (int)d->set_irq, xemu_apu_voices[0], xemu_apu_voices[1]);
++}
++
+ static void update_irq(MCPXAPUState *d)
+ {
+     if (d->regs[NV_PAPU_FECTL] & NV_PAPU_FECTL_FEMETHMODE_TRAPPED) {
 diff --git a/hw/xbox/mcpx/apu/dsp/dsp.c b/hw/xbox/mcpx/apu/dsp/dsp.c
 index 0d844af..ea612ed 100644
 --- a/hw/xbox/mcpx/apu/dsp/dsp.c
@@ -231,6 +305,59 @@ index 3429547..9187e85 100644
  )
  
  dsp = declare_dependency(
+diff --git a/hw/xbox/mcpx/apu/vp/vp.c b/hw/xbox/mcpx/apu/vp/vp.c
+index 533ca78..f169e24 100644
+--- a/hw/xbox/mcpx/apu/vp/vp.c
++++ b/hw/xbox/mcpx/apu/vp/vp.c
+@@ -34,6 +34,9 @@ static const struct {
+     { NV_PAPU_TVLMP, NV_PAPU_CVLMP, NV_PAPU_NVLMP }, // MP
+ };
+ 
++/* Notifier bytes written into guest RAM; the guest polls these. */
++unsigned long xemu_apu_notifies;
++
+ static void set_notify_status(MCPXAPUState *d, uint32_t v, int notifier,
+                               int status)
+ {
+@@ -45,6 +48,7 @@ static void set_notify_status(MCPXAPUState *d, uint32_t v, int notifier,
+     // FIXME: Check notify enable
+     // FIXME: Set NV1BA0_NOTIFICATION_STATUS_IN_PROGRESS when appropriate
+     stb_phys(&address_space_memory, notify_offset, status);
++    xemu_apu_notifies++;
+ 
+     // FIXME: Refactor this out of here
+     // FIXME: Actually provied current envelope state
+@@ -1827,8 +1831,12 @@ static void voice_work_finalize(MCPXAPUState *d)
+     vwd->workers = NULL;
+ }
+ 
++/* Voices on the lists in the latest frame: [0] active, [1] idle. */
++unsigned xemu_apu_voices[2];
++
+ void mcpx_apu_vp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
+ {
++    unsigned seen_active = 0, seen_idle = 0;
+     memset(d->vp.sample_buf, 0, sizeof(d->vp.sample_buf));
+ 
+     /* Process all voices, mixing each into the affected MIXBINs */
+@@ -1853,13 +1861,17 @@ void mcpx_apu_vp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_P
+                                NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);
+             if (!voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
+                                 NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE)) {
++                seen_idle++;
+                 fe_method(d, SE2FE_IDLE_VOICE, v);
+             } else {
++                seen_active++;
+                 voice_work_enqueue(d, v, list);
+             }
+             d->regs[current] = d->regs[next];
+         }
+     }
++    xemu_apu_voices[0] = seen_active;
++    xemu_apu_voices[1] = seen_idle;
+     voice_work_dispatch(d, mixbins);
+ 
+     if (d->monitor.point == MCPX_APU_DEBUG_MON_VP) {
 diff --git a/hw/xbox/nv2a/nv2a.c b/hw/xbox/nv2a/nv2a.c
 index d6a2c2d..b597b3f 100644
 --- a/hw/xbox/nv2a/nv2a.c
@@ -303,6 +430,72 @@ index 2a9b731..7414129 100644
  void nv2a_release_framebuffer_surface(void);
  void nv2a_set_surface_scale_factor(unsigned int scale);
  unsigned int nv2a_get_surface_scale_factor(void);
+diff --git a/hw/xbox/nv2a/pfifo.c b/hw/xbox/nv2a/pfifo.c
+index 66cc710..cb99555 100644
+--- a/hw/xbox/nv2a/pfifo.c
++++ b/hw/xbox/nv2a/pfifo.c
+@@ -108,6 +108,41 @@ static bool can_fifo_access(NV2AState *d) {
+ /* If NV097_FLIP_STALL was executed, check if the flip has completed.
+  * This will usually happen in the VSYNC interrupt handler.
+  */
++/*
++ * The FIFO's stall state in one line, for the host sampler. A guest that
++ * spins on a fence the GPU never wrote is explained by whichever of these
++ * is holding the pusher.
++ */
++unsigned long xemu_semaphore_releases;
++unsigned long xemu_report_timed_wakes;
++void pfifo_state_line(char *buf, size_t len)
++{
++    NV2AState *d = g_nv2a_for_stats();
++    if (!d) {
++        buf[0] = 0;
++        return;
++    }
++    PGRAPHState *pg = &d->pgraph;
++    uint32_t surface = pgraph_reg_r(pg, NV_PGRAPH_SURFACE);
++    uint32_t fifo = pgraph_reg_r(pg, NV_PGRAPH_FIFO);
++    snprintf(buf, len,
++             "dma get=%x put=%x push=%x pull0=%x fifo_access=%d "
++             "flip=%d nop=%d ctxsw=%d read3d=%u write3d=%u halt=%d "
++             "semaphores=%lu timed_wakes=%lu",
++             d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET],
++             d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT],
++             d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUSH],
++             d->pfifo.regs[NV_PFIFO_CACHE1_PULL0],
++             (int)GET_MASK(fifo, NV_PGRAPH_FIFO_ACCESS),
++             (int)qatomic_read(&pg->waiting_for_flip),
++             (int)qatomic_read(&pg->waiting_for_nop),
++             (int)qatomic_read(&pg->waiting_for_context_switch),
++             (unsigned)GET_MASK(surface, NV_PGRAPH_SURFACE_READ_3D),
++             (unsigned)GET_MASK(surface, NV_PGRAPH_SURFACE_WRITE_3D),
++             (int)d->pfifo.halt,
++             xemu_semaphore_releases, xemu_report_timed_wakes);
++}
++
+ static bool is_flip_stall_complete(NV2AState *d)
+ {
+     PGRAPHState *pg = &d->pgraph;
+@@ -482,7 +517,18 @@ void *pfifo_thread(void *arg)
+             qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
+ 
+             // Both the pusher and puller are waiting for some action
+-            qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
++            if (qatomic_read(&d->pgraph.reports_deferred)) {
++                /*
++                 * A report drain was put off. The second look that the
++                 * policy wants has to come from somewhere, and a guest
++                 * waiting on the result gives no kick, so look again in
++                 * a millisecond. See pgraph_vk_process_pending_reports.
++                 */
++                xemu_report_timed_wakes++;
++                qemu_cond_timedwait(&d->pfifo.fifo_cond, &d->pfifo.lock, 1);
++            } else {
++                qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
++            }
+         }
+ 
+         if (d->exiting) {
 diff --git a/hw/xbox/nv2a/pgraph/meson.build b/hw/xbox/nv2a/pgraph/meson.build
 index fc52f60..ca105c5 100644
 --- a/hw/xbox/nv2a/pgraph/meson.build
@@ -399,7 +592,7 @@ index ee4b44f..d520e92 100644
  
  #endif // HW_XBOX_NV2A_PGRAPH_NULL_RENDERER_H
 diff --git a/hw/xbox/nv2a/pgraph/pgraph.c b/hw/xbox/nv2a/pgraph/pgraph.c
-index 6915676..0341930 100644
+index 6915676..4251eee 100644
 --- a/hw/xbox/nv2a/pgraph/pgraph.c
 +++ b/hw/xbox/nv2a/pgraph/pgraph.c
 @@ -272,15 +272,20 @@ void pgraph_clear_dirty_reg_map(PGRAPHState *pg)
@@ -484,6 +677,32 @@ index 6915676..0341930 100644
  int nv2a_get_framebuffer_surface(void)
  {
      NV2AState *d = g_nv2a;
+@@ -2791,6 +2845,10 @@ DEF_METHOD(NV097, BACK_END_WRITE_SEMAPHORE_RELEASE)
+     semaphore_data += semaphore_offset;
+ 
+     stl_le_p((uint32_t*)semaphore_data, parameter);
++    {
++        extern unsigned long xemu_semaphore_releases;
++        xemu_semaphore_releases++;
++    }
+     xbox_poll_notify();
+ 
+     //qemu_mutex_lock(&d->pgraph.lock);
+diff --git a/hw/xbox/nv2a/pgraph/pgraph.h b/hw/xbox/nv2a/pgraph/pgraph.h
+index 70a0ca8..ead4fb8 100644
+--- a/hw/xbox/nv2a/pgraph/pgraph.h
++++ b/hw/xbox/nv2a/pgraph/pgraph.h
+@@ -249,6 +249,10 @@ typedef struct PGRAPHState {
+     bool clearing; // FIXME: Internal
+     bool waiting_for_nop;
+     bool waiting_for_flip;
++    /* Reports are queued and the FIFO is idle, but the drain policy chose
++     * to wait. The FIFO thread must then wake on its own to look again,
++     * because a guest that is spinning on the result will not kick it. */
++    bool reports_deferred;
+     bool waiting_for_context_switch;
+ 
+     bool flush_pending;
 diff --git a/hw/xbox/nv2a/pgraph/vk/buffer.c b/hw/xbox/nv2a/pgraph/vk/buffer.c
 index d87c875..122d16f 100644
 --- a/hw/xbox/nv2a/pgraph/vk/buffer.c
@@ -1259,7 +1478,7 @@ index 9d8fefe..7190ed7 100644
  typedef enum FinishReason {
      VK_FINISH_REASON_VERTEX_BUFFER_DIRTY,
 diff --git a/hw/xbox/nv2a/pgraph/vk/reports.c b/hw/xbox/nv2a/pgraph/vk/reports.c
-index c860a9b..5d16315 100644
+index c860a9b..796a6e0 100644
 --- a/hw/xbox/nv2a/pgraph/vk/reports.c
 +++ b/hw/xbox/nv2a/pgraph/vk/reports.c
 @@ -142,9 +142,106 @@ void pgraph_vk_process_pending_reports_internal(NV2AState *d)
@@ -1369,7 +1588,7 @@ index c860a9b..5d16315 100644
  void pgraph_vk_process_pending_reports(NV2AState *d)
  {
      PGRAPHState *pg = &d->pgraph;
-@@ -153,8 +250,122 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
+@@ -153,8 +250,133 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
      uint32_t *dma_get = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET];
      uint32_t *dma_put = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT];
  
@@ -1378,6 +1597,7 @@ index c860a9b..5d16315 100644
 -        pgraph_vk_finish(pg, VK_FINISH_REASON_STALLED);
 +    if (!(*dma_get == *dma_put && r->in_command_buffer &&
 +          !QSIMPLEQ_EMPTY(&r->report_queue))) {
++        qatomic_set(&pg->reports_deferred, false);
 +        return;
 +    }
 +
@@ -1431,6 +1651,15 @@ index c860a9b..5d16315 100644
 +        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 +        if (now - r->last_report_service_ns < REPORT_SERVICE_BREAKER_NS) {
 +            r->report_drains_skipped++;
++            /*
++             * 2026-11-15: Morrowind. One visibility test pending, the
++             * FIFO idle, and the game spinning on the result with
++             * nothing else to push. Nothing kicked the FIFO thread, so
++             * "idle twice" never had a second look and the game waited
++             * forever on the prison ship. Deferring is fine; sleeping
++             * without an alarm is not.
++             */
++            qatomic_set(&pg->reports_deferred, true);
 +            return;
 +        }
 +        r->drain_by_clock++;
@@ -1443,6 +1672,7 @@ index c860a9b..5d16315 100644
 +
 +    r->report_drains++;
 +    r->report_queue_depth_sum += depth;
++    qatomic_set(&pg->reports_deferred, false);
 +    pgraph_vk_finish(pg, VK_FINISH_REASON_STALLED);
 +}
 +
@@ -2050,6 +2280,45 @@ index e3881aa..e89eed5 100644
  /*
   * MAP_JIT protection of the current thread: -1 unknown, 0 write, 1 execute.
   * pthread_jit_write_protect_np() is costly and cpu_tb_exec() requests execute
+diff --git a/include/system/memory.h b/include/system/memory.h
+index 33b5523..5cc0a19 100644
+--- a/include/system/memory.h
++++ b/include/system/memory.h
+@@ -2708,6 +2708,34 @@ bool memory_region_access_valid(MemoryRegion *mr, hwaddr addr,
+                                 unsigned size, bool is_write,
+                                 MemTxAttrs attrs);
+ 
++/* Per-region and per-address guest read counts; see system/memory.c. */
++#define XEMU_IO_REGIONS 48
++#define XEMU_IO_ADDRS 512
++typedef struct XemuIoRegionStat {
++    const char *name;
++    unsigned long count;
++} XemuIoRegionStat;
++typedef struct XemuIoAddrStat {
++    const char *name;
++    uint64_t addr;
++    unsigned long count;
++} XemuIoAddrStat;
++extern XemuIoRegionStat xemu_io_regions[XEMU_IO_REGIONS];
++extern int xemu_io_num_regions;
++extern XemuIoAddrStat xemu_io_addrs[XEMU_IO_ADDRS];
++extern int xemu_io_num_addrs;
++extern unsigned long xemu_io_addr_overflow;
++
++/* Interrupted guest PCs; see target/i386/tcg/seg_helper.c. */
++#define XEMU_IRQ_PCS 64
++typedef struct XemuIrqPc {
++    uint32_t pc;
++    unsigned long count;
++    uint32_t regs[8]; /* eax ecx edx ebx esp ebp esi edi, latest */
++} XemuIrqPc;
++extern XemuIrqPc xemu_irq_pcs[XEMU_IRQ_PCS];
++extern int xemu_irq_num_pcs;
++
+ /**
+  * memory_region_dispatch_read: perform a read directly to the specified
+  * MemoryRegion.
 diff --git a/meson.build b/meson.build
 index 6944aef..e9712ef 100644
 --- a/meson.build
@@ -2170,6 +2439,87 @@ index 2609958..e0df358 100644
  #ifdef CONFIG_VMNET
          [NET_CLIENT_DRIVER_VMNET_HOST] = net_init_vmnet_host,
          [NET_CLIENT_DRIVER_VMNET_SHARED] = net_init_vmnet_shared,
+diff --git a/system/memory.c b/system/memory.c
+index eb0f478..c65ed99 100644
+--- a/system/memory.c
++++ b/system/memory.c
+@@ -1463,6 +1463,62 @@ static MemTxResult memory_region_dispatch_read1(MemoryRegion *mr,
+     }
+ }
+ 
++/*
++ * Which device is the guest reading? Every MMIO and port read lands here
++ * after aliases are resolved, so a per-region count answers "what is the
++ * guest polling" without first guessing which device to instrument. The
++ * second table keys on the absolute address as well, because the IDE
++ * ports are four regions that all answer to the name "ide", and because
++ * inside a 16 MB GPU BAR the region name says PFIFO when the question is
++ * which register.
++ *
++ * Written by the vCPU thread under the BQL, read by the host sampler
++ * without it. Entries are only ever appended, so a reader holding a stale
++ * count sees a smaller number, never a different device.
++ */
++XemuIoRegionStat xemu_io_regions[XEMU_IO_REGIONS];
++int xemu_io_num_regions;
++XemuIoAddrStat xemu_io_addrs[XEMU_IO_ADDRS];
++int xemu_io_num_addrs;
++unsigned long xemu_io_addr_overflow;
++
++static void xemu_io_note_read(MemoryRegion *mr, hwaddr addr)
++{
++    const char *name = mr->name ? mr->name : "(unnamed)";
++    int i;
++
++    for (i = 0; i < xemu_io_num_regions; i++) {
++        if (xemu_io_regions[i].name == name) {
++            break;
++        }
++    }
++    if (i == xemu_io_num_regions) {
++        if (i == XEMU_IO_REGIONS) {
++            return;
++        }
++        xemu_io_regions[i].name = name;
++        xemu_io_num_regions = i + 1;
++    }
++    xemu_io_regions[i].count++;
++
++    hwaddr abs = memory_region_to_absolute_addr(mr, addr);
++    for (i = 0; i < xemu_io_num_addrs; i++) {
++        if (xemu_io_addrs[i].addr == abs && xemu_io_addrs[i].name == name) {
++            break;
++        }
++    }
++    if (i == xemu_io_num_addrs) {
++        if (i == XEMU_IO_ADDRS) {
++            xemu_io_addr_overflow++;
++            return;
++        }
++        xemu_io_addrs[i].name = name;
++        xemu_io_addrs[i].addr = abs;
++        xemu_io_num_addrs = i + 1;
++    }
++    xemu_io_addrs[i].count++;
++}
++
+ MemTxResult memory_region_dispatch_read(MemoryRegion *mr,
+                                         hwaddr addr,
+                                         uint64_t *pval,
+@@ -1482,6 +1538,13 @@ MemTxResult memory_region_dispatch_read(MemoryRegion *mr,
+         return MEMTX_DECODE_ERROR;
+     }
+ 
++    /*
++     * A sub-page region arrives twice on the TCG path: once as the page's
++     * subpage container, then again as the real region. Count the second.
++     */
++    if (!mr->subpage) {
++        xemu_io_note_read(mr, addr);
++    }
+     r = memory_region_dispatch_read1(mr, addr, pval, size, attrs);
+     adjust_endianness(mr, pval, op);
+     return r;
 diff --git a/system/vl.c b/system/vl.c
 index f45bdc3..c1bab2c 100644
 --- a/system/vl.c
@@ -2213,6 +2563,130 @@ index f45bdc3..c1bab2c 100644
      int mem = ((int)g_config.sys.mem_limit + 1) * 64;
      fake_argv[fake_argc++] = strdup("-m");
      fake_argv[fake_argc++] = g_strdup_printf("%d", mem);
+diff --git a/target/i386/tcg/seg_helper.c b/target/i386/tcg/seg_helper.c
+index 227336c..ae0ba9d 100644
+--- a/target/i386/tcg/seg_helper.c
++++ b/target/i386/tcg/seg_helper.c
+@@ -1269,8 +1269,56 @@ void do_interrupt_all(X86CPU *cpu, int intno, int is_int,
+     qemu_plugin_vcpu_interrupt_cb(CPU(cpu), last_pc);
+ }
+ 
++/*
++ * Where hardware interrupts land. A guest spinning in a loop is
++ * interrupted inside that loop a few thousand times a second, so the
++ * hottest interrupted address over a few seconds is the loop, with the
++ * registers it was holding. The host sampler reads the table.
++ */
++#ifndef CONFIG_USER_ONLY
++#include "system/memory.h"
++XemuIrqPc xemu_irq_pcs[XEMU_IRQ_PCS];
++int xemu_irq_num_pcs;
++#endif
++
++static void xemu_note_irq_pc(CPUX86State *env)
++{
++#ifndef CONFIG_USER_ONLY
++    uint32_t pc = (uint32_t)env->eip;
++    int i;
++    for (i = 0; i < xemu_irq_num_pcs; i++) {
++        if (xemu_irq_pcs[i].pc == pc) {
++            break;
++        }
++    }
++    if (i == xemu_irq_num_pcs) {
++        if (i == XEMU_IRQ_PCS) {
++            /* Full: recycle the coldest entry. */
++            int cold = 0;
++            for (int k = 1; k < XEMU_IRQ_PCS; k++) {
++                if (xemu_irq_pcs[k].count < xemu_irq_pcs[cold].count) {
++                    cold = k;
++                }
++            }
++            i = cold;
++            xemu_irq_pcs[i].count = 0;
++        } else {
++            xemu_irq_num_pcs = i + 1;
++        }
++        xemu_irq_pcs[i].pc = pc;
++    }
++    xemu_irq_pcs[i].count++;
++    for (int r = 0; r < 8; r++) {
++        xemu_irq_pcs[i].regs[r] = (uint32_t)env->regs[r];
++    }
++#endif
++}
++
+ void do_interrupt_x86_hardirq(CPUX86State *env, int intno, int is_hw)
+ {
++    if (is_hw) {
++        xemu_note_irq_pc(env);
++    }
+     do_interrupt_all(env_archcpu(env), intno, 0, 0, 0, is_hw);
+ }
+ 
+diff --git a/target/i386/tcg/system/misc_helper.c b/target/i386/tcg/system/misc_helper.c
+index 89c8c5a..f8481e4 100644
+--- a/target/i386/tcg/system/misc_helper.c
++++ b/target/i386/tcg/system/misc_helper.c
+@@ -533,6 +533,10 @@ void helper_flush_page(CPUX86State *env, target_ulong addr)
+  * processor Xbox, so with both checks failing, halting at P until the next
+  * interrupt is equivalent to spinning. Called at the start of the TB at P.
+  */
++/* Times the vCPU parked itself in HLT. A guest with nothing runnable
++ * does this at the rate of its interrupts. */
++unsigned long xemu_halts;
++
+ void helper_xbox_idle(CPUX86State *env)
+ {
+     CPUState *cs = env_cpu(env);
+@@ -550,6 +554,7 @@ void helper_xbox_idle(CPUX86State *env)
+         return;
+     }
+ 
++    xemu_halts++;
+     cs->halted = 1;
+     cs->exception_index = EXCP_HLT;
+     cpu_loop_exit(cs);
+@@ -586,6 +591,31 @@ void helper_xbox_poll(CPUX86State *env, uint32_t pc)
+         return;
+     }
+ 
++    /*
++     * A poll that has lasted a second is a wait for something that is not
++     * coming. Say where it is and what it holds, once per loop, so the
++     * polled address can be worked out from the code bytes and the
++     * registers without guessing which device the guest is waiting on.
++     */
++    static __thread uint32_t reported_pc;
++    if (now - poll_start > 1000000000LL && pc != reported_pc) {
++        uint8_t code[24];
++        reported_pc = pc;
++        if (cpu_memory_rw_debug(cs, pc, code, sizeof(code), false) == 0) {
++            char hex[sizeof(code) * 2 + 1];
++            for (size_t i = 0; i < sizeof(code); i++) {
++                snprintf(hex + i * 2, 3, "%02x", code[i]);
++            }
++            fprintf(stderr, "[host] long poll at %08x: %s\n", pc, hex);
++        }
++        fprintf(stderr, "[host]   eax=%08x ecx=%08x edx=%08x ebx=%08x "
++                        "esp=%08x ebp=%08x esi=%08x edi=%08x\n",
++                (uint32_t)env->regs[R_EAX], (uint32_t)env->regs[R_ECX],
++                (uint32_t)env->regs[R_EDX], (uint32_t)env->regs[R_EBX],
++                (uint32_t)env->regs[R_ESP], (uint32_t)env->regs[R_EBP],
++                (uint32_t)env->regs[R_ESI], (uint32_t)env->regs[R_EDI]);
++    }
++
+     xbox_poll_wait(XBOX_POLL_SLEEP_NS);
+     poll_last = get_clock();
+ }
+@@ -596,6 +626,7 @@ G_NORETURN void helper_hlt(CPUX86State *env)
+     CPUState *cs = env_cpu(env);
+ 
+     do_end_instruction(env);
++    xemu_halts++;
+     cs->halted = 1;
+     cs->exception_index = EXCP_HLT;
+     cpu_loop_exit(cs);
 diff --git a/tcg/region.c b/tcg/region.c
 index 2181267..a1ab290 100644
 --- a/tcg/region.c
@@ -5090,10 +5564,10 @@ index 0000000..1dd3732
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000..097fd3f
+index 0000000..289b0e2
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,1248 @@
+@@ -0,0 +1,1510 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -5139,6 +5613,9 @@ index 0000000..097fd3f
 +#include "hw/xbox/smbus.h"
 +#include "qapi/qapi-commands-block.h"
 +#include "qapi/error.h"
++#include "system/memory.h"
++#include "system/block-backend.h"
++#include "block/accounting.h"
 +
 +const char *xemu_host_bundle_path(void);
 +extern int xemu_host_stage;
@@ -6274,6 +6751,265 @@ index 0000000..097fd3f
 +                        tcg_nb_tbs(), xemu_host_tb_flush_count());
 +                last_flips = flips;
 +                last_blocks = blocks;
++            }
++            {
++                /*
++                 * What the guest is reading. A vCPU that is "running" with
++                 * no new code and no frames is polling something; the
++                 * region table says which device, and the address table
++                 * says which register. Printed as deltas, biggest first,
++                 * so the poll target is the first entry.
++                 */
++                static unsigned long last_region[XEMU_IO_REGIONS];
++                static unsigned long last_addr[XEMU_IO_ADDRS];
++                unsigned long d_region[XEMU_IO_REGIONS];
++                unsigned long d_addr[XEMU_IO_ADDRS];
++                int nr = xemu_io_num_regions, na = xemu_io_num_addrs;
++                unsigned long total = 0;
++                for (int i = 0; i < nr; i++) {
++                    unsigned long c = xemu_io_regions[i].count;
++                    d_region[i] = c - last_region[i];
++                    last_region[i] = c;
++                    total += d_region[i];
++                }
++                for (int i = 0; i < na; i++) {
++                    unsigned long c = xemu_io_addrs[i].count;
++                    d_addr[i] = c - last_addr[i];
++                    last_addr[i] = c;
++                }
++                char line[400];
++                int n = 0;
++                for (int k = 0; k < 6; k++) {
++                    int best = -1;
++                    for (int i = 0; i < nr; i++) {
++                        if (d_region[i] && (best < 0 || d_region[i] > d_region[best])) {
++                            best = i;
++                        }
++                    }
++                    if (best < 0) {
++                        break;
++                    }
++                    n += snprintf(line + n, sizeof(line) - n, " %s=%lu",
++                                  xemu_io_regions[best].name, d_region[best]);
++                    d_region[best] = 0;
++                }
++                fprintf(stderr, "[host]   guest reads in 5 s: %lu%s\n",
++                        total, n ? line : " none");
++                n = 0;
++                for (int k = 0; k < 8; k++) {
++                    int best = -1;
++                    for (int i = 0; i < na; i++) {
++                        if (d_addr[i] && (best < 0 || d_addr[i] > d_addr[best])) {
++                            best = i;
++                        }
++                    }
++                    if (best < 0) {
++                        break;
++                    }
++                    n += snprintf(line + n, sizeof(line) - n, " %s+%llx=%lu",
++                                  xemu_io_addrs[best].name,
++                                  (unsigned long long)xemu_io_addrs[best].addr,
++                                  d_addr[best]);
++                    d_addr[best] = 0;
++                }
++                if (n) {
++                    fprintf(stderr, "[host]   top addresses:%s%s\n", line,
++                            xemu_io_addr_overflow ? " (table full)" : "");
++                }
++            }
++            {
++                /*
++                 * The two devices a loading title waits on besides the
++                 * GPU: the APU's frame clock, which every audio notifier
++                 * and FIFO cursor hangs off, and the disc. Both as deltas.
++                 */
++                extern unsigned long xemu_apu_frame_count(void);
++                static unsigned long last_apu;
++                static uint64_t last_cd_ops, last_cd_bytes, last_hd_ops;
++                unsigned long apu = xemu_apu_frame_count();
++                uint64_t cd_ops = 0, cd_bytes = 0, hd_ops = 0;
++                /*
++                 * The backend lookup walks a list that the main thread
++                 * owns and asserts the big lock. Once every five seconds
++                 * the lock is cheap; the pointers are then cached because
++                 * a disc swap replaces the medium, not the backend.
++                 */
++                static BlockBackend *cd, *hd;
++                if (!cd || !hd) {
++                    bql_lock();
++                    cd = blk_by_name("ide0-cd1");
++                    hd = blk_by_name("ide0-hd0");
++                    bql_unlock();
++                }
++                if (cd) {
++                    BlockAcctStats *st = blk_get_stats(cd);
++                    cd_ops = st->nr_ops[BLOCK_ACCT_READ];
++                    cd_bytes = st->nr_bytes[BLOCK_ACCT_READ];
++                }
++                if (hd) {
++                    BlockAcctStats *st = blk_get_stats(hd);
++                    hd_ops = st->nr_ops[BLOCK_ACCT_READ] + st->nr_ops[BLOCK_ACCT_WRITE];
++                }
++                fprintf(stderr, "[host]   apu frames in 5 s: %lu (%lu/s), "
++                                "dvd reads %llu (%llu KB), hdd ops %llu\n",
++                        apu - last_apu, (apu - last_apu) / 5,
++                        (unsigned long long)(cd_ops - last_cd_ops),
++                        (unsigned long long)((cd_bytes - last_cd_bytes) / 1024),
++                        (unsigned long long)(hd_ops - last_hd_ops));
++                last_apu = apu;
++                last_cd_ops = cd_ops;
++                last_cd_bytes = cd_bytes;
++                last_hd_ops = hd_ops;
++            }
++            {
++                /*
++                 * The two things that write into guest RAM for a waiting
++                 * guest to see, and the FIFO's own stall state. A spin on
++                 * RAM with both writers quiet and a stalled pusher is one
++                 * story; with the writers active it is another.
++                 */
++                extern unsigned long xemu_apu_notifies;
++                extern void pfifo_state_line(char *buf, size_t len);
++                static unsigned long last_notify;
++                char fifo[300];
++                pfifo_state_line(fifo, sizeof(fifo));
++                fprintf(stderr, "[host]   apu notifies in 5 s: %lu; fifo: %s\n",
++                        xemu_apu_notifies - last_notify, fifo);
++                last_notify = xemu_apu_notifies;
++            }
++            {
++                /*
++                 * The drives, the audio front end, and how often the vCPU
++                 * halted. An idle guest halts at its interrupt rate; a
++                 * guest waiting on a drive shows the command still posted.
++                 */
++                extern void xemu_ide_state_line(BlockBackend *blk, char *buf, size_t len);
++                extern void xemu_apu_state_line(char *buf, size_t len);
++                extern unsigned long xemu_halts;
++                static unsigned long last_halts;
++                char cdl[200] = "none", hdl[200] = "none", apul[200];
++                bql_lock();
++                BlockBackend *cd2 = blk_by_name("ide0-cd1");
++                BlockBackend *hd2 = blk_by_name("ide0-hd0");
++                if (cd2) {
++                    xemu_ide_state_line(cd2, cdl, sizeof(cdl));
++                }
++                if (hd2) {
++                    xemu_ide_state_line(hd2, hdl, sizeof(hdl));
++                }
++                bql_unlock();
++                xemu_apu_state_line(apul, sizeof(apul));
++                unsigned long ists_reads = 0, ien_reads = 0;
++                for (int i = 0; i < xemu_io_num_addrs; i++) {
++                    if (xemu_io_addrs[i].addr == 0xfe801000) {
++                        ists_reads = xemu_io_addrs[i].count;
++                    } else if (xemu_io_addrs[i].addr == 0xfe801004) {
++                        ien_reads = xemu_io_addrs[i].count;
++                    }
++                }
++                fprintf(stderr, "[host]   halts in 5 s: %lu; dvd: %s; hdd: %s\n",
++                        xemu_halts - last_halts, cdl, hdl);
++                fprintf(stderr, "[host]   apu: %s; ists reads total %lu, ien %lu\n",
++                        apul, ists_reads, ien_reads);
++                last_halts = xemu_halts;
++            }
++            {
++                /*
++                 * Where the guest was when interrupts arrived, hottest
++                 * first, with the code and registers at the hottest one.
++                 * During a spin the loop is at the top of this list.
++                 */
++                static unsigned long last_pc_count[XEMU_IRQ_PCS];
++                static uint32_t last_pc_key[XEMU_IRQ_PCS];
++                unsigned long d[XEMU_IRQ_PCS];
++                int n = xemu_irq_num_pcs;
++                for (int i = 0; i < n; i++) {
++                    unsigned long c = xemu_irq_pcs[i].count;
++                    uint32_t pc = xemu_irq_pcs[i].pc;
++                    d[i] = (last_pc_key[i] == pc) ? c - last_pc_count[i] : c;
++                    last_pc_count[i] = c;
++                    last_pc_key[i] = pc;
++                }
++                char line[400];
++                int o = 0, top = -1;
++                for (int k = 0; k < 5; k++) {
++                    int best = -1;
++                    for (int i = 0; i < n; i++) {
++                        if (d[i] && (best < 0 || d[i] > d[best])) {
++                            best = i;
++                        }
++                    }
++                    if (best < 0) {
++                        break;
++                    }
++                    if (top < 0) {
++                        top = best;
++                    }
++                    o += snprintf(line + o, sizeof(line) - o, " %08x=%lu",
++                                  xemu_irq_pcs[best].pc, d[best]);
++                    d[best] = 0;
++                }
++                fprintf(stderr, "[host]   interrupted at:%s\n", o ? line : " nothing");
++                if (top >= 0 && first_cpu) {
++                    uint8_t code[32];
++                    char hex[sizeof(code) * 2 + 1] = "unreadable";
++                    uint32_t pc = xemu_irq_pcs[top].pc;
++                    if (cpu_memory_rw_debug(first_cpu, pc, code, sizeof(code), false) == 0) {
++                        for (size_t i = 0; i < sizeof(code); i++) {
++                            snprintf(hex + i * 2, 3, "%02x", code[i]);
++                        }
++                    }
++                    const uint32_t *r = xemu_irq_pcs[top].regs;
++                    fprintf(stderr, "[host]   code at %08x: %s\n", pc, hex);
++                    /* And the 48 bytes before it: a loop's head is behind
++                     * the address interrupts land on. */
++                    uint8_t before[48];
++                    if (pc >= sizeof(before) &&
++                        cpu_memory_rw_debug(first_cpu, pc - sizeof(before), before, sizeof(before), false) == 0) {
++                        char bhex[sizeof(before) * 2 + 1];
++                        for (size_t i = 0; i < sizeof(before); i++) {
++                            snprintf(bhex + i * 2, 3, "%02x", before[i]);
++                        }
++                        fprintf(stderr, "[host]   code at %08x: %s\n", pc - (uint32_t)sizeof(before), bhex);
++                    }
++                    fprintf(stderr, "[host]   regs: eax=%08x ecx=%08x edx=%08x ebx=%08x "
++                                    "esp=%08x ebp=%08x esi=%08x edi=%08x\n",
++                            r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
++                }
++            }
++            {
++                /*
++                 * Guest memory on request. Documents/peek holds one
++                 * "hexaddr [bytes]" per line; each tick dumps them. The
++                 * file is pushed from the Mac, so a new address costs a
++                 * copy, not a build.
++                 */
++                g_autofree char *path = g_strdup_printf("%s/Documents/peek", getenv("HOME"));
++                g_autofree char *text = NULL;
++                if (first_cpu && g_file_get_contents(path, &text, NULL, NULL)) {
++                    char **lines = g_strsplit(text, "\n", -1);
++                    for (int li = 0; lines[li]; li++) {
++                        unsigned long long addr = 0;
++                        unsigned len = 64;
++                        if (sscanf(lines[li], "%llx %u", &addr, &len) < 1 || len == 0) {
++                            continue;
++                        }
++                        if (len > 256) {
++                            len = 256;
++                        }
++                        uint8_t buf[256];
++                        if (cpu_memory_rw_debug(first_cpu, addr, buf, len, false) != 0) {
++                            fprintf(stderr, "[host]   peek %08llx: unreadable\n", addr);
++                            continue;
++                        }
++                        char hex[256 * 2 + 1];
++                        for (unsigned i = 0; i < len; i++) {
++                            snprintf(hex + i * 2, 3, "%02x", buf[i]);
++                        }
++                        fprintf(stderr, "[host]   peek %08llx: %s\n", addr, hex);
++                    }
++                    g_strfreev(lines);
++                }
 +            }
 +            {
 +                size_t where = 0;
