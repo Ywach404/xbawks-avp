@@ -6211,10 +6211,10 @@ index 0000000..1dd3732
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000..97edea5
+index 0000000..7f81512
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,1596 @@
+@@ -0,0 +1,1633 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -7055,6 +7055,14 @@ index 0000000..97edea5
 +        }
 +        fprintf(stderr, "[host] pusher pacing: %u KB/ms%s\n", xemu_pace_kb_per_ms,
 +                xemu_pace_kb_per_ms ? "" : " (off)");
++        extern bool xemu_poll_watch_fds;
++        g_autofree char *fp = g_strdup_printf("%s/Documents/no-fd-sleep", getenv("HOME"));
++        g_autofree char *fc = NULL;
++        if (g_file_get_contents(fp, &fc, NULL, NULL) && fc[0] == '1') {
++            xemu_poll_watch_fds = false;
++        }
++        fprintf(stderr, "[host] main loop sleep watches fds: %s\n",
++                xemu_poll_watch_fds ? "yes" : "NO (Documents/no-fd-sleep)");
 +    }
 +                fflush(stderr);
 +                pthread_mutex_lock(&g_disc_mu);
@@ -7573,6 +7581,35 @@ index 0000000..97edea5
 +                        (unsigned long long)(cd_ops - last_cd_ops),
 +                        (unsigned long long)((cd_bytes - last_cd_bytes) / 1024),
 +                        (unsigned long long)(hd_ops - last_hd_ops));
++                {
++                    /*
++                     * Mean service time per command, guest command write to
++                     * completion IRQ, and how often the main loop slept with
++                     * a device timer under 1.25 ms away, and how many of
++                     * those sleeps an fd ended early.
++                     */
++                    extern unsigned long xemu_poll_blind_waits, xemu_poll_fd_wakes;
++                    static uint64_t lcdt, lcdn, lhdt, lhdn;
++                    static unsigned long lbw, lfw;
++                    uint64_t cdt = 0, cdn = 0, hdt = 0, hdn = 0;
++                    if (cd) {
++                        BlockAcctStats *st = blk_get_stats(cd);
++                        cdt = st->total_time_ns[BLOCK_ACCT_READ];
++                        cdn = st->nr_ops[BLOCK_ACCT_READ];
++                    }
++                    if (hd) {
++                        BlockAcctStats *st = blk_get_stats(hd);
++                        hdt = st->total_time_ns[BLOCK_ACCT_READ] + st->total_time_ns[BLOCK_ACCT_WRITE];
++                        hdn = st->nr_ops[BLOCK_ACCT_READ] + st->nr_ops[BLOCK_ACCT_WRITE];
++                    }
++                    fprintf(stderr, "[host]   drive service: dvd %llu us/op, hdd %llu us/op; "
++                                    "short sleeps %lu, ended by fd %lu\n",
++                            (unsigned long long)(cdn - lcdn ? (cdt - lcdt) / (cdn - lcdn) / 1000 : 0),
++                            (unsigned long long)(hdn - lhdn ? (hdt - lhdt) / (hdn - lhdn) / 1000 : 0),
++                            xemu_poll_blind_waits - lbw, xemu_poll_fd_wakes - lfw);
++                    lcdt = cdt; lcdn = cdn; lhdt = hdt; lhdn = hdn;
++                    lbw = xemu_poll_blind_waits; lfw = xemu_poll_fd_wakes;
++                }
 +                last_apu = apu;
 +                last_cd_ops = cd_ops;
 +                last_cd_bytes = cd_bytes;
@@ -8006,3 +8043,82 @@ index 9602b9d..a4175ad 100644
  
  int socket_set_cork(int fd, int v)
  {
+diff --git a/util/qemu-timer.c b/util/qemu-timer.c
+index c187f44..6a3e358 100644
+--- a/util/qemu-timer.c
++++ b/util/qemu-timer.c
+@@ -330,20 +330,52 @@ int qemu_timeout_ns_to_ms(int64_t ns)
+  * nanosleep on Darwin. On failure (e.g. EINTR) return early; callers spin
+  * for any remaining time.
+  */
+-static void precise_sleep_ns(int64_t ns)
++/*
++ * 2026-11-16: the sleep watches the poll fds as well as the timer. It
++ * used to watch only the timer, so whenever the next device timer was
++ * under 1.25 ms away, which with a 1 ms USB frame timer is nearly always,
++ * a disk completion signalled on the notifier pipe waited for that timer
++ * before the main loop saw it. Every disc and hard disk request paid it,
++ * one at a time, through a whole load. Now an fd that becomes readable
++ * ends the sleep, as ppoll would; the remaining time is not spun.
++ * Documents/no-fd-sleep with content "1" restores the old behaviour.
++ */
++bool xemu_poll_watch_fds = true;
++unsigned long xemu_poll_blind_waits, xemu_poll_fd_wakes;
++
++/* Returns true if an fd woke the sleep before the timer. */
++static bool precise_sleep_ns(int64_t ns, GPollFD *fds, guint nfds)
+ {
+     static __thread int kq = -1;
+-    struct kevent ev;
++    struct kevent ev[33];
++    int n = 0;
+ 
+     if (kq < 0) {
+         kq = kqueue();
+         if (kq < 0) {
+-            return;
++            return false;
+         }
+     }
+-    EV_SET(&ev, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT,
++    EV_SET(&ev[n++], (uintptr_t)-1, EVFILT_TIMER, EV_ADD | EV_ONESHOT,
+            NOTE_NSECONDS | NOTE_CRITICAL, ns, NULL);
+-    kevent(kq, &ev, 1, &ev, 1, NULL);
++    if (xemu_poll_watch_fds) {
++        for (guint i = 0; i < nfds && n < 33; i++) {
++            if (fds[i].fd >= 0 && (fds[i].events & (G_IO_IN | G_IO_HUP))) {
++                EV_SET(&ev[n++], fds[i].fd, EVFILT_READ,
++                       EV_ADD | EV_ONESHOT, 0, 0, NULL);
++            }
++        }
++    }
++    struct kevent out[4];
++    int got = kevent(kq, ev, n, out, 4, NULL);
++    xemu_poll_blind_waits++;
++    for (int i = 0; i < got; i++) {
++        if (out[i].filter == EVFILT_READ) {
++            xemu_poll_fd_wakes++;
++            return true;
++        }
++    }
++    return false;
+ }
+ #endif
+ 
+@@ -385,10 +417,15 @@ int qemu_poll_ns(GPollFD *fds, guint nfds, int64_t timeout)
+         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+         int64_t end = now + timeout;
+ #ifdef XBOX_BUSYWAIT_SPIN_NS
++        bool woken = false;
+         if (timeout > XBOX_BUSYWAIT_SPIN_NS) {
+-            precise_sleep_ns(timeout - XBOX_BUSYWAIT_SPIN_NS);
++            woken = precise_sleep_ns(timeout - XBOX_BUSYWAIT_SPIN_NS,
++                                     fds, nfds);
+             now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+         }
++        if (woken) {
++            end = now;   /* an fd is ready: dispatch it now, do not spin */
++        }
+ #endif
+         while (now < end) {
+             now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
