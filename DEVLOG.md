@@ -3149,3 +3149,44 @@ wait starving a loader thread during the load screen, and that is
 probably why loading is still slow here. Different mechanism, same
 family: a guest making a timing decision on a GPU that answers too fast.
 
+**Later the same day.** The millisecond alarm fixed Morrowind and then
+cost Halo: with a look every millisecond, "idle twice with the queue
+unchanged" was true after any millisecond gap, and Halo has one early in
+every frame with a handful of queries in. Thirty extra mid-frame
+finishes a second. So waiting is now a matter of time rather than of two
+glances: the queue has to sit idle and unchanged for four milliseconds,
+and the alarm runs at that period. Morrowind pays four milliseconds per
+query and cannot feel it. Halo's waiting drains went from 180 to 240 per
+five seconds under the old rule to 0 to 67.
+
+Halo still felt slower, and the counters agreed with the feeling: 21 fps
+on the Pillar of Autumn against the 29 written down five days before. I
+spent four builds on it before doing the one thing that settles such a
+question, which is rebuilding the previous state and running the same
+minute at the same spot. Last night's binary: 21.2 median. Today's:
+20.6. The 29 was a different stretch of the level. A frame rate varies
+more between two corridors than between two builds, and a number
+remembered is not a control.
+
+Three app faults came out of the re-measuring, all fixed: the deck
+drawing two cards flat on top of each other after a cold launch (the
+cards now take their look from their own measured distance to the
+centre, and the scroll snaps on the centre by construction), the swap
+panel opening 126 metres below the floor (a nudge that compounded the
+drag's total travel on every event, and saved it), and console taps
+swallowed after a cancelled gesture (a claim nobody has touched for
+three quarters of a second now expires). And the last hole from the
+pass: launching without a debugger now says so in the picker, with the
+insert button disabled, instead of exiting with the reason in the log.
+
+**And the pipeline cache, overnight.** Nothing in the Vulkan renderer
+touched disk, so every launch built every pipeline from nothing. Timing
+the three stages of a new shader settled where the cost was: glslang
+takes 1 to 3 ms per shader, a pipeline that hits the cache builds in
+under 0.2 ms, and a miss is 15 to 50 ms of Metal compiling, arriving in
+bursts of 4 to 51 when a scene changes. That burst was Doom 3's first
+rocket. The cache now loads from disk at init and saves itself every 30
+seconds while it grows, because this app is killed far more often than
+it is quit. One run of Doom 3 leaves 10.6 MB behind, and on the second run
+the first rocket landed clean.
+
