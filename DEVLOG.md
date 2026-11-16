@@ -3079,3 +3079,73 @@ attached" in the log and nothing on screen. And after that cold relaunch,
 two cards in the deck rendered overlapping with no gap.
 
 Ten minutes of two new games found more than three weeks of Halo had.
+
+## 2026-11-15: Morrowind was waiting on me
+
+The hypothesis from the pass was wrong, and it was wrong in the way
+hypotheses usually are: it named the most exotic thing in the room. The
+DSP is interpreted here, Morrowind streams dialogue at the moment it
+hangs, so the DSP. Four builds of instrumentation said otherwise, each
+one narrowing by what the previous one ruled out.
+
+**Build one counted what the guest reads.** Every device read in the
+machine passes through one function in QEMU's memory dispatch, so a
+per-region counter there says which device the guest is polling with no
+guess about which one to instrument. In the frozen state the answer was
+none of them: the only reads were the interrupt handlers' housekeeping,
+the GPU interrupt status and the APU clock at about 130 a second, USB at
+290. No GPU read pointer, no disc, no audio FIFO. The APU ran its 1,600
+frames a second throughout. So the guest was spinning on RAM.
+
+**Build two printed the FIFO's stall state, the drives, the audio front
+end, and how often the vCPU halted.** Push buffer fully consumed, FIFO
+parked on nothing, both drives idle with no command posted, seven voices
+live, interrupts enabled, and zero halts. Not idle, then: spinning at
+full speed in a loop the translator's poll detector did not match.
+
+**Build three recorded where hardware interrupts land.** A guest in a
+tight loop is interrupted inside that loop a few thousand times a second,
+so the hottest interrupted address over five seconds is the loop, and
+the registers it was holding come with it. That gave a routine in the
+game's statically linked D3D, which reads a 16 byte slot from a table,
+treats a last word of -1 as "not written yet", and returns 0x88760828 to
+a caller in the game's own code that calls it again. The XDK's header
+names the code: D3DERR_TESTINCOMPLETE, the Xbox only result of
+GetVisibilityTestResult. An occlusion query. The slot lives at the top
+of the lower 16 MB because D3D allocates its report page with that
+ceiling and the kernel's contiguous allocator walks down from it.
+
+**Build four added a peek file**, a list of guest addresses in the app's
+Documents folder that the sampler dumps every tick, so the next address
+costs a file copy rather than a compile. Slot zero: marker still -1. The
+GPU had consumed the GET_REPORT command, the FIFO's get pointer was at
+put, and the result had never been written.
+
+That is the 2026-11-10 report policy. It drains the queue when the FIFO
+is seen idle twice with the queue unchanged, or when a 100 ms breaker
+expires, or under pool pressure. All three are evaluated only when the
+FIFO thread runs, and when the policy chose to wait, the thread went to
+sleep on its condition variable. A game spinning on a result pushes
+nothing and kicks nothing. The second look never came. Blinx, which the
+rule was written for, never showed it because Blinx keeps rendering
+while it waits, and every frame is a kick.
+
+The fix is not to the policy. When the policy defers, it now says so,
+and the FIFO thread sleeps at most a millisecond before looking again.
+That second look is the second idle the rule asks for. Morrowind got
+past the boat, walked outside, and loaded a Balmora save: 18 to 28 fps
+in the open world, 65 indoors, two timed wakes a second, one drain per
+frame.
+
+The rule I am keeping from this: a decision to wait is only safe if
+something is guaranteed to revisit it. The policy was right about when
+to drain and silent about who would ask again. And the method is worth
+more than the fix. Count what the guest reads, then where its interrupts
+land, then peek at what it is comparing. Three generic instruments found
+a title specific bug in an afternoon without a debugger on the guest.
+
+Upstream's own notes on this title pointed elsewhere, at the D3D fence
+wait starving a loader thread during the load screen, and that is
+probably why loading is still slow here. Different mechanism, same
+family: a guest making a timing decision on a GPU that answers too fast.
+

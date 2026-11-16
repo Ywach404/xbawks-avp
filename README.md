@@ -55,7 +55,7 @@ Measured on the headset on 2026-11-10, each title played for a few minutes from 
 | Cel Damage | Plays | Slower than it should be; sync-heavy in a way not yet cracked. |
 | Fuzion Frenzy | Plays | Launch title, no issues seen in a short run. |
 | Halo 2 | Starts | 32 fps for the first three minutes, then memory climbs to 8 GB in the Cairo Station firefight and the system kills it. HUD shield bar and ammo boxes missing from the start, no zoom view, armour pops in. |
-| The Elder Scrolls III: Morrowind | Starts | Reaches the prison ship after the intro and hangs there, the guest spinning on a device that never answers. Loading is very slow. Audio DSP is interpreted on this platform, which is the first suspect. |
+| The Elder Scrolls III: Morrowind | Plays | 18 to 28 fps outdoors in Balmora, 65 indoors. Loading is slow. Hung on the prison ship until 2026-11-15; see the devlog for what it was waiting on. |
 
 "Plays" means I played it and nothing looked wrong. "Starts" means it got to gameplay and then failed in a way that is recorded in the devlog with the numbers.
 
