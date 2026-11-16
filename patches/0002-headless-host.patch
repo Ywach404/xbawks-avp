@@ -687,7 +687,7 @@ index ee4b44f..d520e92 100644
  
  #endif // HW_XBOX_NV2A_PGRAPH_NULL_RENDERER_H
 diff --git a/hw/xbox/nv2a/pgraph/pgraph.c b/hw/xbox/nv2a/pgraph/pgraph.c
-index 6915676..4251eee 100644
+index 6915676..94e2f8c 100644
 --- a/hw/xbox/nv2a/pgraph/pgraph.c
 +++ b/hw/xbox/nv2a/pgraph/pgraph.c
 @@ -272,15 +272,20 @@ void pgraph_clear_dirty_reg_map(PGRAPHState *pg)
@@ -716,7 +716,7 @@ index 6915676..4251eee 100644
  #endif
      fprintf(stderr, "Warning: No available renderer\n");
      return CONFIG_DISPLAY_RENDERER_NULL;
-@@ -375,6 +380,55 @@ void pgraph_destroy(PGRAPHState *pg)
+@@ -375,6 +380,69 @@ void pgraph_destroy(PGRAPHState *pg)
      qemu_mutex_destroy(&pg->lock);
  }
  
@@ -763,6 +763,20 @@ index 6915676..4251eee 100644
 +    return g_nv2a;
 +}
 +
++#ifdef CONFIG_VULKAN
++void pgraph_vk_memory_line(NV2AState *d, char *buf, size_t len);
++#endif
++void pgraph_vk_memory_line_for_host(char *buf, size_t len)
++{
++    buf[0] = 0;
++#ifdef CONFIG_VULKAN
++    NV2AState *d = g_nv2a_for_stats();
++    if (d && d->pgraph.renderer && d->pgraph.vk_renderer_state) {
++        pgraph_vk_memory_line(d, buf, len);
++    }
++#endif
++}
++
 +/* Flips the guest has presented, for the host's speed line. */
 +int nv2a_get_frame_count(void)
 +{
@@ -772,7 +786,7 @@ index 6915676..4251eee 100644
  int nv2a_get_framebuffer_surface(void)
  {
      NV2AState *d = g_nv2a;
-@@ -2791,6 +2845,10 @@ DEF_METHOD(NV097, BACK_END_WRITE_SEMAPHORE_RELEASE)
+@@ -2791,6 +2859,10 @@ DEF_METHOD(NV097, BACK_END_WRITE_SEMAPHORE_RELEASE)
      semaphore_data += semaphore_offset;
  
      stl_le_p((uint32_t*)semaphore_data, parameter);
@@ -1395,7 +1409,7 @@ index 668a8ff..b311510 100644
                               modules: ['CoreFoundation', 'IOSurface', 'OpenGL']),
                    files('iosurface.c'))
 diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.c b/hw/xbox/nv2a/pgraph/vk/renderer.c
-index d69a31a..7d67a13 100644
+index d69a31a..0a930fc 100644
 --- a/hw/xbox/nv2a/pgraph/vk/renderer.c
 +++ b/hw/xbox/nv2a/pgraph/vk/renderer.c
 @@ -20,7 +20,9 @@
@@ -1511,8 +1525,50 @@ index d69a31a..7d67a13 100644
      return 0;
  #endif
  }
+@@ -275,3 +334,41 @@ void pgraph_vk_check_memory_budget(PGRAPHState *pg)
+     vmaFreeStatsString(r->allocator, s);
+ #endif
+ }
++
++/*
++ * Where the GPU side's memory is, for Halo 2's climb to 8 GB. VMA locks
++ * internally, the LRU counts are plain ints written by the render thread,
++ * and the byte counters are kept at image create and destroy, so all of
++ * this is safe to read from the sampler without the render thread's locks.
++ */
++int64_t xemu_vk_texture_bytes, xemu_vk_surface_bytes;
++long xemu_vk_surface_count;
++
++void pgraph_vk_memory_line(NV2AState *d, char *buf, size_t len)
++{
++    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
++    if (!r || !r->allocator) {
++        buf[0] = 0;
++        return;
++    }
++    VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
++    vmaGetHeapBudgets(r->allocator, budgets);
++    const VkPhysicalDeviceMemoryProperties *props = NULL;
++    vmaGetMemoryProperties(r->allocator, &props);
++    uint64_t alloc = 0, block = 0, usage = 0;
++    for (uint32_t i = 0; props && i < props->memoryHeapCount; i++) {
++        alloc += budgets[i].statistics.allocationBytes;
++        block += budgets[i].statistics.blockBytes;
++        usage += budgets[i].usage;
++    }
++    snprintf(buf, len,
++             "vma alloc %llu MiB, blocks %llu MiB, usage %llu MiB; "
++             "textures %d (%lld MiB); surfaces %ld (%lld MiB); "
++             "shader modules %d; pipelines %d",
++             (unsigned long long)(alloc >> 20), (unsigned long long)(block >> 20),
++             (unsigned long long)(usage >> 20),
++             r->texture_cache.num_used, (long long)(xemu_vk_texture_bytes >> 20),
++             xemu_vk_surface_count, (long long)(xemu_vk_surface_bytes >> 20),
++             r->shader_module_cache.num_used, r->pipeline_cache.num_used);
++}
++
 diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.h b/hw/xbox/nv2a/pgraph/vk/renderer.h
-index 9d8fefe..09a7c5d 100644
+index 9d8fefe..3dc6f2f 100644
 --- a/hw/xbox/nv2a/pgraph/vk/renderer.h
 +++ b/hw/xbox/nv2a/pgraph/vk/renderer.h
 @@ -44,7 +44,17 @@
@@ -1739,11 +1795,16 @@ index 9d8fefe..09a7c5d 100644
  void pgraph_vk_wait_for_surface_download(SurfaceBinding *e);
  void pgraph_vk_download_dirty_surfaces(NV2AState *d);
  unsigned int pgraph_vk_mark_surfaces_in_range_for_upload(NV2AState *d,
-@@ -588,7 +715,20 @@ void pgraph_vk_finalize_reports(PGRAPHState *pg);
+@@ -588,7 +715,25 @@ void pgraph_vk_finalize_reports(PGRAPHState *pg);
  void pgraph_vk_clear_report_value(NV2AState *d);
  void pgraph_vk_get_report(NV2AState *d, uint32_t parameter);
  void pgraph_vk_process_pending_reports(NV2AState *d);
 +void pgraph_vk_save_pipeline_cache(PGRAPHState *pg);
++/* Live bytes in texture and surface images, kept at create and destroy,
++ * and a one-line memory breakdown for the host sampler. */
++extern int64_t xemu_vk_texture_bytes, xemu_vk_surface_bytes;
++extern long xemu_vk_surface_count;
++void pgraph_vk_memory_line(NV2AState *d, char *buf, size_t len);
 +void pgraph_vk_maybe_save_pipeline_cache(PGRAPHState *pg);
  void pgraph_vk_process_pending_reports_internal(NV2AState *d);
 +void pgraph_vk_report_stats(NV2AState *d, unsigned long *drains,
@@ -2041,7 +2102,7 @@ index c860a9b..0ff595f 100644
      }
  }
 diff --git a/hw/xbox/nv2a/pgraph/vk/surface.c b/hw/xbox/nv2a/pgraph/vk/surface.c
-index f61079b..33cb545 100644
+index f61079b..068b51b 100644
 --- a/hw/xbox/nv2a/pgraph/vk/surface.c
 +++ b/hw/xbox/nv2a/pgraph/vk/surface.c
 @@ -463,7 +463,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
@@ -2053,7 +2114,26 @@ index f61079b..33cb545 100644
  
      void *mapped_memory_ptr = NULL;
      VK_CHECK(vmaMapMemory(r->allocator,
-@@ -851,7 +851,7 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
+@@ -818,13 +818,16 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
+         .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+     };
+ 
++    VmaAllocationInfo surf_info, scratch_info;
+     VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
+                             &alloc_create_info, &surface->image,
+-                            &surface->allocation, NULL));
++                            &surface->allocation, &surf_info));
+ 
+     VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
+                             &alloc_create_info, &surface->image_scratch,
+-                            &surface->allocation_scratch, NULL));
++                            &surface->allocation_scratch, &scratch_info));
++    xemu_vk_surface_bytes += surf_info.size + scratch_info.size;
++    xemu_vk_surface_count++;
+     surface->image_scratch_current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+ 
+     VkImageViewCreateInfo image_view_create_info = {
+@@ -851,7 +854,7 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
  
      nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_3);
      pgraph_vk_end_debug_marker(r, cmd);
@@ -2062,7 +2142,21 @@ index f61079b..33cb545 100644
      nv2a_profile_inc_counter(NV2A_PROF_SURF_CREATE);
  }
  
-@@ -1289,7 +1289,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
+@@ -877,6 +880,13 @@ static void destroy_surface_image(PGRAPHVkState *r, SurfaceBinding *surface)
+     vkDestroyImageView(r->device, surface->image_view, NULL);
+     surface->image_view = VK_NULL_HANDLE;
+ 
++    {
++        VmaAllocationInfo a, b;
++        vmaGetAllocationInfo(r->allocator, surface->allocation, &a);
++        vmaGetAllocationInfo(r->allocator, surface->allocation_scratch, &b);
++        xemu_vk_surface_bytes -= a.size + b.size;
++        xemu_vk_surface_count--;
++    }
+     vmaDestroyImage(r->allocator, surface->image, surface->allocation);
+     surface->image = VK_NULL_HANDLE;
+     surface->allocation = VK_NULL_HANDLE;
+@@ -1289,7 +1299,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
  
      nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_2);
      pgraph_vk_end_debug_marker(r, cmd);
@@ -2071,7 +2165,7 @@ index f61079b..33cb545 100644
  
      surface->initialized = true;
  }
-@@ -1774,3 +1774,203 @@ void pgraph_vk_surface_flush(NV2AState *d)
+@@ -1774,3 +1784,203 @@ void pgraph_vk_surface_flush(NV2AState *d)
  
      pgraph_vk_reload_surface_scale_factor(pg);
  }
@@ -2276,7 +2370,7 @@ index f61079b..33cb545 100644
 +    qemu_event_set(&r->present_complete);
 +}
 diff --git a/hw/xbox/nv2a/pgraph/vk/texture.c b/hw/xbox/nv2a/pgraph/vk/texture.c
-index f1550f7..b954d62 100644
+index f1550f7..9223bf1 100644
 --- a/hw/xbox/nv2a/pgraph/vk/texture.c
 +++ b/hw/xbox/nv2a/pgraph/vk/texture.c
 @@ -583,7 +583,7 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
@@ -2297,7 +2391,32 @@ index f1550f7..b954d62 100644
  
      r->dummy_texture = (TextureBinding){
          .key.scale = 1.0,
-@@ -1553,8 +1553,24 @@ void pgraph_vk_init_textures(PGRAPHState *pg)
+@@ -1240,9 +1240,11 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
+         .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+     };
+ 
++    VmaAllocationInfo tex_alloc_info;
+     VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
+                             &alloc_create_info, &snode->image,
+-                            &snode->allocation, NULL));
++                            &snode->allocation, &tex_alloc_info));
++    xemu_vk_texture_bytes += tex_alloc_info.size;
+ 
+     VkImageViewCreateInfo image_view_create_info = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+@@ -1469,6 +1471,11 @@ static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBindin
+     vkDestroyImageView(r->device, snode->image_view, NULL);
+     snode->image_view = VK_NULL_HANDLE;
+ 
++    if (snode->allocation) {
++        VmaAllocationInfo info;
++        vmaGetAllocationInfo(r->allocator, snode->allocation, &info);
++        xemu_vk_texture_bytes -= info.size;
++    }
+     vmaDestroyImage(r->allocator, snode->image, snode->allocation);
+     snode->image = VK_NULL_HANDLE;
+     snode->allocation = VK_NULL_HANDLE;
+@@ -1553,8 +1560,24 @@ void pgraph_vk_init_textures(PGRAPHState *pg)
  {
      PGRAPHVkState *r = pg->vk_renderer_state;
  
@@ -6211,10 +6330,10 @@ index 0000000..1dd3732
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000..7f81512
+index 0000000..7c1c562
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,1633 @@
+@@ -0,0 +1,1689 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -6298,6 +6417,34 @@ index 0000000..7f81512
 +    }
 +#endif
 +    return 0;
++}
++
++/* Footprint split: what Metal and the GPU driver hold, the rest, and
++ * the malloc heap. Halo 2 died at 8 GB and this says which half grew. */
++#ifdef __APPLE__
++#include <malloc/malloc.h>
++#endif
++void pgraph_vk_memory_line_for_host(char *buf, size_t len);
++static void footprint_split(char *buf, size_t len)
++{
++#ifdef __APPLE__
++    task_vm_info_data_t vm;
++    mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
++    malloc_statistics_t ms;
++    malloc_zone_statistics(NULL, &ms);
++    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm, &cnt)
++        == KERN_SUCCESS) {
++        unsigned long long gfx = (vm.ledger_tag_graphics_footprint
++                                  + vm.ledger_tag_graphics_footprint_compressed) >> 20;
++        unsigned long long fp = vm.phys_footprint >> 20;
++        snprintf(buf, len, "footprint %llu MiB = graphics %llu + other %llu; "
++                 "malloc %zu MiB; compressed %llu MiB",
++                 fp, gfx, fp > gfx ? fp - gfx : 0, ms.size_in_use >> 20,
++                 (unsigned long long)(vm.compressed >> 20));
++        return;
++    }
++#endif
++    buf[0] = 0;
 +}
 +
 +static void footprint(const char *where)
@@ -7159,6 +7306,28 @@ index 0000000..7f81512
 +         */
 +        g_config.display.renderer = CONFIG_DISPLAY_RENDERER_VULKAN;
 +        fprintf(stderr, "[host] renderer forced to Vulkan\n");
++        {
++            /*
++             * Internal resolution, as a switch. Documents/surface-scale
++             * holds 1 (native 640x480, the default), 2 or 3. Read once
++             * here, before the renderer initialises its surfaces. Every
++             * surface costs the square of this in memory and fill, so it
++             * is for titles with headroom: Doom 3 and the 60 fps games.
++             */
++            g_autofree char *sp = g_strdup_printf("%s/Documents/surface-scale",
++                                                  getenv("HOME"));
++            g_autofree char *sc = NULL;
++            int scale = 1;
++            if (g_file_get_contents(sp, &sc, NULL, NULL)) {
++                scale = atoi(sc);
++            }
++            if (scale < 1 || scale > 3) {
++                scale = 1;
++            }
++            g_config.display.quality.surface_scale = scale;
++            fprintf(stderr, "[host] surface scale: %dx%s\n", scale,
++                    scale == 1 ? " (native)" : " (Documents/surface-scale)");
++        }
 +        fprintf(stderr, "[host] bootrom  %s\n", g_config.sys.files.bootrom_path);
 +        fprintf(stderr, "[host] flashrom %s\n", g_config.sys.files.flashrom_path);
 +    }
@@ -7460,6 +7629,12 @@ index 0000000..7f81512
 +                static unsigned long last_blocks;
 +                int flips = nv2a_get_frame_count();
 +                unsigned long blocks = xemu_host_blocks_executed;
++                {
++                    char fs[200], ml[300];
++                    footprint_split(fs, sizeof(fs));
++                    pgraph_vk_memory_line_for_host(ml, sizeof(ml));
++                    fprintf(stderr, "[host]   memory: %s\n[host]   gpu memory: %s\n", fs, ml);
++                }
 +                extern int xemu_host_thermal_state(void);
 +                static const char *thermal[4] = { "nominal", "fair", "serious", "critical" };
 +                int ts = xemu_host_thermal_state();
