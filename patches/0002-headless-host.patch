@@ -2955,10 +2955,10 @@ index eb0f478..c65ed99 100644
      adjust_endianness(mr, pval, op);
      return r;
 diff --git a/system/vl.c b/system/vl.c
-index f45bdc3..c1bab2c 100644
+index f45bdc3..d3fceca 100644
 --- a/system/vl.c
 +++ b/system/vl.c
-@@ -3053,6 +3053,38 @@ void qemu_init(int argc, char **argv)
+@@ -3053,6 +3053,59 @@ void qemu_init(int argc, char **argv)
          fake_argv[fake_argc++] = strdup(flashrom_path);
      }
  
@@ -2981,13 +2981,34 @@ index f45bdc3..c1bab2c 100644
 +     * device. Every prepared page is written and therefore resident dirty,
 +     * which would be 1 GiB of RSS before a single guest instruction and
 +     * about 6.5 s of preparation. UTM uses 128 MiB and it works.
++     *
++     * It was 32 MiB, a ceiling from the early days when the process was
++     * killed well short of the memory limit. At 32, Halo 2's Cairo Station
++     * fight flushed the buffer 150 times in four minutes and the frame rate
++     * swung between 20 and 33. At 128 it flushed none in three minutes, held
++     * 33, and cost 170 MB. Documents/tb-size holds a size in MiB (16 to 256)
++     * to try another without a rebuild.
 +     */
++    int tb_mib = 128;
++    {
++        g_autofree char *tp = g_strdup_printf("%s/Documents/tb-size",
++                                              getenv("HOME"));
++        g_autofree char *tc = NULL;
++        if (g_file_get_contents(tp, &tc, NULL, NULL)) {
++            int v = atoi(tc);
++            if (v >= 16 && v <= 256) {
++                tb_mib = v;
++            }
++        }
++        fprintf(stderr, "[host] code cache: %d MiB%s\n", tb_mib,
++                tb_mib == 128 ? "" : " (Documents/tb-size)");
++    }
 +    /* Whatever the guest does wrong, say so. Cheap and off by default. */
 +    fake_argv[fake_argc++] = strdup("-d");
 +    fake_argv[fake_argc++] = strdup("guest_errors,unimp");
 +
 +    fake_argv[fake_argc++] = strdup("-accel");
-+    fake_argv[fake_argc++] = strdup("tcg,split-wx=on,tb-size=32");
++    fake_argv[fake_argc++] = g_strdup_printf("tcg,split-wx=on,tb-size=%d", tb_mib);
 +
 +    /* Thread names, so a stack dump of the process reads as QEMU roles. */
 +    fake_argv[fake_argc++] = strdup("-name");
