@@ -431,10 +431,10 @@ index 2a9b731..7414129 100644
  void nv2a_set_surface_scale_factor(unsigned int scale);
  unsigned int nv2a_get_surface_scale_factor(void);
 diff --git a/hw/xbox/nv2a/pfifo.c b/hw/xbox/nv2a/pfifo.c
-index 66cc710..cb99555 100644
+index 66cc710..d07c4d5 100644
 --- a/hw/xbox/nv2a/pfifo.c
 +++ b/hw/xbox/nv2a/pfifo.c
-@@ -108,6 +108,41 @@ static bool can_fifo_access(NV2AState *d) {
+@@ -108,6 +108,44 @@ static bool can_fifo_access(NV2AState *d) {
  /* If NV097_FLIP_STALL was executed, check if the flip has completed.
   * This will usually happen in the VSYNC interrupt handler.
   */
@@ -445,6 +445,9 @@ index 66cc710..cb99555 100644
 + */
 +unsigned long xemu_semaphore_releases;
 +unsigned long xemu_report_timed_wakes;
++/* A/B switch for the timed wake, set by the host from Documents/no-report-wake
++ * (content "1" turns the wake off). Off reproduces the Morrowind hang. */
++bool xemu_report_wake_enabled = true;
 +void pfifo_state_line(char *buf, size_t len)
 +{
 +    NV2AState *d = g_nv2a_for_stats();
@@ -476,20 +479,22 @@ index 66cc710..cb99555 100644
  static bool is_flip_stall_complete(NV2AState *d)
  {
      PGRAPHState *pg = &d->pgraph;
-@@ -482,7 +517,18 @@ void *pfifo_thread(void *arg)
+@@ -482,7 +520,20 @@ void *pfifo_thread(void *arg)
              qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
  
              // Both the pusher and puller are waiting for some action
 -            qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
-+            if (qatomic_read(&d->pgraph.reports_deferred)) {
++            if (xemu_report_wake_enabled &&
++                qatomic_read(&d->pgraph.reports_deferred)) {
 +                /*
 +                 * A report drain was put off. The second look that the
 +                 * policy wants has to come from somewhere, and a guest
 +                 * waiting on the result gives no kick, so look again in
-+                 * a millisecond. See pgraph_vk_process_pending_reports.
++                 * a few milliseconds, the period the policy's waiting
++                 * rule is defined over. See pgraph_vk_process_pending_reports.
 +                 */
 +                xemu_report_timed_wakes++;
-+                qemu_cond_timedwait(&d->pfifo.fifo_cond, &d->pfifo.lock, 1);
++                qemu_cond_timedwait(&d->pfifo.fifo_cond, &d->pfifo.lock, 4);
 +            } else {
 +                qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
 +            }
@@ -1237,7 +1242,7 @@ index d69a31a..f5725a3 100644
  #endif
  }
 diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.h b/hw/xbox/nv2a/pgraph/vk/renderer.h
-index 9d8fefe..7190ed7 100644
+index 9d8fefe..40c8e10 100644
 --- a/hw/xbox/nv2a/pgraph/vk/renderer.h
 +++ b/hw/xbox/nv2a/pgraph/vk/renderer.h
 @@ -44,7 +44,17 @@
@@ -1406,7 +1411,7 @@ index 9d8fefe..7190ed7 100644
      bool download_dirty_surfaces_pending;
      QemuEvent dirty_surfaces_download_complete; // common
  
-@@ -437,6 +537,13 @@ typedef struct PGRAPHVkState {
+@@ -437,6 +537,15 @@ typedef struct PGRAPHVkState {
      int max_queries_in_flight; // FIXME: Move out to constant
      int num_queries_in_flight;
      bool new_query_needed;
@@ -1417,10 +1422,12 @@ index 9d8fefe..7190ed7 100644
 +    /* Queue depth at the last FIFO idle that was not served; the same
 +     * depth at the next idle means the guest is waiting on it. */
 +    unsigned last_idle_depth;
++    int64_t idle_since_ns;          /* when the queue was first seen idle in its current state */
++    unsigned long wait_gap_hist[7]; /* idle gap at each waiting drain: <2,<4,<8,<16,<32,<64,more ms */
      bool query_in_flight;
      uint32_t zpass_pixel_count_result;
      QSIMPLEQ_HEAD(, QueryReport) report_queue; // FIXME: Statically allocate
-@@ -502,7 +609,17 @@ VkDeviceSize pgraph_vk_append_to_buffer(PGRAPHState *pg, int index, void **data,
+@@ -502,7 +611,17 @@ VkDeviceSize pgraph_vk_append_to_buffer(PGRAPHState *pg, int index, void **data,
  void pgraph_vk_init_command_buffers(PGRAPHState *pg);
  void pgraph_vk_finalize_command_buffers(PGRAPHState *pg);
  VkCommandBuffer pgraph_vk_begin_single_time_commands(PGRAPHState *pg);
@@ -1439,7 +1446,7 @@ index 9d8fefe..7190ed7 100644
  
  // image.c
  void pgraph_vk_transition_image_layout(PGRAPHState *pg, VkCommandBuffer cmd,
-@@ -517,6 +634,9 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
+@@ -517,6 +636,9 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
                                        unsigned int inline_stride,
                                        unsigned int provoking_element);
  void pgraph_vk_bind_vertex_attributes_inline(NV2AState *d);
@@ -1449,7 +1456,7 @@ index 9d8fefe..7190ed7 100644
  void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset, void *data,
                                      VkDeviceSize size);
  VkDeviceSize pgraph_vk_update_index_buffer(PGRAPHState *pg, void *data,
-@@ -535,6 +655,9 @@ void pgraph_vk_surface_flush(NV2AState *d);
+@@ -535,6 +657,9 @@ void pgraph_vk_surface_flush(NV2AState *d);
  void pgraph_vk_process_pending_downloads(NV2AState *d);
  void pgraph_vk_surface_download_if_dirty(NV2AState *d, SurfaceBinding *surface);
  SurfaceBinding *pgraph_vk_surface_get_within(NV2AState *d, hwaddr addr);
@@ -1459,7 +1466,7 @@ index 9d8fefe..7190ed7 100644
  void pgraph_vk_wait_for_surface_download(SurfaceBinding *e);
  void pgraph_vk_download_dirty_surfaces(NV2AState *d);
  unsigned int pgraph_vk_mark_surfaces_in_range_for_upload(NV2AState *d,
-@@ -589,6 +712,17 @@ void pgraph_vk_clear_report_value(NV2AState *d);
+@@ -589,6 +714,17 @@ void pgraph_vk_clear_report_value(NV2AState *d);
  void pgraph_vk_get_report(NV2AState *d, uint32_t parameter);
  void pgraph_vk_process_pending_reports(NV2AState *d);
  void pgraph_vk_process_pending_reports_internal(NV2AState *d);
@@ -1478,10 +1485,10 @@ index 9d8fefe..7190ed7 100644
  typedef enum FinishReason {
      VK_FINISH_REASON_VERTEX_BUFFER_DIRTY,
 diff --git a/hw/xbox/nv2a/pgraph/vk/reports.c b/hw/xbox/nv2a/pgraph/vk/reports.c
-index c860a9b..796a6e0 100644
+index c860a9b..0ff595f 100644
 --- a/hw/xbox/nv2a/pgraph/vk/reports.c
 +++ b/hw/xbox/nv2a/pgraph/vk/reports.c
-@@ -142,9 +142,106 @@ void pgraph_vk_process_pending_reports_internal(NV2AState *d)
+@@ -142,9 +142,118 @@ void pgraph_vk_process_pending_reports_internal(NV2AState *d)
      }
  
      r->num_queries_in_flight = 0;
@@ -1584,11 +1591,23 @@ index c860a9b..796a6e0 100644
 + */
 +#define REPORT_SERVICE_BREAKER_NS 100000000 /* 100 ms, see above */
 +#define REPORT_WAITING_MAX_DEPTH  32        /* a waiter has few in flight */
++/*
++ * 2026-11-15, second pass. Giving the FIFO thread a 1 ms alarm fixed
++ * Morrowind and cost Halo ten frames a second: with the alarm, "idle
++ * twice with the queue unchanged" is true after any 1 ms gap, and Halo
++ * has one early in every frame while its CPU builds the next batch,
++ * with a handful of queries in. Thirty extra mid-frame finishes a
++ * second. So waiting is now defined by time: the queue has to sit idle
++ * and unchanged for this long. A producer resumes sooner; a waiter
++ * never resumes. Morrowind pays this per query and cannot feel it.
++ */
++#define REPORT_WAITING_CONFIRM_NS 4000000   /* 4 ms */
++#define REPORT_WAITING_WAKE_MS    4         /* the alarm, same period */
 +
  void pgraph_vk_process_pending_reports(NV2AState *d)
  {
      PGRAPHState *pg = &d->pgraph;
-@@ -153,8 +250,133 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
+@@ -153,8 +262,153 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
      uint32_t *dma_get = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET];
      uint32_t *dma_put = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT];
  
@@ -1643,12 +1662,17 @@ index c860a9b..796a6e0 100644
 +     * unchanged and small. A waiter with a deep queue still has the 100 ms
 +     * breaker, which is slow but correct.
 +     */
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
++    if (depth != r->last_idle_depth) {
++        r->idle_since_ns = now;
++    }
++    int64_t idle_for = now - r->idle_since_ns;
 +    bool guest_waiting = (depth == r->last_idle_depth) &&
-+                         depth <= REPORT_WAITING_MAX_DEPTH;
++                         depth <= REPORT_WAITING_MAX_DEPTH &&
++                         idle_for >= REPORT_WAITING_CONFIRM_NS;
 +    r->last_idle_depth = depth;
 +
 +    if (!pool_pressure && !guest_waiting) {
-+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 +        if (now - r->last_report_service_ns < REPORT_SERVICE_BREAKER_NS) {
 +            r->report_drains_skipped++;
 +            /*
@@ -1667,8 +1691,14 @@ index c860a9b..796a6e0 100644
 +        r->drain_by_pool++;
 +    } else {
 +        r->drain_by_queue++;   /* the guest was waiting */
-     }
++        int b = 0;
++        for (int64_t ms = 2; ms <= 64 && idle_for >= ms * 1000000; ms *= 2) {
++            b++;
++        }
++        r->wait_gap_hist[b]++;
++    }
 +    r->last_idle_depth = 0;
++    r->idle_since_ns = now;
 +
 +    r->report_drains++;
 +    r->report_queue_depth_sum += depth;
@@ -1724,6 +1754,15 @@ index c860a9b..796a6e0 100644
 +    *clock = r->drain_by_clock;
 +    *queue = r->drain_by_queue;
 +    *pool = r->drain_by_pool;
++}
++
++/* The idle gap at each waiting drain, seven buckets from under 2 ms. */
++void pgraph_vk_report_wait_gaps(NV2AState *d, unsigned long out[7])
++{
++    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
++    for (int i = 0; i < 7; i++) {
++        out[i] = r->wait_gap_hist[i];
+     }
  }
 diff --git a/hw/xbox/nv2a/pgraph/vk/surface.c b/hw/xbox/nv2a/pgraph/vk/surface.c
 index f61079b..33cb545 100644
@@ -3132,10 +3171,10 @@ index ea46bf0..fd185c8 100644
  system_ss.add(when: pixman, if_true: files('console-vc.c'), if_false: files('console-vc-stubs.c'))
 diff --git a/ui/xbawks-console.swift b/ui/xbawks-console.swift
 new file mode 100644
-index 0000000..47a0519
+index 0000000..c997402
 --- /dev/null
 +++ b/ui/xbawks-console.swift
-@@ -0,0 +1,573 @@
+@@ -0,0 +1,586 @@
 +/*
 + * The console in the room, and the button that swaps a disc.
 + *
@@ -3471,7 +3510,20 @@ index 0000000..47a0519
 +              a.count == 2 else {
 +            return SIMD2<Float>(0, 0)
 +        }
-+        return SIMD2<Float>(Float(a[0]), Float(a[1]))
++        let o = SIMD2<Float>(Float(a[0]), Float(a[1]))
++        /* A saved offset outside reach is a bug's leftover, not a
++         * preference; a 126 m one was found on 2026-11-15. Start over. */
++        if o != clampPanelOffset(o) {
++            fputs("[host] panel offset \(o) out of reach, reset\n", stderr)
++            return SIMD2<Float>(0, 0)
++        }
++        return o
++    }
++
++    /// The panel stays within arm's reach of the console: half a metre
++    /// sideways, from table height to half a metre above its default.
++    static func clampPanelOffset(_ o: SIMD2<Float>) -> SIMD2<Float> {
++        SIMD2<Float>(min(max(o.x, -0.5), 0.5), min(max(o.y, -0.25), 0.5))
 +    }
 +
 +    static func savePanelOffset(_ o: SIMD2<Float>) {
@@ -3711,10 +3763,10 @@ index 0000000..47a0519
 +}
 diff --git a/ui/xbawks-picker.swift b/ui/xbawks-picker.swift
 new file mode 100644
-index 0000000..1ae2184
+index 0000000..7941af4
 --- /dev/null
 +++ b/ui/xbawks-picker.swift
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,295 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Copyright (C) 2026 A. Cervantez
 +//
@@ -3841,7 +3893,17 @@ index 0000000..1ae2184
 +                .scrollTargetLayout()
 +            }
 +            .scrollTargetBehavior(.viewAligned)
-+            .scrollPosition(id: $scrollID)
++            /*
++             * Centre anchored, so the snap grid is "a card's centre on the
++             * deck's centre" by construction. With the default leading
++             * anchor the grid is "a card's leading edge on the leading
++             * margin", which is only centred if the margin below was
++             * computed from the width the scroll view really has; after
++             * the cold-launch rebuild it was not, and cards rested a
++             * fraction of a stride off, at angles that never settled
++             * (2026-11-15).
++             */
++            .scrollPosition(id: $scrollID, anchor: .center)
 +            .scrollIndicators(.hidden)
 +            // Not centring. See note 1 at the top.
 +            .contentMargins(.horizontal,
@@ -3851,6 +3913,21 @@ index 0000000..1ae2184
 +            // across the whole window. The mask is what stops the clip being
 +            // visible, by fading cards to nothing before the boundary.
 +            .id(revision)
++            .onScrollPhaseChange { _, phase, context in
++                /* Where the deck came to rest, in strides. A whole number
++                 * is a card on the centre; anything else is the bug. */
++                guard phase == .idle else { return }
++                let stride = DeckMetrics.cardWidth
++                    * (1 - DeckMetrics.flankerOverlapFraction)
++                let g = context.geometry
++                let inset = g.contentInsets.leading
++                let strides = (g.contentOffset.x + inset) / stride
++                fputs("[host] deck rest: offset \(Int(g.contentOffset.x)) "
++                      + "inset \(Int(inset)) visible \(Int(g.visibleRect.width)) "
++                      + "geo \(Int(geo.size.width)) = \(String(format: "%.2f", strides)) "
++                      + "strides, selected \(selectedIndex), id \(String(describing: scrollID))\n",
++                      stderr)
++            }
 +        }
 +        .frame(height: DeckMetrics.deckHeight)
 +        .mask {
@@ -3879,14 +3956,32 @@ index 0000000..1ae2184
 +            .contentShape(.hoverEffect, RoundedRectangle(cornerRadius: 12))
 +            .hoverEffect()
 +            .zIndex(Double(discs.count - abs(index - selectedIndex)))
-+            .scrollTransition(.interactive, axis: .horizontal) { content, phase in
-+                content
-+                    .rotation3DEffect(.degrees(phase.value * -DeckMetrics.tiltDegrees),
++            /*
++             * Each card's look comes from its own distance to the centre of
++             * the visible deck, measured here, not from the scroll
++             * transition's phase. The phase is derived from a region the
++             * content margins are supposed to narrow to one card, and after
++             * the empty-then-populated rebuild on a cold launch that region
++             * came out two cards wide: two flat, full-size cards sat on top
++             * of each other and no amount of scrolling separated them
++             * (2026-11-15). Card centres are a fixed stride apart, so at most
++             * one card can be within half a stride of the centre.
++             */
++            .visualEffect { content, proxy in
++                let visible = proxy.bounds(of: .scrollView)
++                    ?? CGRect(origin: .zero, size: proxy.size)
++                let distance = proxy.size.width / 2 - visible.midX
++                let stride = DeckMetrics.cardWidth
++                    * (1 - DeckMetrics.flankerOverlapFraction)
++                let phase = max(-1, min(1, distance / stride))
++                let centred = abs(distance) < stride / 2
++                return content
++                    .rotation3DEffect(.degrees(phase * -DeckMetrics.tiltDegrees),
 +                                      axis: (x: 0, y: 1, z: 0), perspective: 0.7)
-+                    .scaleEffect(phase.isIdentity ? 1 : 0.78)
-+                    .offset(x: phase.value * DeckMetrics.cardWidth
++                    .scaleEffect(centred ? 1 : 0.78)
++                    .offset(x: phase * DeckMetrics.cardWidth
 +                               * DeckMetrics.flankerPushAwayFraction)
-+                    .opacity(1 - 0.25 * abs(phase.value))
++                    .opacity(1 - 0.25 * abs(phase))
 +            }
 +            // SELECTS, never loads. In the Quake deck a tap that loaded fired
 +            // by accident, because the gesture that summons the window
@@ -3969,10 +4064,10 @@ index 0000000..1ae2184
 +}
 diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
 new file mode 100644
-index 0000000..9de704b
+index 0000000..75b13a4
 --- /dev/null
 +++ b/ui/xemu-host-app.swift
-@@ -0,0 +1,628 @@
+@@ -0,0 +1,673 @@
 +// The entry point, and now the screen.
 +//
 +// Measured on 2026-10-29: a spatial controller (the PSVR2 Sense pair)
@@ -4253,6 +4348,7 @@ index 0000000..9de704b
 +    @State private var selected = 0
 +    @State private var showPanel = false
 +    @State private var panelOffset = ConsolePlacement.loadPanelOffset()
++    @State private var nudgeBase: SIMD2<Float>?
 +
 +    /*
 +     * Which gesture owns the console. A two handed turn also drives the
@@ -4263,6 +4359,11 @@ index 0000000..9de704b
 +    private enum Claim { case moving, turning }
 +    @State private var claim: Claim?
 +    @State private var pressBegan: Date?
++    /// When a move or turn last reported. A claim older than this with no
++    /// end in between belongs to a gesture the system cancelled, and
++    /// cancelled gestures never call onEnded.
++    @State private var claimTouched = Date.distantPast
++    private static let claimStale = 0.75
 +    @State private var dragOrigin: SIMD3<Float>?
 +    @State private var spinOrigin: simd_quatf?
 +
@@ -4317,10 +4418,22 @@ index 0000000..9de704b
 +                              showPanel = false
 +                          },
 +                          onClose: { showPanel = false },
-+                          onNudge: { delta, done in
-+                              let o = panelOffset + delta * 0.001
++                          onNudge: { translation, done in
++                              /*
++                               * The drag reports its total travel on every
++                               * event, so add it to where the panel was when
++                               * the drag began, not to where it is now.
++                               * Compounding it moved the panel 126 metres
++                               * under the floor and saved that (2026-11-15).
++                               */
++                              if nudgeBase == nil { nudgeBase = panelOffset }
++                              let o = ConsolePlacement.clampPanelOffset(
++                                  nudgeBase! + translation * 0.001)
 +                              panelOffset = o
-+                              if done { ConsolePlacement.savePanelOffset(o) }
++                              if done {
++                                  nudgeBase = nil
++                                  ConsolePlacement.savePanelOffset(o)
++                              }
 +                          })
 +            }
 +        }
@@ -4338,8 +4451,28 @@ index 0000000..9de704b
 +            SpatialTapGesture()
 +                .targetedToAnyEntity()
 +                .onEnded { value in
-+                    guard claim == nil,
-+                          Self.console(of: value.entity) != nil else { return }
++                    guard Self.console(of: value.entity) != nil else { return }
++                    if let c = claim {
++                        /*
++                         * A drag or turn that was cancelled mid air leaves
++                         * its claim set, and every tap after that died
++                         * here in silence (2026-11-15: the panel could be
++                         * closed and never reopened). A claim nobody has
++                         * touched for a moment is not a live gesture.
++                         */
++                        let idle = Date().timeIntervalSince(claimTouched)
++                        guard idle > Self.claimStale else {
++                            fputs("[host] console tap ignored: \(c) in progress\n",
++                                  stderr)
++                            return
++                        }
++                        fputs("[host] console tap: stale \(c) claim cleared "
++                              + "after \(idle)s\n", stderr)
++                        claim = nil
++                        pressBegan = nil
++                        dragOrigin = nil
++                        spinOrigin = nil
++                    }
 +                    discs = DiscLibrary.scan()
 +                    if selected >= discs.count {
 +                        selected = max(0, discs.count - 1)
@@ -4357,7 +4490,13 @@ index 0000000..9de704b
 +                    guard claim != .turning,
 +                          let console = Self.console(of: value.entity)
 +                    else { return }
-+                    if pressBegan == nil { pressBegan = value.time }
++                    /* A press start left over from a cancelled drag would
++                     * make the next pinch move the console at once. */
++                    if pressBegan == nil
++                        || value.time.timeIntervalSince(pressBegan!) > 2 {
++                        pressBegan = value.time
++                    }
++                    claimTouched = Date()
 +                    if claim != .moving {
 +                        guard value.time.timeIntervalSince(pressBegan!)
 +                                >= Self.holdToAdjust else { return }
@@ -4403,6 +4542,7 @@ index 0000000..9de704b
 +                          let console = Self.console(of: value.entity)
 +                    else { return }
 +                    claim = .turning
++                    claimTouched = Date()
 +                    if spinOrigin == nil { spinOrigin = console.orientation }
 +                    /* Vertical only, so it turns on the spot. The axis
 +                     * already carries the direction of the twist, so the
@@ -4656,10 +4796,10 @@ index 0000000..b2ddfd5
 +@end
 diff --git a/ui/xemu-host-ios.m b/ui/xemu-host-ios.m
 new file mode 100644
-index 0000000..846c443
+index 0000000..2a2d084
 --- /dev/null
 +++ b/ui/xemu-host-ios.m
-@@ -0,0 +1,869 @@
+@@ -0,0 +1,876 @@
 +/*
 + * xemu-host-ios.m -- the UIKit side of the house.
 + *
@@ -5529,6 +5669,13 @@ index 0000000..846c443
 +}
 +
 +#endif /* TARGET_OS_VISION || TARGET_OS_IOS */
++
++/* The device's own thermal state: 0 nominal, 1 fair, 2 serious, 3 critical.
++ * A frame rate that sinks over a session is this before it is anything else. */
++int xemu_host_thermal_state(void)
++{
++    return (int)[NSProcessInfo processInfo].thermalState;
++}
 diff --git a/ui/xemu-host-png.cc b/ui/xemu-host-png.cc
 new file mode 100644
 index 0000000..1dd3732
@@ -5564,10 +5711,10 @@ index 0000000..1dd3732
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000..289b0e2
+index 0000000..70b8b01
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,1510 @@
+@@ -0,0 +1,1544 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -6363,6 +6510,22 @@ index 0000000..289b0e2
 +                fprintf(stderr, "[host] dvd      %s (baked in)\n", baked);
 +            } else {
 +                fprintf(stderr, "[host] waiting for a disc choice\n");
++    {
++        /*
++         * A/B switch for the FIFO thread's timed wake while a report drain
++         * is deferred. Documents/no-report-wake with content "1" turns it
++         * off; the file cannot be deleted from the Mac, so content decides.
++         */
++        extern bool xemu_report_wake_enabled;
++        g_autofree char *p = g_strdup_printf("%s/Documents/no-report-wake", getenv("HOME"));
++        g_autofree char *c = NULL;
++        if (g_file_get_contents(p, &c, NULL, NULL) && c[0] == '1') {
++            xemu_report_wake_enabled = false;
++            fprintf(stderr, "[host] report wake: OFF by Documents/no-report-wake\n");
++        } else {
++            fprintf(stderr, "[host] report wake: on\n");
++        }
++    }
 +                fflush(stderr);
 +                pthread_mutex_lock(&g_disc_mu);
 +                while (!g_disc_chosen) {
@@ -6693,6 +6856,20 @@ index 0000000..289b0e2
 +                                    "waiting %lu, pool %lu\n",
 +                            c - lc, q - lq, po - lp);
 +                    lc = c; lq = q; lp = po;
++                    {
++                        /* How long the queue had sat idle at each waiting
++                         * drain. A producer caught by the rule shows up in
++                         * the short buckets; a waiter in the long ones. */
++                        extern void pgraph_vk_report_wait_gaps(NV2AState *d, unsigned long out[7]);
++                        static unsigned long lg[7];
++                        unsigned long g[7];
++                        pgraph_vk_report_wait_gaps(g_nv2a_for_stats(), g);
++                        fprintf(stderr, "[host]   waiting drains by idle gap: "
++                                        "<2ms %lu, <4 %lu, <8 %lu, <16 %lu, <32 %lu, <64 %lu, more %lu\n",
++                                g[0] - lg[0], g[1] - lg[1], g[2] - lg[2], g[3] - lg[3],
++                                g[4] - lg[4], g[5] - lg[5], g[6] - lg[6]);
++                        memcpy(lg, g, sizeof(lg));
++                    }
 +
 +                    extern void pgraph_vk_vertex_stats(NV2AState *d,
 +                        unsigned long *, unsigned long *, unsigned long *);
@@ -6745,10 +6922,14 @@ index 0000000..289b0e2
 +                static unsigned long last_blocks;
 +                int flips = nv2a_get_frame_count();
 +                unsigned long blocks = xemu_host_blocks_executed;
++                extern int xemu_host_thermal_state(void);
++                static const char *thermal[4] = { "nominal", "fair", "serious", "critical" };
++                int ts = xemu_host_thermal_state();
 +                fprintf(stderr, "[host]   guest: %d flips in 5 s, %lu blocks/s, "
-+                                "%zu TBs, %u flushes\n",
++                                "%zu TBs, %u flushes; thermal %s\n",
 +                        flips - last_flips, (blocks - last_blocks) / 5,
-+                        tcg_nb_tbs(), xemu_host_tb_flush_count());
++                        tcg_nb_tbs(), xemu_host_tb_flush_count(),
++                        (ts >= 0 && ts < 4) ? thermal[ts] : "?");
 +                last_flips = flips;
 +                last_blocks = blocks;
 +            }
