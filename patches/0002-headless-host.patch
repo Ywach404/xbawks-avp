@@ -840,18 +840,153 @@ index 198f675..666c40a 100644
  
  #if HAVE_IOSURFACE_DISPLAY
 diff --git a/hw/xbox/nv2a/pgraph/vk/draw.c b/hw/xbox/nv2a/pgraph/vk/draw.c
-index f803e43..f97858c 100644
+index f803e43..314be81 100644
 --- a/hw/xbox/nv2a/pgraph/vk/draw.c
 +++ b/hw/xbox/nv2a/pgraph/vk/draw.c
-@@ -18,6 +18,7 @@
+@@ -18,6 +18,8 @@
   */
  
  #include "qemu/osdep.h"
 +#include "qemu/timer.h"
++#include "ui/xemu-settings.h"
  #include "qemu/fast-hash.h"
  #include "renderer.h"
  #include <math.h>
-@@ -1243,6 +1244,28 @@ const enum NV2A_PROF_COUNTERS_ENUM finish_reason_to_counter_enum[] = {
+@@ -125,19 +127,95 @@ static bool pipeline_cache_entry_compare(Lru *lru, LruNode *node,
+     return memcmp(&snode->key, key, sizeof(PipelineKey));
+ }
+ 
++/*
++ * The pipeline cache lives across launches. Every new shader combination
++ * costs a pipeline build on the render thread, and on this platform that
++ * is MoltenVK translating the SPIR-V and Metal compiling the result,
++ * tens of milliseconds the guest sees as a hitch: Doom 3's first rocket.
++ * Saved on teardown and every 30 s while new pipelines have appeared,
++ * because the app is usually killed, not quit.
++ */
++unsigned long xemu_vk_pipelines_built, xemu_vk_pipeline_ns;
++unsigned long xemu_vk_cache_saves, xemu_vk_cache_bytes;
++
++static char *pipeline_cache_path(void)
++{
++    return g_strdup_printf("%svk-pipeline-cache.bin",
++                           xemu_settings_get_base_path());
++}
++
++void pgraph_vk_save_pipeline_cache(PGRAPHState *pg)
++{
++    PGRAPHVkState *r = pg->vk_renderer_state;
++    size_t size = 0;
++    if (vkGetPipelineCacheData(r->device, r->vk_pipeline_cache, &size, NULL)
++            != VK_SUCCESS || size == 0) {
++        return;
++    }
++    g_autofree void *data = g_malloc(size);
++    if (vkGetPipelineCacheData(r->device, r->vk_pipeline_cache, &size, data)
++            != VK_SUCCESS) {
++        return;
++    }
++    g_autofree char *path = pipeline_cache_path();
++    g_autofree char *tmp = g_strdup_printf("%s.tmp", path);
++    g_autoptr(GError) err = NULL;
++    if (!g_file_set_contents(tmp, data, size, &err) || rename(tmp, path) != 0) {
++        fprintf(stderr, "[vk] pipeline cache not saved: %s\n",
++                err ? err->message : strerror(errno));
++        return;
++    }
++    r->pipelines_since_save = 0;
++    r->last_cache_save_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
++    xemu_vk_cache_saves++;
++    xemu_vk_cache_bytes = size;
++}
++
++/* Called from the FIFO thread between pushes; nothing else builds
++ * pipelines, so the cache is not in use while it is serialised. */
++void pgraph_vk_maybe_save_pipeline_cache(PGRAPHState *pg)
++{
++    PGRAPHVkState *r = pg->vk_renderer_state;
++    if (r->pipelines_since_save == 0) {
++        return;
++    }
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
++    if (now - r->last_cache_save_ns < 30 * 1000000000LL) {
++        return;
++    }
++    pgraph_vk_save_pipeline_cache(pg);
++}
++
+ static void init_pipeline_cache(PGRAPHState *pg)
+ {
+     PGRAPHVkState *r = pg->vk_renderer_state;
+ 
++    g_autofree char *path = pipeline_cache_path();
++    g_autofree char *data = NULL;
++    gsize size = 0;
++    g_file_get_contents(path, &data, &size, NULL);
++
+     VkPipelineCacheCreateInfo cache_info = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+         .flags = 0,
+-        .initialDataSize = 0,
+-        .pInitialData = NULL,
++        .initialDataSize = size,
++        .pInitialData = data,
+         .pNext = NULL,
+     };
+-    VK_CHECK(vkCreatePipelineCache(r->device, &cache_info, NULL,
+-                                   &r->vk_pipeline_cache));
++    VkResult res = vkCreatePipelineCache(r->device, &cache_info, NULL,
++                                         &r->vk_pipeline_cache);
++    if (res != VK_SUCCESS && size) {
++        /* A cache from another device or driver build. Start over. */
++        fprintf(stderr, "[vk] pipeline cache on disk rejected (%d), starting empty\n", res);
++        cache_info.initialDataSize = 0;
++        cache_info.pInitialData = NULL;
++        res = vkCreatePipelineCache(r->device, &cache_info, NULL,
++                                    &r->vk_pipeline_cache);
++    }
++    VK_CHECK(res);
++    fprintf(stderr, "[vk] pipeline cache: %zu bytes loaded from disk\n", (size_t)size);
++    r->last_cache_save_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
++    r->pipelines_since_save = 0;
+ 
+     const size_t pipeline_cache_size = 2048;
+     lru_init(&r->pipeline_cache);
+@@ -161,6 +239,7 @@ static void finalize_pipeline_cache(PGRAPHState *pg)
+     g_free(r->pipeline_cache_entries);
+     r->pipeline_cache_entries = NULL;
+ 
++    pgraph_vk_save_pipeline_cache(pg);
+     vkDestroyPipelineCache(r->device, r->vk_pipeline_cache, NULL);
+ }
+ 
+@@ -605,8 +684,12 @@ static void create_clear_pipeline(PGRAPHState *pg)
+     };
+ 
+     VkPipeline pipeline;
++    int64_t t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+     VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
+                                        &pipeline_info, NULL, &pipeline));
++    xemu_vk_pipeline_ns += qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - t0;
++    xemu_vk_pipelines_built++;
++    r->pipelines_since_save++;
+ 
+     snode->pipeline = pipeline;
+     snode->layout = layout;
+@@ -1038,8 +1121,12 @@ static void create_pipeline(PGRAPHState *pg)
+         .basePipelineHandle = VK_NULL_HANDLE,
+     };
+     VkPipeline pipeline;
++    int64_t t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+     VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
+                                        &pipeline_create_info, NULL, &pipeline));
++    xemu_vk_pipeline_ns += qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - t0;
++    xemu_vk_pipelines_built++;
++    r->pipelines_since_save++;
+ 
+     snode->pipeline = pipeline;
+     snode->layout = layout;
+@@ -1243,6 +1330,28 @@ const enum NV2A_PROF_COUNTERS_ENUM finish_reason_to_counter_enum[] = {
      [VK_FINISH_REASON_STALLED] = NV2A_PROF_FINISH_STALLED,
  };
  
@@ -880,7 +1015,7 @@ index f803e43..f97858c 100644
  void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
  {
      PGRAPHVkState *r = pg->vk_renderer_state;
-@@ -1250,7 +1273,14 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
+@@ -1250,7 +1359,14 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
      assert(!r->in_draw);
      assert(r->debug_depth == 0);
  
@@ -895,7 +1030,7 @@ index f803e43..f97858c 100644
          nv2a_profile_inc_counter(finish_reason_to_counter_enum[finish_reason]);
  
          if (r->in_render_pass) {
-@@ -1326,6 +1356,11 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
+@@ -1326,6 +1442,11 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
      pgraph_vk_process_pending_reports_internal(d);
  
      pgraph_vk_compute_finish_complete(r);
@@ -907,7 +1042,7 @@ index f803e43..f97858c 100644
  }
  
  void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
-@@ -1534,6 +1569,9 @@ static void end_draw(PGRAPHState *pg)
+@@ -1534,6 +1655,9 @@ static void end_draw(PGRAPHState *pg)
          end_render_pass(r);
      }
  
@@ -917,7 +1052,7 @@ index f803e43..f97858c 100644
      r->in_draw = false;
  }
  
-@@ -1663,11 +1701,52 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
+@@ -1663,11 +1787,52 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
          if (memory_region_test_and_clear_dirty(d->vram, addr, size,
                                                 DIRTY_MEMORY_NV2A)) {
              NV2A_VK_DPRINTF("Memory dirty. Synchronizing...");
@@ -970,7 +1105,7 @@ index f803e43..f97858c 100644
      r->num_vertex_ram_buffer_syncs = 0;
  
      NV2A_VK_DGROUP_END();
-@@ -1940,6 +2019,33 @@ typedef struct VertexBufferRemap {
+@@ -1940,6 +2105,33 @@ typedef struct VertexBufferRemap {
      } map[NV2A_VERTEXSHADER_ATTRIBUTES];
  } VertexBufferRemap;
  
@@ -1004,7 +1139,7 @@ index f803e43..f97858c 100644
  static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
                                                      uint32_t num_vertices)
  {
-@@ -1947,6 +2053,8 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
+@@ -1947,6 +2139,8 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
  
      VertexBufferRemap remap = {0};
  
@@ -1013,7 +1148,7 @@ index f803e43..f97858c 100644
      VkDeviceAddress output_offset = 0;
  
      for (int attr_id = 0; attr_id < NV2A_VERTEXSHADER_ATTRIBUTES; attr_id++) {
-@@ -1991,6 +2099,9 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
+@@ -1991,6 +2185,9 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
      }
  
      remap.buffer_space_required = output_offset;
@@ -1023,6 +1158,47 @@ index f803e43..f97858c 100644
  
      // reserve space
      if (remap.attributes) {
+diff --git a/hw/xbox/nv2a/pgraph/vk/glsl.c b/hw/xbox/nv2a/pgraph/vk/glsl.c
+index b1867d3..d798b16 100644
+--- a/hw/xbox/nv2a/pgraph/vk/glsl.c
++++ b/hw/xbox/nv2a/pgraph/vk/glsl.c
+@@ -19,6 +19,7 @@
+ 
+ #include "ui/xemu-settings.h"
+ #include "renderer.h"
++#include "qemu/timer.h"
+ 
+ #include <assert.h>
+ #include <glslang/Include/glslang_c_interface.h>
+@@ -140,9 +141,28 @@ void pgraph_vk_finalize_glsl_compiler(void)
+     glslang_finalize_process();
+ }
+ 
++static GByteArray *compile_glsl_to_spv_inner(PGRAPHVkState *r,
++                                             glslang_stage_t stage,
++                                             const char *glsl_source);
++
++/* The first stage of a new shader's cost: GLSL to SPIR-V through glslang,
++ * on the render thread. Timed so the hitch can be apportioned. */
++unsigned long xemu_vk_glsl_compiles, xemu_vk_glsl_ns;
++
+ GByteArray *pgraph_vk_compile_glsl_to_spv(PGRAPHVkState *r,
+                                           glslang_stage_t stage,
+                                           const char *glsl_source)
++{
++    int64_t t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
++    GByteArray *out = compile_glsl_to_spv_inner(r, stage, glsl_source);
++    xemu_vk_glsl_ns += qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - t0;
++    xemu_vk_glsl_compiles++;
++    return out;
++}
++
++static GByteArray *compile_glsl_to_spv_inner(PGRAPHVkState *r,
++                                             glslang_stage_t stage,
++                                             const char *glsl_source)
+ {
+     glslang_target_client_version_t client_version;
+     glslang_target_language_version_t target_spv;
 diff --git a/hw/xbox/nv2a/pgraph/vk/gpuprops.c b/hw/xbox/nv2a/pgraph/vk/gpuprops.c
 index cbda578..2ec96d6 100644
 --- a/hw/xbox/nv2a/pgraph/vk/gpuprops.c
@@ -1129,7 +1305,7 @@ index 668a8ff..b311510 100644
                               modules: ['CoreFoundation', 'IOSurface', 'OpenGL']),
                    files('iosurface.c'))
 diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.c b/hw/xbox/nv2a/pgraph/vk/renderer.c
-index d69a31a..f5725a3 100644
+index d69a31a..7d67a13 100644
 --- a/hw/xbox/nv2a/pgraph/vk/renderer.c
 +++ b/hw/xbox/nv2a/pgraph/vk/renderer.c
 @@ -20,7 +20,9 @@
@@ -1179,15 +1355,19 @@ index d69a31a..f5725a3 100644
  
      pgraph_vk_update_vertex_ram_buffer(&d->pgraph, 0, d->vram_ptr,
                                     memory_region_size(d->vram));
-@@ -119,6 +142,7 @@ static void pgraph_vk_process_pending(NV2AState *d)
+@@ -117,8 +140,11 @@ static void pgraph_vk_process_pending(NV2AState *d)
+ {
+     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
  
++    pgraph_vk_maybe_save_pipeline_cache(&d->pgraph);
++
      if (qatomic_read(&r->downloads_pending) ||
          qatomic_read(&r->download_dirty_surfaces_pending) ||
 +        qatomic_read(&r->present_pending) ||
          qatomic_read(&d->pgraph.sync_pending) ||
          qatomic_read(&d->pgraph.flush_pending)
      ) {
-@@ -127,6 +151,9 @@ static void pgraph_vk_process_pending(NV2AState *d)
+@@ -127,6 +153,9 @@ static void pgraph_vk_process_pending(NV2AState *d)
          if (qatomic_read(&r->downloads_pending)) {
              pgraph_vk_process_pending_downloads(d);
          }
@@ -1197,7 +1377,7 @@ index d69a31a..f5725a3 100644
          if (qatomic_read(&r->download_dirty_surfaces_pending)) {
              pgraph_vk_download_dirty_surfaces(d);
          }
-@@ -141,6 +168,23 @@ static void pgraph_vk_process_pending(NV2AState *d)
+@@ -141,6 +170,23 @@ static void pgraph_vk_process_pending(NV2AState *d)
      }
  }
  
@@ -1221,7 +1401,7 @@ index d69a31a..f5725a3 100644
  static void pgraph_vk_flip_stall(NV2AState *d)
  {
      pgraph_vk_finish(&d->pgraph, VK_FINISH_REASON_FLIP_STALL);
-@@ -200,6 +244,19 @@ static int pgraph_vk_get_framebuffer_surface(NV2AState *d)
+@@ -200,6 +246,19 @@ static int pgraph_vk_get_framebuffer_surface(NV2AState *d)
  #else
      qemu_mutex_unlock(&d->pfifo.lock);
      pgraph_vk_wait_for_surface_download(surface);
@@ -1242,7 +1422,7 @@ index d69a31a..f5725a3 100644
  #endif
  }
 diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.h b/hw/xbox/nv2a/pgraph/vk/renderer.h
-index 9d8fefe..40c8e10 100644
+index 9d8fefe..09a7c5d 100644
 --- a/hw/xbox/nv2a/pgraph/vk/renderer.h
 +++ b/hw/xbox/nv2a/pgraph/vk/renderer.h
 @@ -44,7 +44,17 @@
@@ -1411,9 +1591,12 @@ index 9d8fefe..40c8e10 100644
      bool download_dirty_surfaces_pending;
      QemuEvent dirty_surfaces_download_complete; // common
  
-@@ -437,6 +537,15 @@ typedef struct PGRAPHVkState {
+@@ -436,7 +536,18 @@ typedef struct PGRAPHVkState {
+     VkQueryPool query_pool;
      int max_queries_in_flight; // FIXME: Move out to constant
      int num_queries_in_flight;
++    unsigned pipelines_since_save;  /* new pipelines not yet on disk */
++    int64_t last_cache_save_ns;
      bool new_query_needed;
 +    int64_t last_report_service_ns; /* deadlock breaker, see reports.c */
 +    unsigned long report_drains, report_drains_skipped;
@@ -1427,7 +1610,7 @@ index 9d8fefe..40c8e10 100644
      bool query_in_flight;
      uint32_t zpass_pixel_count_result;
      QSIMPLEQ_HEAD(, QueryReport) report_queue; // FIXME: Statically allocate
-@@ -502,7 +611,17 @@ VkDeviceSize pgraph_vk_append_to_buffer(PGRAPHState *pg, int index, void **data,
+@@ -502,7 +613,17 @@ VkDeviceSize pgraph_vk_append_to_buffer(PGRAPHState *pg, int index, void **data,
  void pgraph_vk_init_command_buffers(PGRAPHState *pg);
  void pgraph_vk_finalize_command_buffers(PGRAPHState *pg);
  VkCommandBuffer pgraph_vk_begin_single_time_commands(PGRAPHState *pg);
@@ -1446,7 +1629,7 @@ index 9d8fefe..40c8e10 100644
  
  // image.c
  void pgraph_vk_transition_image_layout(PGRAPHState *pg, VkCommandBuffer cmd,
-@@ -517,6 +636,9 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
+@@ -517,6 +638,9 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
                                        unsigned int inline_stride,
                                        unsigned int provoking_element);
  void pgraph_vk_bind_vertex_attributes_inline(NV2AState *d);
@@ -1456,7 +1639,7 @@ index 9d8fefe..40c8e10 100644
  void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset, void *data,
                                      VkDeviceSize size);
  VkDeviceSize pgraph_vk_update_index_buffer(PGRAPHState *pg, void *data,
-@@ -535,6 +657,9 @@ void pgraph_vk_surface_flush(NV2AState *d);
+@@ -535,6 +659,9 @@ void pgraph_vk_surface_flush(NV2AState *d);
  void pgraph_vk_process_pending_downloads(NV2AState *d);
  void pgraph_vk_surface_download_if_dirty(NV2AState *d, SurfaceBinding *surface);
  SurfaceBinding *pgraph_vk_surface_get_within(NV2AState *d, hwaddr addr);
@@ -1466,9 +1649,12 @@ index 9d8fefe..40c8e10 100644
  void pgraph_vk_wait_for_surface_download(SurfaceBinding *e);
  void pgraph_vk_download_dirty_surfaces(NV2AState *d);
  unsigned int pgraph_vk_mark_surfaces_in_range_for_upload(NV2AState *d,
-@@ -589,6 +714,17 @@ void pgraph_vk_clear_report_value(NV2AState *d);
+@@ -588,7 +715,20 @@ void pgraph_vk_finalize_reports(PGRAPHState *pg);
+ void pgraph_vk_clear_report_value(NV2AState *d);
  void pgraph_vk_get_report(NV2AState *d, uint32_t parameter);
  void pgraph_vk_process_pending_reports(NV2AState *d);
++void pgraph_vk_save_pipeline_cache(PGRAPHState *pg);
++void pgraph_vk_maybe_save_pipeline_cache(PGRAPHState *pg);
  void pgraph_vk_process_pending_reports_internal(NV2AState *d);
 +void pgraph_vk_report_stats(NV2AState *d, unsigned long *drains,
 +                            unsigned long *skipped, unsigned long *depth_sum,
@@ -5747,10 +5933,10 @@ index 0000000..1dd3732
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000..74d9474
+index 0000000..3564e84
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,1565 @@
+@@ -0,0 +1,1581 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -7111,6 +7297,22 @@ index 0000000..74d9474
 +                static unsigned long last_notify;
 +                char fifo[300];
 +                pfifo_state_line(fifo, sizeof(fifo));
++                {
++                    /* New shaders and pipelines this window, with the time
++                     * the render thread spent building them, and the cache
++                     * on disk. */
++                    extern unsigned long xemu_vk_glsl_compiles, xemu_vk_glsl_ns;
++                    extern unsigned long xemu_vk_pipelines_built, xemu_vk_pipeline_ns;
++                    extern unsigned long xemu_vk_cache_saves, xemu_vk_cache_bytes;
++                    static unsigned long lg, lgn, lp, lpn;
++                    fprintf(stderr, "[host]   shaders in 5 s: %lu compiled (%lu ms), "
++                                    "pipelines %lu built (%lu ms); cache %lu KB, %lu saves\n",
++                            xemu_vk_glsl_compiles - lg, (xemu_vk_glsl_ns - lgn) / 1000000,
++                            xemu_vk_pipelines_built - lp, (xemu_vk_pipeline_ns - lpn) / 1000000,
++                            xemu_vk_cache_bytes / 1024, xemu_vk_cache_saves);
++                    lg = xemu_vk_glsl_compiles; lgn = xemu_vk_glsl_ns;
++                    lp = xemu_vk_pipelines_built; lpn = xemu_vk_pipeline_ns;
++                }
 +                fprintf(stderr, "[host]   apu notifies in 5 s: %lu; fifo: %s\n",
 +                        xemu_apu_notifies - last_notify, fifo);
 +                last_notify = xemu_apu_notifies;
