@@ -3190,3 +3190,43 @@ seconds while it grows, because this app is killed far more often than
 it is quit. One run of Doom 3 leaves 10.6 MB behind, and on the second run
 the first rocket landed clean.
 
+## 2026-11-16: four minutes in three instructions
+
+Morrowind took four minutes to load a Balmora save. Upstream has a good
+account of slow loads in this game: D3D's fence wait spins instead of
+sleeping when the GPU is close, the loading screen thread spins at a
+higher priority than the loader, and the loader starves. I built a
+pacing switch for the push buffer to test it, and then read the counters
+from a baseline load before turning it on.
+
+They did not show a fence wait. For ninety seconds the hottest address
+was a three instruction loop: load the next pointer from the current
+node, load the one after it, test for null, jump back. A linked list
+walk to the tail. Disc reads were a trickle, the GPU was idle, and the
+vCPU almost never halted.
+
+A list walk should take microseconds per node. This one was taking a
+quarter of a millisecond, because the translator has a detector for
+polling loops, the ones that read a word and wait for a device to change
+it, and puts the host thread to sleep between iterations once a loop has
+spun for 20 us. Its rule was that the loop only loads and compares, and
+that every register it changes was assigned earlier in the same
+iteration. A load is an assignment, so `p = p->next` passed. But a poll
+reads the same place every time; a list walk reads wherever the previous
+iteration pointed it. The tell is a register that is read before it is
+written and then written again, carried from one iteration into the
+next.
+
+The detector now tracks exactly that and rejects the loop. The fence
+wait it was written for reads three registers and writes two others, and
+still passes. The save now loads in about a minute.
+
+The remaining minute is different in kind: the guest is halted most of
+the time, the IDE status port is read 9,000 to 19,000 times per five
+seconds, and the hard disk sees about 9,000 operations in the same
+window. That is drive latency, every request going through a worker
+thread and back through the main loop, and it is the next lever. The
+pacing switch stays in the tree, off, because the fence wait's spin or
+sleep decision is a real difference from hardware even though it was not
+this one.
+
