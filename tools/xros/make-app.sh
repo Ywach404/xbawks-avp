@@ -11,7 +11,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT="$(pwd)"
-BUILD="$ROOT/third_party/xemu/build-xros"
+# XEMU_BUILD names another build directory, for putting a binary from a
+# second tree (an A/B against an older state) through the same assembly.
+BUILD="${XEMU_BUILD:-$ROOT/third_party/xemu/build-xros}"
 SYSROOT="${XROS_SYSROOT:-$ROOT/../_scratch/xros-sysroot}"
 APP="$ROOT/build-app/Xbawks.app"
 # The app's own identifier. It can be overridden for one run, which is how

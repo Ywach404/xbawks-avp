@@ -4064,10 +4064,10 @@ index 0000000..7941af4
 +}
 diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
 new file mode 100644
-index 0000000..75b13a4
+index 0000000..88e53cd
 --- /dev/null
 +++ b/ui/xemu-host-app.swift
-@@ -0,0 +1,673 @@
+@@ -0,0 +1,708 @@
 +// The entry point, and now the screen.
 +//
 +// Measured on 2026-10-29: a spatial controller (the PSVR2 Sense pair)
@@ -4161,6 +4161,10 @@ index 0000000..75b13a4
 +    @State private var discs: [DiscEntry] = []
 +    @State private var selected = 0
 +    @State private var started = xemu_host_started()
++    /// The JIT cannot start without a debugger attached. Checked before a
++    /// disc is chosen, and again every second while the picker is up, so
++    /// the reason is on the screen instead of only in the log.
++    @State private var traced = xemu_host_debugger_attached()
 +
 +    var body: some View {
 +        ZStack {
@@ -4234,6 +4238,24 @@ index 0000000..75b13a4
 +                } else {
 +                    DiscCoverFlow(discs: discs, selectedIndex: $selected)
 +
++                    if !traced {
++                        VStack(spacing: 4) {
++                            Text("NEEDS APPARITION")
++                                .font(XbawksTheme.face(12, .bold))
++                                .tracking(3)
++                                .foregroundStyle(.orange)
++                            Text("visionOS will not let an app make memory executable, "
++                                 + "so the emulator cannot start on its own. Quit this, "
++                                 + "then launch Xbawks from Apparition on a Mac on this "
++                                 + "network. It attaches for a moment and the JIT comes up.")
++                                .font(XbawksTheme.face(11))
++                                .foregroundStyle(.secondary)
++                                .multilineTextAlignment(.center)
++                                .padding(.horizontal, 40)
++                        }
++                        .padding(.vertical, 6)
++                    }
++
 +                    Button {
 +                        Task { await start(discs.indices.contains(selected)
 +                                           ? discs[selected] : nil) }
@@ -4245,7 +4267,7 @@ index 0000000..75b13a4
 +                            .padding(.horizontal, 26).padding(.vertical, 6)
 +                    }
 +                    .tint(XbawksTheme.dimGreen)
-+                    .disabled(discs.isEmpty)
++                    .disabled(discs.isEmpty || !traced)
 +
 +                    Text("Discs go in Files, under XBAWKS then GAMES. "
 +                         + "A .jpg or .png with the same name is its cover.")
@@ -4261,6 +4283,19 @@ index 0000000..75b13a4
 +                }
 +            }
 +            .padding(.vertical, 28)
++        }
++        .task {
++            /* Re-check the debugger once a second until a game starts; the
++             * attach can arrive after the window is up. */
++            while !started {
++                let now = xemu_host_debugger_attached()
++                if now != traced {
++                    traced = now
++                    fputs("[host] launcher: debugger \(now ? "attached" : "absent")\n", stderr)
++                    fflush(stderr)
++                }
++                try? await Task.sleep(for: .seconds(1))
++            }
 +        }
 +        .task {
 +            rescan()
@@ -4743,10 +4778,10 @@ index 0000000..75b13a4
 +}
 diff --git a/ui/xemu-host-bridge.h b/ui/xemu-host-bridge.h
 new file mode 100644
-index 0000000..b2ddfd5
+index 0000000..b6e20f0
 --- /dev/null
 +++ b/ui/xemu-host-bridge.h
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,48 @@
 +/*
 + * What the Swift entry point sees of the Objective-C shell. Kept to the
 + * two classes it wraps and the one function it calls first.
@@ -4775,6 +4810,7 @@ index 0000000..b2ddfd5
 +char *xemu_host_list_discs(void);
 +void xemu_host_start_with_disc(const char *filename);
 +bool xemu_host_started(void);
++bool xemu_host_debugger_attached(void);
 +
 +/* Mid session disc changes. Both are safe to call from the UI thread. */
 +void xemu_host_load_disc(const char *filename);
@@ -5711,10 +5747,10 @@ index 0000000..1dd3732
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000..70b8b01
+index 0000000..74d9474
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,1544 @@
+@@ -0,0 +1,1565 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -5774,6 +5810,7 @@ index 0000000..70b8b01
 +int tcg_splitwx_scratch(void **rw, void **rx, size_t *len, void **rx_base);
 +
 +#include <locale.h>
++#include <sys/sysctl.h>
 +#ifdef __APPLE__
 +#include <TargetConditionals.h>
 +#endif
@@ -6089,6 +6126,26 @@ index 0000000..70b8b01
 +bool xemu_host_started(void)
 +{
 +    return qatomic_read(&g_emulator_started);
++}
++
++/*
++ * Whether a debugger is attached right now. On this platform the JIT's
++ * code buffer can only be prepared by one (see tcg/region.c), and the
++ * check there fails the boot with the reason in the log and nothing on
++ * screen. The picker asks this first so the reason is on screen instead,
++ * before a disc is chosen rather than after.
++ */
++bool xemu_host_debugger_attached(void)
++{
++    struct kinfo_proc info;
++    size_t len = sizeof(info);
++    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid() };
++
++    info.kp_proc.p_flag = 0;
++    if (sysctl(mib, 4, &info, &len, NULL, 0) != 0) {
++        return false;
++    }
++    return (info.kp_proc.p_flag & P_TRACED) != 0;
 +}
 +
 +/*
