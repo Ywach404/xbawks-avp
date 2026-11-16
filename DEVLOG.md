@@ -3230,3 +3230,25 @@ pacing switch stays in the tree, off, because the fence wait's spin or
 sleep decision is a real difference from hardware even though it was not
 this one.
 
+**The remaining minute, the same night.** Timing every drive command
+from the guest's write to its completion interrupt gave 250 to 900
+microseconds for reads the host already had in memory, where tens would
+be right. The cause was one level down from the drives. Darwin has no
+ppoll, so when the next device timer is less than 1.25 ms away the main
+loop sleeps on a precise kernel timer and spins the last few
+microseconds. A 1 ms USB frame timer keeps it on that path about 2,200
+times a second. That sleep watched the timer and nothing else, and a
+finished disk read announces itself on a pipe the main loop is supposed
+to be watching. Every completion waited for the next timer tick, and the
+IDE bus serves one command at a time. The sleep now watches the pipe as
+well, the way ppoll would. Per-command time fell to 13 to 20
+microseconds on both drives and the drive-bound part of the load from
+about 35 seconds to about 20: the Balmora save now loads in under a
+minute, from four this morning.
+
+The poll detector fix had a side effect worth recording: Halo on the
+Pillar of Autumn went from about 21 fps to 23.6 and Blinx from about 27
+to 29.8. Both were running smaller loops that had been put to sleep as
+if they were polls. Short runs at nearby spots, so a few frames rather
+than a precise figure.
+
