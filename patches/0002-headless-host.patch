@@ -430,11 +430,23 @@ index 2a9b731..7414129 100644
  void nv2a_release_framebuffer_surface(void);
  void nv2a_set_surface_scale_factor(unsigned int scale);
  unsigned int nv2a_get_surface_scale_factor(void);
+diff --git a/hw/xbox/nv2a/nv2a_int.h b/hw/xbox/nv2a/nv2a_int.h
+index bbc8b22..f908a90 100644
+--- a/hw/xbox/nv2a/nv2a_int.h
++++ b/hw/xbox/nv2a/nv2a_int.h
+@@ -103,6 +103,7 @@ typedef struct NV2AState {
+         QemuCond fifo_idle_cond;
+         bool fifo_kick;
+         bool halt;
++        bool pace_starved; /* the pacing bucket ran dry this iteration */
+     } pfifo;
+ 
+     struct {
 diff --git a/hw/xbox/nv2a/pfifo.c b/hw/xbox/nv2a/pfifo.c
-index 66cc710..d07c4d5 100644
+index 66cc710..2d17be3 100644
 --- a/hw/xbox/nv2a/pfifo.c
 +++ b/hw/xbox/nv2a/pfifo.c
-@@ -108,6 +108,44 @@ static bool can_fifo_access(NV2AState *d) {
+@@ -108,6 +108,88 @@ static bool can_fifo_access(NV2AState *d) {
  /* If NV097_FLIP_STALL was executed, check if the flip has completed.
   * This will usually happen in the VSYNC interrupt handler.
   */
@@ -445,6 +457,49 @@ index 66cc710..d07c4d5 100644
 + */
 +unsigned long xemu_semaphore_releases;
 +unsigned long xemu_report_timed_wakes;
++unsigned long xemu_pusher_bytes;
++
++/*
++ * Pacing the pusher, as an experiment with a switch. Documents/pace holds
++ * a rate in KB per millisecond; 0 or absent is off, which is the default.
++ *
++ * Why anyone would slow a GPU down: D3D's fence wait decides between
++ * spinning and sleeping by how far the fence is ahead of the GPU's get
++ * pointer, with a 9 KB line between them. On hardware the pointer lags
++ * and the loading screen thread sleeps, so the loader thread runs. Here
++ * the pusher drains everything the instant it is kicked, the pointer is
++ * never behind, the loading screen thread spins at priority 10 and the
++ * loader at 8 waits for a quantum that never comes. Morrowind's load
++ * screen. A token bucket on consumption makes the pointer lag the way
++ * silicon does, which is a cost to every title and must be measured.
++ */
++unsigned xemu_pace_kb_per_ms;
++unsigned long xemu_pace_stalls;
++static int64_t pace_tokens;      /* bytes in the bucket, may go negative */
++static int64_t pace_last_ns;
++#define PACE_BURST_BYTES (4 * 1024)
++
++static bool pace_allows(NV2AState *d, int64_t *now_out)
++{
++    if (!xemu_pace_kb_per_ms) {
++        return true;
++    }
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
++    if (pace_last_ns) {
++        /* KB/ms is bytes per microsecond times 1.024. */
++        pace_tokens += (now - pace_last_ns) * xemu_pace_kb_per_ms * 1024 / 1000000;
++        if (pace_tokens > PACE_BURST_BYTES) {
++            pace_tokens = PACE_BURST_BYTES;
++        }
++    }
++    pace_last_ns = now;
++    if (pace_tokens <= 0) {
++        d->pfifo.pace_starved = true;
++        xemu_pace_stalls++;
++        return false;
++    }
++    return true;
++}
 +/* A/B switch for the timed wake, set by the host from Documents/no-report-wake
 + * (content "1" turns the wake off). Off reproduces the Morrowind hang. */
 +bool xemu_report_wake_enabled = true;
@@ -461,7 +516,7 @@ index 66cc710..d07c4d5 100644
 +    snprintf(buf, len,
 +             "dma get=%x put=%x push=%x pull0=%x fifo_access=%d "
 +             "flip=%d nop=%d ctxsw=%d read3d=%u write3d=%u halt=%d "
-+             "semaphores=%lu timed_wakes=%lu",
++             "semaphores=%lu timed_wakes=%lu pace=%uKB/ms stalls=%lu",
 +             d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET],
 +             d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT],
 +             d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUSH],
@@ -473,18 +528,53 @@ index 66cc710..d07c4d5 100644
 +             (unsigned)GET_MASK(surface, NV_PGRAPH_SURFACE_READ_3D),
 +             (unsigned)GET_MASK(surface, NV_PGRAPH_SURFACE_WRITE_3D),
 +             (int)d->pfifo.halt,
-+             xemu_semaphore_releases, xemu_report_timed_wakes);
++             xemu_semaphore_releases, xemu_report_timed_wakes,
++             xemu_pace_kb_per_ms, xemu_pace_stalls);
 +}
 +
  static bool is_flip_stall_complete(NV2AState *d)
  {
      PGRAPHState *pg = &d->pgraph;
-@@ -482,7 +520,20 @@ void *pfifo_thread(void *arg)
+@@ -299,7 +381,9 @@ static void pfifo_run_pusher(NV2AState *d)
+     while (!pfifo_pusher_should_stall(d)) {
+         uint32_t dma_get_v = *dma_get;
+         uint32_t dma_put_v = *dma_put;
++        uint32_t prev_get = dma_get_v;
+         if (dma_get_v == dma_put_v) break;
++        if (!pace_allows(d, NULL)) break;
+         if (dma_get_v >= dma_len) {
+             assert(!"Dma value is out of range in PFIFO pusher");
+             SET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_ERROR,
+@@ -432,6 +516,12 @@ static void pfifo_run_pusher(NV2AState *d)
+             }
+         }
+ 
++        /* Bytes the pusher consumed, forward moves only; a jump is a
++         * seek, not consumption. For sizing a pacing rate. */
++        if (dma_get_v > prev_get) {
++            xemu_pusher_bytes += dma_get_v - prev_get;
++            pace_tokens -= dma_get_v - prev_get;
++        }
+         *dma_get = dma_get_v;
+ 
+         if (GET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_ERROR)) {
+@@ -466,6 +556,7 @@ void *pfifo_thread(void *arg)
+     qemu_mutex_lock(&d->pfifo.lock);
+     while (true) {
+         d->pfifo.fifo_kick = false;
++        d->pfifo.pace_starved = false;
+ 
+         pgraph_process_pending(d);
+ 
+@@ -482,7 +573,23 @@ void *pfifo_thread(void *arg)
              qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
  
              // Both the pusher and puller are waiting for some action
 -            qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
-+            if (xemu_report_wake_enabled &&
++            if (d->pfifo.pace_starved) {
++                /* The bucket is empty; it refills with time, not kicks. */
++                qemu_cond_timedwait(&d->pfifo.fifo_cond, &d->pfifo.lock, 1);
++            } else if (xemu_report_wake_enabled &&
 +                qatomic_read(&d->pgraph.reports_deferred)) {
 +                /*
 +                 * A report drain was put off. The second look that the
@@ -2912,6 +3002,194 @@ index 89c8c5a..f8481e4 100644
      cs->halted = 1;
      cs->exception_index = EXCP_HLT;
      cpu_loop_exit(cs);
+diff --git a/target/i386/tcg/translate.c b/target/i386/tcg/translate.c
+index 5a49734..d752886 100644
+--- a/target/i386/tcg/translate.c
++++ b/target/i386/tcg/translate.c
+@@ -4340,26 +4340,38 @@ static bool is_xbox_idle_loop(DisasContext *dc, CPUX86State *env)
+ 
+ /*
+  * Length of the ModRM (+SIB, displacement) bytes at pc for 32-bit addressing,
+- * or 0 if unreadable. *is_reg tells whether r/m is a register.
++ * or 0 if unreadable. *is_reg tells whether r/m is a register. *operand is
++ * the mask of registers the operand reads: the r/m register itself, or the
++ * base and index of a memory operand.
+  */
+ static int xbox_modrm_len(DisasContext *dc, CPUX86State *env, vaddr pc,
+-                          bool *is_reg)
++                          bool *is_reg, unsigned *operand)
+ {
+     int modrm = translator_ldub(env, &dc->base, pc);
+     int mod = modrm >> 6, rm = modrm & 7, len = 1;
+ 
++    *operand = 0;
+     *is_reg = mod == 3;
+     if (mod == 3) {
++        *operand = 1 << rm;
+         return 1;
+     }
+     if (rm == 4) {
+         int sib = translator_ldub(env, &dc->base, pc + 1);
++        int index = (sib >> 3) & 7, base = sib & 7;
+         len++;
+-        if (mod == 0 && (sib & 7) == 5) {
++        if (index != 4) {
++            *operand |= 1 << index;
++        }
++        if (mod == 0 && base == 5) {
+             len += 4;
++        } else {
++            *operand |= 1 << base;
+         }
+     } else if (mod == 0 && rm == 5) {
+         len += 4;
++    } else {
++        *operand |= 1 << rm;
+     }
+     if (mod == 1) {
+         len += 1;
+@@ -4380,12 +4392,22 @@ static int xbox_modrm_len(DisasContext *dc, CPUX86State *env, vaddr pc,
+  * helper_xbox_poll). Register modifications are only accepted on registers
+  * assigned earlier in the same iteration, which rejects counting loops like
+  * "dec ecx; jnz".
++ *
++ * State carried between iterations is the other thing to reject, and the
++ * register rule alone does not: a load is an assignment, so
++ *     1: mov eax,[eax+1c]; mov ecx,[eax+1c]; test ecx,ecx; jne 1b
++ * looked like a poll. It is a linked list walk to the tail, and with a
++ * 250 us sleep per step Morrowind took four minutes to load a save
++ * (2026-11-16). So every register read before it is written in the
++ * iteration is "carried in", and a loop that writes a carried register is
++ * not stateless: its next iteration reads something this one computed.
+  */
+ static bool is_xbox_poll_loop(DisasContext *dc, CPUX86State *env)
+ {
+     vaddr start = dc->base.pc_first, pc = start;
+     vaddr page_end = (start & TARGET_PAGE_MASK) + TARGET_PAGE_SIZE;
+     unsigned fresh = 0;        /* 32-bit registers assigned this iteration */
++    unsigned carried = 0;      /* registers read before being assigned */
+     bool loads = false;
+ 
+     if (dc->base.num_insns != 1 || CODE64(dc) || !CODE32(dc) ||
+@@ -4393,8 +4415,11 @@ static bool is_xbox_poll_loop(DisasContext *dc, CPUX86State *env)
+         return false;
+     }
+ 
++#define READS(mask) (carried |= (mask) & ~fresh)
++
+     for (int n = 0; n < 8; n++) {
+         bool is_reg;
++        unsigned operand;
+         int len, op, modrm, reg, rm;
+ 
+         /* Stay inside the page: at most 2 + 1 + 1 + 4 + 4 bytes per insn */
+@@ -4417,38 +4442,43 @@ static bool is_xbox_poll_loop(DisasContext *dc, CPUX86State *env)
+             len = 2;
+             break;
+         case 0x8b:                                  /* mov r32, r/m32 */
+-            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg);
++            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg, &operand);
+             loads |= !is_reg;
++            READS(operand);
+             fresh |= 1 << reg;
+             break;
+         case 0x8a:                                  /* mov r8, r/m8 */
+         case 0x38: case 0x39: case 0x3a: case 0x3b: /* cmp */
+         case 0x84: case 0x85:                       /* test */
+-            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg);
++            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg, &operand);
+             loads |= !is_reg;
++            READS(operand | (1 << reg));
+             break;
+         case 0x03: case 0x0b: case 0x23:            /* add/or/and r32, r/m */
+         case 0x2b: case 0x33:                       /* sub/xor r32, r/m */
+-            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg);
++            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg, &operand);
+             loads |= !is_reg;
+             if (!(fresh & (1 << reg))) {
+                 return false;
+             }
++            READS(operand);
+             break;
+         case 0x01: case 0x09: case 0x21:            /* add/or/and r/m32, r */
+         case 0x29: case 0x31:                       /* sub/xor r/m32, r */
+         case 0x89:                                  /* mov r/m32, r */
+-            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg);
++            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg, &operand);
+             if (!is_reg || (op != 0x89 && !(fresh & (1 << rm)))) {
+                 return false;
+             }
++            READS(1 << reg);
+             fresh |= 1 << rm;
+             break;
+         case 0x81: case 0x83:                       /* alu r/m32, imm */
+-            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg) +
++            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg, &operand) +
+                   (op == 0x81 ? 4 : 1);
+             if (reg == 7) {
+                 loads |= !is_reg;                   /* cmp */
++                READS(operand);
+             } else if (!is_reg || !(fresh & (1 << rm)) ||
+                        reg == 2 || reg == 3) {      /* no adc/sbb */
+                 return false;
+@@ -4458,39 +4488,44 @@ static bool is_xbox_poll_loop(DisasContext *dc, CPUX86State *env)
+             if (reg != 7) {
+                 return false;
+             }
+-            len = 2 + xbox_modrm_len(dc, env, pc + 1, &is_reg);
++            len = 2 + xbox_modrm_len(dc, env, pc + 1, &is_reg, &operand);
+             loads |= !is_reg;
++            READS(operand);
+             break;
+         case 0xf6: case 0xf7:                       /* test r/m, imm */
+             if (reg != 0) {
+                 return false;
+             }
+-            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg) +
++            len = 1 + xbox_modrm_len(dc, env, pc + 1, &is_reg, &operand) +
+                   (op == 0xf7 ? 4 : 1);
+             loads |= !is_reg;
++            READS(operand);
+             break;
+         case 0x0f:
+             if (modrm == 0xb6 || modrm == 0xb7 ||   /* movzx/movsx */
+                 modrm == 0xbe || modrm == 0xbf) {
+                 int modrm2 = translator_ldub(env, &dc->base, pc + 2);
+-                len = 2 + xbox_modrm_len(dc, env, pc + 2, &is_reg);
++                len = 2 + xbox_modrm_len(dc, env, pc + 2, &is_reg, &operand);
+                 loads |= !is_reg;
++                READS(operand);
+                 fresh |= 1 << ((modrm2 >> 3) & 7);
+                 break;
+             }
+             if (modrm >= 0x80 && modrm <= 0x8f) {   /* jcc rel32 */
+                 int32_t rel = translator_ldl(env, &dc->base, pc + 2);
+-                return loads && pc + 6 + rel == start;
++                return loads && !(carried & fresh) && pc + 6 + rel == start;
+             }
+             return false;
+         case 0x70 ... 0x7f: {                       /* jcc rel8 */
+             int8_t rel = modrm;
+-            return loads && pc + 2 + rel == start;
++            return loads && !(carried & fresh) && pc + 2 + rel == start;
+         }
+         case 0x3c: case 0xa8:                       /* cmp/test al, imm8 */
++            READS(1 << R_EAX);
+             len = 2;
+             break;
+         case 0x3d: case 0xa9:                       /* cmp/test eax, imm32 */
++            READS(1 << R_EAX);
+             len = 5;
+             break;
+         case 0xb8 ... 0xbf:                         /* mov r32, imm32 */
+@@ -4502,6 +4537,7 @@ static bool is_xbox_poll_loop(DisasContext *dc, CPUX86State *env)
+         }
+         pc += len;
+     }
++#undef READS
+     return false;
+ }
+ 
 diff --git a/tcg/region.c b/tcg/region.c
 index 2181267..a1ab290 100644
 --- a/tcg/region.c
@@ -5933,10 +6211,10 @@ index 0000000..1dd3732
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000..3564e84
+index 0000000..97edea5
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,1581 @@
+@@ -0,0 +1,1596 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -6768,6 +7046,15 @@ index 0000000..3564e84
 +        } else {
 +            fprintf(stderr, "[host] report wake: on\n");
 +        }
++        /* Pusher pacing experiment: Documents/pace holds KB per ms. */
++        extern unsigned xemu_pace_kb_per_ms;
++        g_autofree char *pp = g_strdup_printf("%s/Documents/pace", getenv("HOME"));
++        g_autofree char *pc = NULL;
++        if (g_file_get_contents(pp, &pc, NULL, NULL)) {
++            xemu_pace_kb_per_ms = (unsigned)strtoul(pc, NULL, 10);
++        }
++        fprintf(stderr, "[host] pusher pacing: %u KB/ms%s\n", xemu_pace_kb_per_ms,
++                xemu_pace_kb_per_ms ? "" : " (off)");
 +    }
 +                fflush(stderr);
 +                pthread_mutex_lock(&g_disc_mu);
@@ -7168,11 +7455,17 @@ index 0000000..3564e84
 +                extern int xemu_host_thermal_state(void);
 +                static const char *thermal[4] = { "nominal", "fair", "serious", "critical" };
 +                int ts = xemu_host_thermal_state();
-+                fprintf(stderr, "[host]   guest: %d flips in 5 s, %lu blocks/s, "
-+                                "%zu TBs, %u flushes; thermal %s\n",
++                extern unsigned long xemu_pusher_bytes;
++                static unsigned long last_push_bytes;
++                fprintf(stderr, "[host]   guest at %lus: %d flips in 5 s, %lu blocks/s, "
++                                "%zu TBs, %u flushes; pushed %lu KB (%lu KB/s); thermal %s\n",
++                        (unsigned long)elapsed,
 +                        flips - last_flips, (blocks - last_blocks) / 5,
 +                        tcg_nb_tbs(), xemu_host_tb_flush_count(),
++                        (xemu_pusher_bytes - last_push_bytes) / 1024,
++                        (xemu_pusher_bytes - last_push_bytes) / 1024 / 5,
 +                        (ts >= 0 && ts < 4) ? thermal[ts] : "?");
++                last_push_bytes = xemu_pusher_bytes;
 +                last_flips = flips;
 +                last_blocks = blocks;
 +            }
