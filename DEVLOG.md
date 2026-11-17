@@ -5,9 +5,13 @@ and what I got wrong before I got it right. Entries are dated and in order,
 so the dead ends are still here rather than tidied away. Numbers are from my
 own headset unless a line says otherwise.
 
-Game titles named below are discs dumped from my own console, used to test
-the port. No game data, boot ROM, BIOS or disk image is part of this
+Game titles named below are from discs I own, used to test the port. No
+game data, boot ROM, BIOS or disk image is part of this
 repository or of any build it produces.
+
+**If you only read one thing:** S0 below concluded there was no JIT on
+visionOS. It was wrong, and [S0 answered again](#2026-10-22----s0-answered-again-jit-works-on-visionos-27)
+is where JIT works and the rest of this log begins.
 
 ## S0 -- JIT probe
 

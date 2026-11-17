@@ -38,26 +38,26 @@ Ported and maintained by A. Cervantez. xemu and QEMU are the work of their respe
 - Takes input from a pair of PSVR2 Sense controllers (or an extended gamepad): sticks, face buttons, analog triggers.
 - Pauses when you leave and resumes when you come back.
 
-What it does not do yet: run at the internal scale it could (the screen shows the guest's 640x480), save state, or let you move the screen. The devlog has the measurements behind every one of those.
+What it does not do yet: save state, or let you move the screen. Higher internal resolution is a switch rather than a setting so far (see `AVP-INSTALL.md`). The devlog has the measurements behind every one of those.
 
 ## What runs
 
-Measured on the headset on 2026-11-10, each title played for a few minutes from my own discs. Frame rates are the median over the session; the original hardware ran Halo at 29.5 fps average. All of these are discs I own; the build carries none of them.
+Measured on the headset between 2026-11-10 and 2026-11-17, each title played for a few minutes from my own discs. Frame rates are the median over the session; the original hardware ran Halo at 29.5 fps average. All of these are discs I own; the build carries none of them.
 
 | Title | Result | Notes |
 |---|---|---|
 | Halo: Combat Evolved | Plays | 29.4 fps, matching the original console. Cutscenes drift from their audio when a scene runs slow. |
 | Dead or Alive 2 Ultimate | Plays | 60 fps, its full cap. The title upstream used to measure the vertex work this port carries. |
 | Jet Set Radio Future | Plays | 60 fps. The boost effect dips to about 25 for its duration, a known cost upstream too. |
-| Doom 3 | Plays | 32 fps, locked, the flattest line of anything here. One stutter on the first rocket impact, then never again: a pipeline compiling on first use. |
+| Doom 3 | Plays | 32 fps, locked, the flattest line of anything here, at native resolution or at twice it. The first-rocket stutter is gone now that pipelines are cached between launches. |
 | Project Gotham Racing 2 | Plays | 28 fps on a 30 fps target. Looks right; feels a little less smooth than it should. |
-| Blinx: The Time Sweeper | Plays | 27 fps on Deja Vu Canals, which ran at 6 before the vertex work. |
-| Cel Damage | Plays | Slower than it should be; sync-heavy in a way not yet cracked. |
+| Blinx: The Time Sweeper | Plays | 33 fps on Deja Vu Canals, which ran at 6 before the vertex work. |
+| Cel Damage | Plays | 32 fps, up from 25 once x87 floating point ran on the headset's own hardware. |
 | Fuzion Frenzy | Plays | Launch title, no issues seen in a short run. |
-| Halo 2 | Starts | 32 fps for the first three minutes, then memory climbs to 8 GB in the Cairo Station firefight and the system kills it. HUD shield bar and ammo boxes missing from the start, no zoom view, armour pops in. |
-| The Elder Scrolls III: Morrowind | Plays | 18 to 28 fps outdoors in Balmora, 65 indoors. Loading is slow. Hung on the prison ship until 2026-11-15; see the devlog for what it was waiting on. |
+| Halo 2 | Plays | 33 fps through the Cairo Station firefight, memory flat at 4.6 GB. HUD shield bar and ammo boxes missing, no zoom view, armour pops in. |
+| The Elder Scrolls III: Morrowind | Plays | 18 to 28 fps outdoors in Balmora, 65 indoors, measured before the x87 change. A save in Balmora loads in under a minute, down from four. Hung on the prison ship until 2026-11-15; see the devlog for what it was waiting on. |
 
-"Plays" means I played it and nothing looked wrong. "Starts" means it got to gameplay and then failed in a way that is recorded in the devlog with the numbers.
+"Plays" means I played it through; anything that looked wrong is in its notes. "Starts" means it got to gameplay and then failed in a way that is recorded in the devlog with the numbers.
 
 ## Why it needs a debugger to start
 
@@ -84,9 +84,9 @@ apparition jit <bundle id>    # launch; attaches, prepares, detaches
 
 Xbawks ships no game data and no Microsoft code, and it never downloads any. Like xemu, it needs four things you supply yourself, placed in the app's `Documents` folder in Files:
 
-- an **MCPX boot ROM** and a **BIOS image**, both Microsoft's, dumped from your own console
+- an **MCPX boot ROM** and a **BIOS image**, both Microsoft's, from your own console
 - a **hard disk image**, which xemu's own tooling creates blank, and which then holds your saves
-- your **disc images**, dumped from discs you own, in `Documents/GAMES`
+- your **disc images**, from discs you own, in `Documents/GAMES`
 
 None of these are part of this repository or of any build it produces. The build script copies nothing unless a variable names it explicitly for that run, and refuses to produce an IPA at all if it did; `.gitignore` denies the files and a push guard refuses them on every remote, as backstops. Run the build with nothing set and list the output: that is the test, and it is what the repository is held to.
 
