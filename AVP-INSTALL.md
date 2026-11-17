@@ -9,7 +9,7 @@ Xbawks is an original Xbox emulator that runs on the headset itself. It is a por
 - Apple Vision Pro on visionOS 26 or later
 - A Mac with Xcode 27 or later (built and tested with 27.0), on the same network as the headset
 - An Apple ID. A free developer account works; its signing profile lasts seven days, after which you sign and install again
-- [Apparition](https://apparition.illixion.com) 0.4.5 on the Mac ([release](https://github.com/illixion/Apparition/releases/tag/v0.4.5)), paired with the headset. **It is required at every launch**, not just the first. 1.0.0 does not start Xbawks yet (see JIT, below)
+- [Apparition](https://apparition.illixion.com) on the Mac, paired with the headset (tested with 1.0.0 and 0.4.5). **It is required at every launch**, not just the first (see JIT, below)
 - A game controller: a pair of PSVR2 Sense controllers, or a PS4 controller (or another extended gamepad) over Bluetooth
 - Your own console's files and your own discs (see Game files)
 - About 7 GB of free disk on the Mac for the source and the build
@@ -18,7 +18,7 @@ Xbawks is an original Xbox emulator that runs on the headset itself. It is a por
 
 visionOS does not let an app make its own memory executable, and an emulator's JIT needs exactly that. Xbawks allocates its code buffer at launch and asks a debugger to prepare it, using the `brk #0x69` request. Apparition answers that request: it attaches for about two seconds, prepares the buffer, and detaches, and the emulator runs on its own from then on. Debugger tools that only answer other JIT requests will not start it. Without a debugger the emulator refuses to start and says why in its log.
 
-Tested with Apparition 0.4.5. With 1.0.0, released 13 November 2026, the app stops on a trap in a system library before it makes its request, and the launch hangs at its window. I'm working out why; use 0.4.5 until this guide says otherwise.
+Tested with Apparition 1.0.0 and 0.4.5. The first launches after installing 1.0.0 hung twice at the app's window; every launch since has started normally. If a launch hangs, end it with Ctrl-C and run `apparition jit` again.
 
 ### Memory
 
