@@ -3018,6 +3018,201 @@ index f45bdc3..d3fceca 100644
      int mem = ((int)g_config.sys.mem_limit + 1) * 64;
      fake_argv[fake_argc++] = strdup("-m");
      fake_argv[fake_argc++] = g_strdup_printf("%d", mem);
+diff --git a/target/i386/helper.h b/target/i386/helper.h
+index be70ec3..51e8114 100644
+--- a/target/i386/helper.h
++++ b/target/i386/helper.h
+@@ -105,7 +105,7 @@ DEF_HELPER_FLAGS_3(write_crN, TCG_CALL_NO_RWG, void, env, int, tl)
+ #endif /* !CONFIG_USER_ONLY */
+ 
+ /* x86 FPU */
+-#if defined(XBOX) && defined(__x86_64__)
++#if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
+ #define HS_DEF_HELPER_1(name, ret, t1) \
+ 	DEF_HELPER_1(name ## __soft, ret, t1) \
+ 	DEF_HELPER_1(name ## __hard, ret, t1)
+diff --git a/target/i386/tcg/fpu_helper.c b/target/i386/tcg/fpu_helper.c
+index 9c540b1..60bbd83 100644
+--- a/target/i386/tcg/fpu_helper.c
++++ b/target/i386/tcg/fpu_helper.c
+@@ -73,12 +73,149 @@
+ #define floatx80_ln2_d make_floatx80(0x3ffe, 0xb17217f7d1cf79abLL)
+ #define floatx80_pi_d make_floatx80(0x4000, 0xc90fdaa22168c234LL)
+ 
+-#if defined(XBOX) && defined(__x86_64__)
++#if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
+ #ifdef USE_HARD_FPU
+ /*
+  * FIXME: rounding and exceptions
+  */
+ 
++#if !defined(__x86_64__)
++static inline double fx80_to_host(floatx80 a)
++{
++    int exp = a.high & 0x7fff;
++    uint64_t sign = (uint64_t)(a.high & 0x8000) << 48;
++    union { uint64_t b; double d; } u;
++
++    if (exp == 0) {
++        u.b = sign;
++        return u.d;
++    }
++    if (exp == 0x7fff) {
++        u.b = sign | 0x7ff0000000000000ull |
++              ((a.low & 0x7fffffffffffffffull) >> 11);
++        return u.d;
++    }
++    int dexp = exp - 16383 + 1023;
++    if (dexp <= 0) {
++        u.b = sign;
++    } else if (dexp >= 0x7ff) {
++        u.b = sign | 0x7ff0000000000000ull;
++    } else {
++        u.b = sign | ((uint64_t)dexp << 52) |
++              ((a.low & 0x7fffffffffffffffull) >> 11);
++    }
++    return u.d;
++}
++
++static inline floatx80 host_to_fx80(double v)
++{
++    union { double d; uint64_t b; } u = { .d = v };
++    uint64_t dman = u.b & 0xfffffffffffffull;
++    int dexp = (u.b >> 52) & 0x7ff;
++    uint16_t sign = (u.b >> 48) & 0x8000;
++    floatx80 r;
++
++    if (dexp == 0) {
++        r.low = 0;
++        r.high = sign;
++    } else if (dexp == 0x7ff) {
++        r.low = 0x8000000000000000ull | (dman << 11);
++        r.high = sign | 0x7fff;
++    } else {
++        r.low = 0x8000000000000000ull | (dman << 11);
++        r.high = sign | (uint16_t)(dexp - 1023 + 16383);
++    }
++    return r;
++}
++
++static inline double pack_prec(double v, float_status *status)
++{
++    if (status->floatx80_rounding_precision == floatx80_precision_s) {
++        return (float)v;
++    }
++    return v;
++}
++
++static inline
++floatx80 floatx80_add__hard(floatx80 a, floatx80 b, float_status *status)
++{
++    return host_to_fx80(pack_prec(fx80_to_host(a) + fx80_to_host(b), status));
++}
++
++static inline
++floatx80 floatx80_sub__hard(floatx80 a, floatx80 b, float_status *status)
++{
++    return host_to_fx80(pack_prec(fx80_to_host(a) - fx80_to_host(b), status));
++}
++
++static inline
++floatx80 floatx80_mul__hard(floatx80 a, floatx80 b, float_status *status)
++{
++    return host_to_fx80(pack_prec(fx80_to_host(a) * fx80_to_host(b), status));
++}
++
++static inline
++floatx80 floatx80_div__hard(floatx80 a, floatx80 b, float_status *status)
++{
++    /* FIXME: Exceptions */
++    return host_to_fx80(pack_prec(fx80_to_host(a) / fx80_to_host(b), status));
++}
++
++static inline
++FloatRelation floatx80_compare__hard(floatx80 a, floatx80 b, float_status *status)
++{
++    double da = fx80_to_host(a), db = fx80_to_host(b);
++
++    if (da < db) return float_relation_less;
++    if (da > db) return float_relation_greater;
++    if (da == db) return float_relation_equal;
++    return float_relation_unordered;
++}
++
++static inline
++floatx80 float32_to_floatx80__hard(float32 val, float_status *status)
++{
++    return host_to_fx80(*(float *)&val);
++}
++
++static inline
++float32 floatx80_to_float32__hard(floatx80 a, float_status *status)
++{
++    union {
++        float32 f32;
++        float f;
++    } x;
++
++    x.f = fx80_to_host(a);
++    return x.f32;
++}
++
++static inline
++floatx80 float64_to_floatx80__hard(float64 val, float_status *status)
++{
++    return host_to_fx80(*(double *)&val);
++}
++
++static inline
++float64 floatx80_to_float64__hard(floatx80 a, float_status *status)
++{
++    union {
++        float64 f64;
++        double d;
++    } x;
++
++    x.d = fx80_to_host(a);
++    return x.f64;
++}
++
++static inline
++floatx80 int32_to_floatx80__hard(int32_t a, float_status *status)
++{
++    return host_to_fx80(a);
++}
++
++#else /* __x86_64__ */
++
+ static inline
+ floatx80 pack(floatx80 v, float_status *status)
+ {
+@@ -165,6 +302,8 @@ floatx80 int32_to_floatx80__hard(int32_t a, float_status *status)
+     return (floatx80){ .fval = a };
+ }
+ 
++#endif /* __x86_64__ */
++
+ #define floatx80_add          floatx80_add__hard
+ #define floatx80_sub          floatx80_sub__hard
+ #define floatx80_mul          floatx80_mul__hard
+@@ -3449,6 +3588,7 @@ void update_mxcsr_status(CPUX86State *env)
+     uint32_t mxcsr = env->mxcsr;
+     int rnd_type;
+ 
++
+     /* set rounding mode */
+     rnd_type = (mxcsr & SSE_RC_MASK) >> SSE_RC_SHIFT;
+     set_x86_rounding_mode(rnd_type, &env->sse_status);
+diff --git a/target/i386/tcg/fpu_helper_hard.c b/target/i386/tcg/fpu_helper_hard.c
+index ce4abe5..a91a74a 100644
+--- a/target/i386/tcg/fpu_helper_hard.c
++++ b/target/i386/tcg/fpu_helper_hard.c
+@@ -1,4 +1,4 @@
+-#if defined(XBOX) && defined(__x86_64__)
++#if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
+ #define USE_HARD_FPU 1
+ #include "fpu_helper.c"
+ #endif
 diff --git a/target/i386/tcg/seg_helper.c b/target/i386/tcg/seg_helper.c
 index 227336c..ae0ba9d 100644
 --- a/target/i386/tcg/seg_helper.c
@@ -3143,10 +3338,101 @@ index 89c8c5a..f8481e4 100644
      cs->exception_index = EXCP_HLT;
      cpu_loop_exit(cs);
 diff --git a/target/i386/tcg/translate.c b/target/i386/tcg/translate.c
-index 5a49734..d752886 100644
+index 5a49734..5f6c2d1 100644
 --- a/target/i386/tcg/translate.c
 +++ b/target/i386/tcg/translate.c
-@@ -4340,26 +4340,38 @@ static bool is_xbox_idle_loop(DisasContext *dc, CPUX86State *env)
+@@ -35,12 +35,14 @@
+ 
+ #include "exec/log.h"
+ 
+-static int g_use_hard_fpu;
++static int g_use_hard_fpu_inline;
++static int g_use_hard_fpu_helpers;
+ 
+-#if defined(XBOX) && defined(__x86_64__)
++#if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
+ #include "ui/xemu-settings.h"
+ #define MAP_GEN_HELPER_SOFT_HARD(name) \
+-    (g_use_hard_fpu ? gen_helper_##name##__hard : gen_helper_##name##__soft)
++    (g_use_hard_fpu_helpers ? gen_helper_##name##__hard \
++                            : gen_helper_##name##__soft)
+ #define gen_helper_flds_FT0       MAP_GEN_HELPER_SOFT_HARD(flds_FT0)
+ #define gen_helper_fldl_FT0       MAP_GEN_HELPER_SOFT_HARD(fldl_FT0)
+ #define gen_helper_fildl_FT0      MAP_GEN_HELPER_SOFT_HARD(fildl_FT0)
+@@ -121,7 +123,7 @@ static int g_use_hard_fpu;
+ #define gen_helper_fldenv         MAP_GEN_HELPER_SOFT_HARD(fldenv)
+ #define gen_helper_fsave          MAP_GEN_HELPER_SOFT_HARD(fsave)
+ #define gen_helper_frstor         MAP_GEN_HELPER_SOFT_HARD(frstor)
+-#endif /* defined(XBOX) && defined(__x86_64__) */
++#endif /* defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__)) */
+ 
+ #define HELPER_H "helper.h"
+ #include "exec/helper-info.c.inc"
+@@ -1732,25 +1734,25 @@ static void gen_flush_fp(DisasContext *s)
+  * Ugly macros to handle soft FPU helper generation
+  */
+ #define GEN_HELPER_FALLBACK_v_v(func) do { \
+-        if (!g_use_hard_fpu) { \
++        if (!g_use_hard_fpu_inline) { \
+             gen_helper_ ## func(tcg_env); \
+             return; \
+         }} while(0)
+ 
+ #define GEN_HELPER_FALLBACK_v_i(func, arg) do { \
+-        if (!g_use_hard_fpu) { \
++        if (!g_use_hard_fpu_inline) { \
+             gen_helper_ ## func(tcg_env, tcg_constant_i32(arg)); \
+             return; \
+         }} while(0)
+ 
+ #define GEN_HELPER_FALLBACK_v_T(func, arg) do { \
+-        if (!g_use_hard_fpu) { \
++        if (!g_use_hard_fpu_inline) { \
+             gen_helper_ ## func(tcg_env, arg); \
+             return; \
+         }} while(0)
+ 
+ #define GEN_HELPER_FALLBACK_T_v(func, arg) do { \
+-        if (!g_use_hard_fpu) { \
++        if (!g_use_hard_fpu_inline) { \
+             gen_helper_ ## func(arg, tcg_env); \
+             return; \
+         }} while(0)
+@@ -1940,7 +1942,7 @@ static void gen_fcos(DisasContext *s)
+ 
+ static void gen_helper_fp_arith_ST0_FT0(DisasContext *s, int op)
+ {
+-    if (g_use_hard_fpu) {
++    if (g_use_hard_fpu_inline) {
+         fp_pc_wrapper(gen_helper_fp_arith_ST0_FT0)(s, op);
+     } else {
+         switch (op) {
+@@ -1980,7 +1982,7 @@ static void gen_fcom_ST0_FT0(DisasContext *s)
+ /* NOTE the exception in "r" op ordering */
+ static void gen_helper_fp_arith_STN_ST0(DisasContext *s, int op, int opreg)
+ {
+-    if (g_use_hard_fpu) {
++    if (g_use_hard_fpu_inline) {
+         fp_pc_wrapper(gen_helper_fp_arith_STN_ST0)(s, op, opreg);
+     } else {
+         TCGv_i32 tmp = tcg_constant_i32(opreg);
+@@ -4227,8 +4229,13 @@ void tcg_x86_init(void)
+     fpstt = tcg_global_mem_new_i32(tcg_env,
+                                    offsetof(CPUX86State, fpstt), "fpstt");
+ 
+-#if defined(XBOX) && defined(__x86_64__)
+-    g_use_hard_fpu = g_config.perf.hard_fpu;
++#if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
++#if defined(__aarch64__)
++    g_use_hard_fpu_inline = 0;
++#else
++    g_use_hard_fpu_inline = g_config.perf.hard_fpu;
++#endif
++    g_use_hard_fpu_helpers = g_config.perf.hard_fpu;
+ #endif
+ }
+ 
+@@ -4340,26 +4347,38 @@ static bool is_xbox_idle_loop(DisasContext *dc, CPUX86State *env)
  
  /*
   * Length of the ModRM (+SIB, displacement) bytes at pc for 32-bit addressing,
@@ -3188,7 +3474,7 @@ index 5a49734..d752886 100644
      }
      if (mod == 1) {
          len += 1;
-@@ -4380,12 +4392,22 @@ static int xbox_modrm_len(DisasContext *dc, CPUX86State *env, vaddr pc,
+@@ -4380,12 +4399,22 @@ static int xbox_modrm_len(DisasContext *dc, CPUX86State *env, vaddr pc,
   * helper_xbox_poll). Register modifications are only accepted on registers
   * assigned earlier in the same iteration, which rejects counting loops like
   * "dec ecx; jnz".
@@ -3211,7 +3497,7 @@ index 5a49734..d752886 100644
      bool loads = false;
  
      if (dc->base.num_insns != 1 || CODE64(dc) || !CODE32(dc) ||
-@@ -4393,8 +4415,11 @@ static bool is_xbox_poll_loop(DisasContext *dc, CPUX86State *env)
+@@ -4393,8 +4422,11 @@ static bool is_xbox_poll_loop(DisasContext *dc, CPUX86State *env)
          return false;
      }
  
@@ -3223,7 +3509,7 @@ index 5a49734..d752886 100644
          int len, op, modrm, reg, rm;
  
          /* Stay inside the page: at most 2 + 1 + 1 + 4 + 4 bytes per insn */
-@@ -4417,38 +4442,43 @@ static bool is_xbox_poll_loop(DisasContext *dc, CPUX86State *env)
+@@ -4417,38 +4449,43 @@ static bool is_xbox_poll_loop(DisasContext *dc, CPUX86State *env)
              len = 2;
              break;
          case 0x8b:                                  /* mov r32, r/m32 */
@@ -3272,7 +3558,7 @@ index 5a49734..d752886 100644
              } else if (!is_reg || !(fresh & (1 << rm)) ||
                         reg == 2 || reg == 3) {      /* no adc/sbb */
                  return false;
-@@ -4458,39 +4488,44 @@ static bool is_xbox_poll_loop(DisasContext *dc, CPUX86State *env)
+@@ -4458,39 +4495,44 @@ static bool is_xbox_poll_loop(DisasContext *dc, CPUX86State *env)
              if (reg != 7) {
                  return false;
              }
@@ -3322,7 +3608,7 @@ index 5a49734..d752886 100644
              len = 5;
              break;
          case 0xb8 ... 0xbf:                         /* mov r32, imm32 */
-@@ -4502,6 +4537,7 @@ static bool is_xbox_poll_loop(DisasContext *dc, CPUX86State *env)
+@@ -4502,6 +4544,7 @@ static bool is_xbox_poll_loop(DisasContext *dc, CPUX86State *env)
          }
          pc += len;
      }
@@ -6351,10 +6637,10 @@ index 0000000..1dd3732
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000..7c1c562
+index 0000000..a39b6ab
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,1689 @@
+@@ -0,0 +1,1706 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -7348,6 +7634,23 @@ index 0000000..7c1c562
 +            g_config.display.quality.surface_scale = scale;
 +            fprintf(stderr, "[host] surface scale: %dx%s\n", scale,
 +                    scale == 1 ? " (native)" : " (Documents/surface-scale)");
++        }
++        {
++            /*
++             * x87 through host doubles (upstream PR #2981, the hard FPU
++             * helpers enabled on aarch64). On by default like every other
++             * xemu build; Documents/soft-fpu content 1 puts every x87 op
++             * back through 80-bit softfloat, for an A/B or a title that
++             * needs the exact arithmetic.
++             */
++            g_autofree char *fp = g_strdup_printf("%s/Documents/soft-fpu",
++                                                  getenv("HOME"));
++            g_autofree char *fc = NULL;
++            if (g_file_get_contents(fp, &fc, NULL, NULL) && atoi(fc) == 1) {
++                g_config.perf.hard_fpu = false;
++            }
++            fprintf(stderr, "[host] x87: %s\n", g_config.perf.hard_fpu
++                    ? "host double" : "softfloat (Documents/soft-fpu)");
 +        }
 +        fprintf(stderr, "[host] bootrom  %s\n", g_config.sys.files.bootrom_path);
 +        fprintf(stderr, "[host] flashrom %s\n", g_config.sys.files.flashrom_path);
