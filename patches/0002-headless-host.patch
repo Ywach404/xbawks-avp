@@ -443,10 +443,44 @@ index bbc8b22..f908a90 100644
  
      struct {
 diff --git a/hw/xbox/nv2a/pfifo.c b/hw/xbox/nv2a/pfifo.c
-index 66cc710..2d17be3 100644
+index 66cc710..9c98e5e 100644
 --- a/hw/xbox/nv2a/pfifo.c
 +++ b/hw/xbox/nv2a/pfifo.c
-@@ -108,6 +108,88 @@ static bool can_fifo_access(NV2AState *d) {
+@@ -100,6 +100,33 @@ void pfifo_kick(NV2AState *d)
+     qemu_cond_broadcast(&d->pfifo.fifo_cond);
+ }
+ 
++/*
++ * A guest spinning in a poll loop (helper_xbox_poll) while a report drain
++ * is deferred is waiting on that report. This is the waiting signal that
++ * does not depend on how fast the guest is: with x87 on host doubles,
++ * Blinx stopped sitting idle long enough for the time rule to see it, and
++ * its enemies flickered again. Halo never polls while it produces.
++ */
++int64_t xemu_guest_poll_ns;
++unsigned long xemu_guest_poll_kicks;
++
++void xemu_guest_polling(void)
++{
++    NV2AState *d = g_nv2a;
++    if (!d || !qatomic_read(&d->pgraph.reports_deferred)) {
++        return;
++    }
++    int64_t now = get_clock();
++    if (now - qatomic_read(&xemu_guest_poll_ns) < 100000) {
++        return;   /* kicked within the last 100 us */
++    }
++    qatomic_set(&xemu_guest_poll_ns, now);
++    xemu_guest_poll_kicks++;
++    qemu_mutex_lock(&d->pfifo.lock);
++    pfifo_kick(d);
++    qemu_mutex_unlock(&d->pfifo.lock);
++}
++
+ static bool can_fifo_access(NV2AState *d) {
+     return qatomic_read(&d->pgraph.regs_[NV_PGRAPH_FIFO]) &
+            NV_PGRAPH_FIFO_ACCESS;
+@@ -108,6 +135,98 @@ static bool can_fifo_access(NV2AState *d) {
  /* If NV097_FLIP_STALL was executed, check if the flip has completed.
   * This will usually happen in the VSYNC interrupt handler.
   */
@@ -503,6 +537,16 @@ index 66cc710..2d17be3 100644
 +/* A/B switch for the timed wake, set by the host from Documents/no-report-wake
 + * (content "1" turns the wake off). Off reproduces the Morrowind hang. */
 +bool xemu_report_wake_enabled = true;
++/*
++ * How long the FIFO has to sit idle with the report queue unchanged before
++ * the guest counts as waiting on a result (pgraph_vk_process_pending_reports),
++ * and the period of the alarm that takes the second look. 4 ms was set with
++ * x87 in softfloat; Documents/report-confirm-us overrides it.
++ */
++unsigned xemu_report_confirm_us = 4000;
++/* Documents/report-always: drain on every idle, to separate timing from math. */
++bool xemu_report_always;
++
 +void pfifo_state_line(char *buf, size_t len)
 +{
 +    NV2AState *d = g_nv2a_for_stats();
@@ -535,7 +579,7 @@ index 66cc710..2d17be3 100644
  static bool is_flip_stall_complete(NV2AState *d)
  {
      PGRAPHState *pg = &d->pgraph;
-@@ -299,7 +381,9 @@ static void pfifo_run_pusher(NV2AState *d)
+@@ -299,7 +418,9 @@ static void pfifo_run_pusher(NV2AState *d)
      while (!pfifo_pusher_should_stall(d)) {
          uint32_t dma_get_v = *dma_get;
          uint32_t dma_put_v = *dma_put;
@@ -545,7 +589,7 @@ index 66cc710..2d17be3 100644
          if (dma_get_v >= dma_len) {
              assert(!"Dma value is out of range in PFIFO pusher");
              SET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_ERROR,
-@@ -432,6 +516,12 @@ static void pfifo_run_pusher(NV2AState *d)
+@@ -432,6 +553,12 @@ static void pfifo_run_pusher(NV2AState *d)
              }
          }
  
@@ -558,7 +602,7 @@ index 66cc710..2d17be3 100644
          *dma_get = dma_get_v;
  
          if (GET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_ERROR)) {
-@@ -466,6 +556,7 @@ void *pfifo_thread(void *arg)
+@@ -466,6 +593,7 @@ void *pfifo_thread(void *arg)
      qemu_mutex_lock(&d->pfifo.lock);
      while (true) {
          d->pfifo.fifo_kick = false;
@@ -566,7 +610,7 @@ index 66cc710..2d17be3 100644
  
          pgraph_process_pending(d);
  
-@@ -482,7 +573,23 @@ void *pfifo_thread(void *arg)
+@@ -482,7 +610,24 @@ void *pfifo_thread(void *arg)
              qemu_cond_broadcast(&d->pfifo.fifo_idle_cond);
  
              // Both the pusher and puller are waiting for some action
@@ -584,7 +628,8 @@ index 66cc710..2d17be3 100644
 +                 * rule is defined over. See pgraph_vk_process_pending_reports.
 +                 */
 +                xemu_report_timed_wakes++;
-+                qemu_cond_timedwait(&d->pfifo.fifo_cond, &d->pfifo.lock, 4);
++                qemu_cond_timedwait(&d->pfifo.fifo_cond, &d->pfifo.lock,
++                                    MAX(1, xemu_report_confirm_us / 1000));
 +            } else {
 +                qemu_cond_wait(&d->pfifo.fifo_cond, &d->pfifo.lock);
 +            }
@@ -1822,10 +1867,10 @@ index 9d8fefe..3dc6f2f 100644
  typedef enum FinishReason {
      VK_FINISH_REASON_VERTEX_BUFFER_DIRTY,
 diff --git a/hw/xbox/nv2a/pgraph/vk/reports.c b/hw/xbox/nv2a/pgraph/vk/reports.c
-index c860a9b..0ff595f 100644
+index c860a9b..ce85d0b 100644
 --- a/hw/xbox/nv2a/pgraph/vk/reports.c
 +++ b/hw/xbox/nv2a/pgraph/vk/reports.c
-@@ -142,9 +142,118 @@ void pgraph_vk_process_pending_reports_internal(NV2AState *d)
+@@ -142,9 +142,124 @@ void pgraph_vk_process_pending_reports_internal(NV2AState *d)
      }
  
      r->num_queries_in_flight = 0;
@@ -1938,13 +1983,19 @@ index c860a9b..0ff595f 100644
 + * and unchanged for this long. A producer resumes sooner; a waiter
 + * never resumes. Morrowind pays this per query and cannot feel it.
 + */
-+#define REPORT_WAITING_CONFIRM_NS 4000000   /* 4 ms */
-+#define REPORT_WAITING_WAKE_MS    4         /* the alarm, same period */
++#define REPORT_WAITING_CONFIRM_NS \
++    ((int64_t)xemu_report_confirm_us * 1000)  /* 4 ms by default */
++extern unsigned xemu_report_confirm_us;
++extern bool xemu_report_always;
++extern int64_t xemu_guest_poll_ns;
++unsigned long xemu_drains_by_poll;
++/* Queue depth at each skipped idle: 1, 2, 3-4, 5-8, 9-16, 17+. */
++unsigned long xemu_skip_depth_hist[6];
 +
  void pgraph_vk_process_pending_reports(NV2AState *d)
  {
      PGRAPHState *pg = &d->pgraph;
-@@ -153,8 +262,153 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
+@@ -153,8 +268,162 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
      uint32_t *dma_get = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET];
      uint32_t *dma_put = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT];
  
@@ -2004,7 +2055,13 @@ index c860a9b..0ff595f 100644
 +        r->idle_since_ns = now;
 +    }
 +    int64_t idle_for = now - r->idle_since_ns;
-+    bool guest_waiting = (depth == r->last_idle_depth) &&
++    bool guest_polling = depth <= REPORT_WAITING_MAX_DEPTH &&
++        get_clock() - qatomic_read(&xemu_guest_poll_ns) < 1000000;
++    if (guest_polling) {
++        xemu_drains_by_poll++;
++    }
++    bool guest_waiting = xemu_report_always || guest_polling ||
++                         (depth == r->last_idle_depth) &&
 +                         depth <= REPORT_WAITING_MAX_DEPTH &&
 +                         idle_for >= REPORT_WAITING_CONFIRM_NS;
 +    r->last_idle_depth = depth;
@@ -2012,6 +2069,9 @@ index c860a9b..0ff595f 100644
 +    if (!pool_pressure && !guest_waiting) {
 +        if (now - r->last_report_service_ns < REPORT_SERVICE_BREAKER_NS) {
 +            r->report_drains_skipped++;
++            xemu_skip_depth_hist[depth <= 1 ? 0 : depth == 2 ? 1 :
++                                 depth <= 4 ? 2 : depth <= 8 ? 3 :
++                                 depth <= 16 ? 4 : 5]++;
 +            /*
 +             * 2026-11-15: Morrowind. One visibility test pending, the
 +             * FIFO idle, and the game spinning on the result with
@@ -2714,6 +2774,18 @@ index e3881aa..e89eed5 100644
  /*
   * MAP_JIT protection of the current thread: -1 unknown, 0 write, 1 execute.
   * pthread_jit_write_protect_np() is costly and cpu_tb_exec() requests execute
+diff --git a/include/qemu/xbox-poll.h b/include/qemu/xbox-poll.h
+index 4b473d3..d1031a3 100644
+--- a/include/qemu/xbox-poll.h
++++ b/include/qemu/xbox-poll.h
+@@ -17,4 +17,7 @@ void xbox_poll_notify(void);
+ /* Sleep until the next xbox_poll_notify() or timeout_ns, whichever is first */
+ void xbox_poll_wait(int64_t timeout_ns);
+ 
++/* A guest poll loop is sleeping; see hw/xbox/nv2a/pfifo.c. */
++void xemu_guest_polling(void);
++
+ #endif
 diff --git a/include/system/memory.h b/include/system/memory.h
 index 33b5523..5cc0a19 100644
 --- a/include/system/memory.h
@@ -3275,7 +3347,7 @@ index 227336c..ae0ba9d 100644
  }
  
 diff --git a/target/i386/tcg/system/misc_helper.c b/target/i386/tcg/system/misc_helper.c
-index 89c8c5a..f8481e4 100644
+index 89c8c5a..5492b76 100644
 --- a/target/i386/tcg/system/misc_helper.c
 +++ b/target/i386/tcg/system/misc_helper.c
 @@ -533,6 +533,10 @@ void helper_flush_page(CPUX86State *env, target_ulong addr)
@@ -3297,7 +3369,7 @@ index 89c8c5a..f8481e4 100644
      cs->halted = 1;
      cs->exception_index = EXCP_HLT;
      cpu_loop_exit(cs);
-@@ -586,6 +591,31 @@ void helper_xbox_poll(CPUX86State *env, uint32_t pc)
+@@ -586,6 +591,32 @@ void helper_xbox_poll(CPUX86State *env, uint32_t pc)
          return;
      }
  
@@ -3326,10 +3398,11 @@ index 89c8c5a..f8481e4 100644
 +                (uint32_t)env->regs[R_ESI], (uint32_t)env->regs[R_EDI]);
 +    }
 +
++    xemu_guest_polling();
      xbox_poll_wait(XBOX_POLL_SLEEP_NS);
      poll_last = get_clock();
  }
-@@ -596,6 +626,7 @@ G_NORETURN void helper_hlt(CPUX86State *env)
+@@ -596,6 +627,7 @@ G_NORETURN void helper_hlt(CPUX86State *env)
      CPUState *cs = env_cpu(env);
  
      do_end_instruction(env);
@@ -6637,10 +6710,10 @@ index 0000000..1dd3732
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000..a39b6ab
+index 0000000..942467b
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,1706 @@
+@@ -0,0 +1,1781 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -6671,6 +6744,7 @@ index 0000000..a39b6ab
 +#include "system/system.h"
 +#include "system/runstate.h"
 +#include "ui/console.h"
++#include "xemu-xbe.h"
 +#include "ui/surface.h"
 +#include "hw/xbox/nv2a/nv2a.h"
 +#include "hw/core/cpu.h"
@@ -7500,6 +7574,17 @@ index 0000000..a39b6ab
 +        } else {
 +            fprintf(stderr, "[host] report wake: on\n");
 +        }
++        /* Documents/report-confirm-us: the report waiting rule's idle time. */
++        extern unsigned xemu_report_confirm_us;
++        g_autofree char *rp = g_strdup_printf("%s/Documents/report-confirm-us", getenv("HOME"));
++        g_autofree char *rc = NULL;
++        if (g_file_get_contents(rp, &rc, NULL, NULL)) {
++            int v = atoi(rc);
++            if (v >= 100 && v <= 20000) {
++                xemu_report_confirm_us = v;
++            }
++        }
++        fprintf(stderr, "[host] report waiting: %u us idle\n", xemu_report_confirm_us);
 +        /* Pusher pacing experiment: Documents/pace holds KB per ms. */
 +        extern unsigned xemu_pace_kb_per_ms;
 +        g_autofree char *pp = g_strdup_printf("%s/Documents/pace", getenv("HOME"));
@@ -7878,6 +7963,25 @@ index 0000000..a39b6ab
 +                                    "flight of 1024\n",
 +                            d_dr, d_sk, d_dr ? (double)d_dep / d_dr : 0.0,
 +                            qif);
++                    extern unsigned long xemu_drains_by_poll,
++                                         xemu_guest_poll_kicks;
++                    static unsigned long lbp, lgk;
++                    fprintf(stderr, "[host]   guest polling on a report: "
++                                    "%lu kicks, %lu drains\n",
++                            xemu_guest_poll_kicks - lgk,
++                            xemu_drains_by_poll - lbp);
++                    lgk = xemu_guest_poll_kicks; lbp = xemu_drains_by_poll;
++                    extern unsigned long xemu_skip_depth_hist[6];
++                    static unsigned long lsh[6];
++                    unsigned long dh[6];
++                    for (int i = 0; i < 6; i++) {
++                        dh[i] = xemu_skip_depth_hist[i] - lsh[i];
++                        lsh[i] = xemu_skip_depth_hist[i];
++                    }
++                    fprintf(stderr, "[host]   skipped drains by queue depth: "
++                                    "1 %lu, 2 %lu, 3-4 %lu, 5-8 %lu, 9-16 %lu, "
++                                    "17+ %lu\n",
++                            dh[0], dh[1], dh[2], dh[3], dh[4], dh[5]);
 +                    extern void pgraph_vk_report_triggers(NV2AState *d,
 +                        unsigned long *, unsigned long *, unsigned long *);
 +                    static unsigned long lc, lq, lp;
@@ -8165,6 +8269,50 @@ index 0000000..a39b6ab
 +                }
 +                if (hd2) {
 +                    xemu_ide_state_line(hd2, hdl, sizeof(hdl));
++                }
++                /*
++                 * Per title report policy. Blinx reads its occlusion
++                 * results a few ms after issuing them, in the same frame,
++                 * without waiting for them; with x87 on host doubles that
++                 * gap is shorter than any idle rule can confirm, and its
++                 * enemies flicker. Halo goes idle at every queue depth
++                 * Blinx does (2 to 17+ against Blinx's 9 to 17+), so no
++                 * general rule separates them, and draining every idle
++                 * costs Halo most of its frame rate. Blinx alone drains
++                 * on every idle. Documents/report-always content 1 forces
++                 * it for every title.
++                 */
++                {
++                    extern bool xemu_report_always;
++                    static bool forced, checked;
++                    static uint32_t last_tid = 1;
++                    if (!checked) {
++                        g_autofree char *ap = g_strdup_printf(
++                            "%s/Documents/report-always", getenv("HOME"));
++                        g_autofree char *ac = NULL;
++                        forced = g_file_get_contents(ap, &ac, NULL, NULL) &&
++                                 ac[0] == '1';
++                        checked = true;
++                    }
++                    struct xbe *xbe = xemu_get_xbe_info();
++                    uint32_t tid = (xbe && xbe->cert) ?
++                        ldl_le_p(&xbe->cert->m_titleid) : 0;
++                    if (tid != last_tid) {
++                        char name[41] = "";
++                        if (xbe && xbe->cert) {
++                            g_autofree char *n = g_utf16_to_utf8(
++                                xbe->cert->m_title_name, 40, NULL, NULL, NULL);
++                            if (n) {
++                                g_strlcpy(name, n, sizeof(name));
++                            }
++                        }
++                        bool blinx = tid == 0x4d530013; /* "BLiNX: the time sweeper" */
++                        xemu_report_always = forced || blinx;
++                        fprintf(stderr, "[host] title %08x \"%s\": reports %s\n",
++                                tid, name, xemu_report_always
++                                ? "drain on every idle" : "waiting rule");
++                        last_tid = tid;
++                    }
 +                }
 +                bql_unlock();
 +                xemu_apu_state_line(apul, sizeof(apul));
