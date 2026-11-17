@@ -76,4 +76,4 @@ while IFS= read -r line; do
 done < "$ROOT/patches/series"
 
 echo "== $applied patch(es) applied on top of $PIN =="
-echo "build with: cd third_party/xemu && see DEVLOG.md for the four macOS fixes"
+echo "build for visionOS: follow the Order in tools/xros/README.md"

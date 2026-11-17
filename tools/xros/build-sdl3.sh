@@ -11,12 +11,27 @@
 # app bundle simpler.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# The revision matches subprojects/sdl3.wrap in the consuming tree, so this
+# and the cmake-subproject fallback produce the same library.
+# The pinned source revision; SDL_REV names another for one run.
+REV=f00dc919ca35b9756316e86c4777392de442f9b2
+if [[ -n "${SDL_REV:-}" ]]; then REV="$SDL_REV"; fi
 SRC="$HERE/src/SDL"
 OUT="$HERE/sdl3-xros"
 
-[[ -d "$SRC" ]] || { echo "no SDL source at $SRC" >&2; exit 1; }
+# One commit, shallow: SDL's full history is large and nothing here needs it.
+if [[ ! -d "$SRC/.git" ]]; then
+	echo "== fetching SDL =="
+	mkdir -p "$SRC"
+	git -C "$SRC" init -q
+	git -C "$SRC" remote add origin https://github.com/libsdl-org/SDL
+fi
+git -C "$SRC" fetch -q --depth 1 origin "$REV"
+git -C "$SRC" checkout -q "$REV"
+echo "== SDL at $(git -C "$SRC" rev-parse --short HEAD) =="
 
 rm -rf "$HERE/build/sdl3" "$OUT"
+mkdir -p "$HERE/build"
 cmake -S "$SRC" -B "$HERE/build/sdl3" -G Ninja \
 	-DCMAKE_TOOLCHAIN_FILE="$HERE/xros.cmake" \
 	-DCMAKE_BUILD_TYPE=Release \

@@ -15,7 +15,7 @@ case "$VARIANT" in
 device)
 	SDK=xros
 	TRIPLE="arm64-apple-xros${MINVER}"
-	SYSROOT="$HERE/sysroot-visionos-arm64/sysroot-visionos-arm64"
+	SYSROOT="${XROS_SYSROOT:-$HERE/sysroot}"
 	SUBSYSTEM=visionos
 	SUFFIX=""
 	OUT="$HERE/xros-arm64.cross"
@@ -23,7 +23,7 @@ device)
 simulator)
 	SDK=xrsimulator
 	TRIPLE="arm64-apple-xros${MINVER}-simulator"
-	SYSROOT="$HERE/sysroot-visionos_simulator-arm64/sysroot-visionos_simulator-arm64"
+	SYSROOT="${XROS_SIMULATOR_SYSROOT:-$HERE/sysroot-simulator}"
 	SUBSYSTEM=visionos-simulator
 	SUFFIX="-simulator"
 	OUT="$HERE/xros-arm64-simulator.cross"
@@ -34,7 +34,8 @@ simulator)
 	;;
 esac
 
-[[ -d "$SYSROOT/lib/pkgconfig" ]] || { echo "no sysroot at $SYSROOT" >&2; exit 1; }
+[[ -d "$SYSROOT/lib/pkgconfig" ]] || {
+	echo "no sysroot at $SYSROOT. Run: ./fetch-sysroot.sh $VARIANT" >&2; exit 1; }
 SDKROOT="$(xcrun --sdk $SDK --show-sdk-path)"
 GLSLANG="$HERE/glslang-xros${SUFFIX:-}"
 

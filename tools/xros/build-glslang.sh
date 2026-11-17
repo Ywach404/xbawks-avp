@@ -52,5 +52,26 @@ cmake -S "$SRC" -B "$BUILD" \
 cmake --build "$BUILD" -j "$(sysctl -n hw.ncpu)"
 cmake --install "$BUILD"
 
-echo "== installed to $PREFIX =="
+# A .pc, because glslang installs only CMake config files and the consuming
+# tree asks pkg-config first. Without one, meson reports glslang not found
+# and quietly rebuilds it as a CMake subproject, so this prefix would be
+# built and then never used. The version comes from the installed header so
+# meson's >=15.1.0 check sees the real one.
+INFO="$PREFIX/include/glslang/build_info.h"
+ver() { sed -n "s/^#define GLSLANG_VERSION_$1 //p" "$INFO"; }
+VERSION="$(ver MAJOR).$(ver MINOR).$(ver PATCH)"
+mkdir -p "$PREFIX/lib/pkgconfig"
+cat > "$PREFIX/lib/pkgconfig/glslang.pc" <<PC
+prefix=$PREFIX
+libdir=\${prefix}/lib
+includedir=\${prefix}/include
+
+Name: glslang
+Description: Khronos GLSL front end, static, arm64-apple-xros$SUFFIX
+Version: $VERSION
+Libs: -L\${libdir} -lglslang -lMachineIndependent -lGenericCodeGen -lOSDependent -lSPIRV -lglslang-default-resource-limits -lc++
+Cflags: -I\${includedir}
+PC
+
+echo "== installed to $PREFIX (glslang $VERSION) =="
 ls "$PREFIX/lib"

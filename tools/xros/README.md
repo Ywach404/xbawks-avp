@@ -4,25 +4,43 @@ These scripts produced the first `qemu-system-i386` for
 `arm64-apple-xros`, 2026-10-24.
 
 The **sysroot is not in this repo**: it is 1.5 GB and it is not ours. It
-lives in `_scratch/xros-sysroot/` and the scripts expect it there. If it is
-missing, fetch it again, see below.
+lives in `tools/xros/sysroot/`, which is ignored, and every script reads it
+from there, or from `XROS_SYSROOT` if that names another folder holding the
+same `lib/`, `include/` and `Frameworks/`. `fetch-sysroot.sh` puts it there.
 
 ## Order
 
+From the repository root, on an Apple Silicon Mac. You need Xcode with the
+visionOS platform added (Settings, Components), and `cmake` 3.28 or later,
+`ninja`, `pkg-config`, `python3` and `gh` on `PATH`; with Homebrew that is
+`brew install cmake ninja pkg-config python gh`. Run `gh auth login` once:
+GitHub will not hand out even a public artifact without a token. Everything
+fetched or built lands in ignored folders under `tools/xros/` and
+`third_party/`, about 7 GB, and every step but the last needs the network.
+
 ```sh
-./relocate-sysroot.sh                     # after any fresh sysroot download
-./build-glslang.sh device                 # Vulkan shader compiler
-./build-sdl3.sh                           # audio and input, leaves with S4
-./build-samplerate.sh                     # APU resampling, leaves with S4
-./gen-cross.sh device                     # writes the two cross files
-XEMU_TREE=<tree> ./configure-xemu-xros.sh -Ddsp_jit=disabled
-cd <tree>/build-xros && ninja qemu-system-i386
+tools/setup-tree.sh --clone               # upstream xemu at the pin, plus the series (3 GB)
+tools/xros/fetch-sysroot.sh               # UTM's sysroot, unpacked and relocated
+tools/xros/build-glslang.sh device        # Vulkan shader compiler
+tools/xros/build-sdl3.sh                  # audio and input, leaves with S4
+tools/xros/build-samplerate.sh            # APU resampling, leaves with S4
+tools/xros/gen-cross.sh device            # writes the two cross files
+tools/xros/configure-xemu-xros.sh -Ddsp_jit=disabled
+ninja -C third_party/xemu/build-xros qemu-system-i386
+tools/xros/make-app.sh                    # build-app/Xbawks.app and Xbawks.ipa, no media
 ```
+
+The three library builds fetch their own sources at pinned revisions into
+`tools/xros/src/`. `configure-xemu-xros.sh` works on `third_party/xemu`
+unless `XEMU_TREE` names another tree.
 
 ## Getting the sysroot
 
 UTM builds one on every push to `main` and publishes it as a public
 GitHub Actions artifact. **Artifacts expire after 90 days.**
+`fetch-sysroot.sh` takes the newest one that has not expired. By hand, it
+is this, then unzip, untar the `sysroot.tgz` inside, and run
+`relocate-sysroot.sh` on the folder that holds `lib/`:
 
 ```sh
 gh api "repos/utmapp/UTM/actions/artifacts?per_page=100" \

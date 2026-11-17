@@ -14,7 +14,9 @@ ROOT="$(pwd)"
 # XEMU_BUILD names another build directory, for putting a binary from a
 # second tree (an A/B against an older state) through the same assembly.
 BUILD="${XEMU_BUILD:-$ROOT/third_party/xemu/build-xros}"
-SYSROOT="${XROS_SYSROOT:-$ROOT/../_scratch/xros-sysroot}"
+# The relocated UTM sysroot itself, the folder holding lib/ and Frameworks/.
+# The same variable and default as gen-cross.sh and configure-xemu-xros.sh.
+SYSROOT="${XROS_SYSROOT:-$ROOT/tools/xros/sysroot}"
 APP="$ROOT/build-app/Xbawks.app"
 # The app's own identifier. It can be overridden for one run, which is how
 # an existing install keeps its data container: a different bundle id is a
@@ -25,6 +27,13 @@ BUNDLE_ID="${XEMU_BUNDLE_ID:-com.acervantez.xbawks}"
 
 BIN="$BUILD/qemu-system-i386"
 [[ -f "$BIN" ]] || { echo "no visionOS binary. See tools/xros/README.md" >&2; exit 1; }
+
+# Checked before anything is assembled. A missing sysroot used to produce an
+# app with an empty Frameworks folder, and an IPA of it, that dyld kills
+# before main() without a crash report.
+[[ -d "$SYSROOT/lib" ]] || {
+	echo "no sysroot at $SYSROOT. Run tools/xros/fetch-sysroot.sh, or set XROS_SYSROOT" >&2
+	exit 1; }
 
 # Rebuild first, always. Three runs in this project were read as results
 # while the device was running a previous build, because the bundle was
@@ -90,15 +99,30 @@ cat > "$APP/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Dylibs it loads, plus MoltenVK. Everything else comes from the OS.
-SR="$SYSROOT/sysroot-visionos-arm64/sysroot-visionos-arm64"
+# Dylibs it loads, plus MoltenVK. Everything else comes from the OS. Every
+# one is required: skipping a missing one quietly is how an app that cannot
+# launch got built and wrapped as an IPA.
+missing=()
 for lib in libglib-2.0.0.dylib libslirp.0.dylib libusb-1.0.0.dylib \
            libgobject-2.0.0.dylib libgmodule-2.0.0.dylib libgthread-2.0.0.dylib \
            libintl.8.dylib libiconv.2.dylib libffi.8.dylib libpixman-1.0.dylib; do
-	[[ -f "$SR/lib/$lib" ]] && cp -L "$SR/lib/$lib" "$APP/Frameworks/" || true
+	if [[ -f "$SYSROOT/lib/$lib" ]]; then
+		cp -L "$SYSROOT/lib/$lib" "$APP/Frameworks/"
+	else
+		missing+=("lib/$lib")
+	fi
 done
-if [[ -d "$SR/Frameworks/MoltenVK.framework" ]]; then
-	cp -R "$SR/Frameworks/MoltenVK.framework" "$APP/Frameworks/"
+if [[ -d "$SYSROOT/Frameworks/MoltenVK.framework" ]]; then
+	cp -R "$SYSROOT/Frameworks/MoltenVK.framework" "$APP/Frameworks/"
+else
+	missing+=("Frameworks/MoltenVK.framework")
+fi
+if (( ${#missing[@]} )); then
+	rm -rf "$APP" "$ROOT/build-app/Xbawks.ipa"
+	echo "the sysroot at $SYSROOT is missing:" >&2
+	printf '  %s\n' "${missing[@]}" >&2
+	echo "fetch a fresh one with tools/xros/fetch-sysroot.sh --force" >&2
+	exit 1
 fi
 
 # An iOS-family bundle has Frameworks beside the executable, not above it.
@@ -145,13 +169,58 @@ done
 # Oxanium, the interface face. SIL OFL 1.1, which permits embedding and
 # redistribution provided the licence travels with it, so OFL.txt goes in
 # beside the fonts rather than being referenced from somewhere else.
+#
+# The files live in tools/xros/fonts/, which is ignored, and are fetched on
+# first use from google/fonts at a pinned commit, the last one that still
+# carried the static cuts. The variable font that replaced them does not
+# answer to the four PostScript names the interface asks for. Each file is
+# checked against its hash, so a moved or changed upstream fails here rather
+# than in the headset's text. A face already installed in ~/Library/Fonts
+# is the fallback when there is no network, which is how this worked before.
+FONTS="$ROOT/tools/xros/fonts"
+FONTS_URL="https://raw.githubusercontent.com/google/fonts/becd3517c582fa68f041364b02bc597ee822ef1c/ofl/oxanium"
+fetch_font() {   # <file in FONTS> <path under FONTS_URL> <sha256> <fallback>
+	local dst="$FONTS/$1"
+	if [[ ! -f "$dst" ]]; then
+		mkdir -p "$FONTS"
+		if curl -fsSL -o "$dst.part" "$FONTS_URL/$2" \
+			&& echo "$3  $dst.part" | shasum -a 256 -c --status; then
+			mv "$dst.part" "$dst"
+		else
+			rm -f "$dst.part"
+			[[ -f "$4" ]] && cp "$4" "$dst"
+		fi
+	fi
+	[[ -f "$dst" ]]
+}
 mkdir -p "$APP/Fonts"
-for f in Regular Medium SemiBold Bold; do
-	src="$HOME/Library/Fonts/Oxanium-$f.ttf"
-	[[ -f "$src" ]] && cp "$src" "$APP/Fonts/" || echo "  warning: Oxanium-$f.ttf not installed"
-done
-[[ -f "$HOME/Library/Fonts/_licences/Oxanium-OFL.txt" ]] \
-	&& cp "$HOME/Library/Fonts/_licences/Oxanium-OFL.txt" "$APP/Fonts/OFL.txt"
+while read -r f sum; do
+	fetch_font "Oxanium-$f.ttf" "static/Oxanium-$f.ttf" "$sum" "$HOME/Library/Fonts/Oxanium-$f.ttf" \
+		&& cp "$FONTS/Oxanium-$f.ttf" "$APP/Fonts/" \
+		|| echo "  warning: Oxanium-$f.ttf could not be fetched; the interface falls back to the system face"
+done <<SUMS
+Regular  2b9c2a53ee0a8248ab901463838cc81075b410724046a09683b3cc91870fe52a
+Medium   d0676de4894cd22591b4bb538dae5b8e06c44e0fb943300a7cff3945fe643689
+SemiBold e2d77ec4ee67b0152166adf5d6393360550a012c2066e0d4589053e14a733cdc
+Bold     15a44f661fd962c64cabe069a5f9f6fab85a412188f028d3e04da2ff917e37cc
+SUMS
+fetch_font OFL.txt OFL.txt fe17c0f2581d71b4e1ea7e636e7f4877c29223e11bb1dd1a871e8c3f2a86336b \
+	"$HOME/Library/Fonts/_licences/Oxanium-OFL.txt" \
+	&& cp "$FONTS/OFL.txt" "$APP/Fonts/OFL.txt" \
+	|| { rm -f "$APP/Fonts/"*.ttf
+	     echo "  warning: no Oxanium licence, so the fonts are left out; the OFL requires it to travel with them"; }
+
+# The icon. Three layers in tools/xros/Assets.xcassets, compiled the way
+# Xcode would compile them, and the CFBundleIcons entry actool reports
+# merged into the Info.plist written above. Without that entry the
+# Assets.car is in the bundle but nothing points the home view at it.
+ICONS="$ROOT/build-app/icons"
+rm -rf "$ICONS"; mkdir -p "$ICONS"
+xcrun actool "$ROOT/tools/xros/Assets.xcassets" --compile "$APP" \
+	--platform xros --minimum-deployment-target 26.0 --target-device vision \
+	--app-icon AppIcon --output-partial-info-plist "$ICONS/partial.plist" \
+	--output-format human-readable-text >/dev/null
+/usr/libexec/PlistBuddy -c "Merge $ICONS/partial.plist" "$APP/Info.plist" >/dev/null
 
 # Media: opt in, never by default.
 #

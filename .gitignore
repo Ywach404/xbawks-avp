@@ -11,7 +11,9 @@ mcpx*
 *.img
 *.iso
 *.xiso
+*.cso
 *.xbe
+xbox_hdd*
 eeprom*
 
 # The denylist above covers the extracted forms and missed the containers:
@@ -22,7 +24,13 @@ eeprom*
 *.rar
 *.gz
 *.xz
+*.tar
+*.tgz
 *.qcow2.*
+
+# A built app is shared as an IPA, and that is exactly what must never be
+# committed: it can carry whatever the bundle held.
+*.ipa
 
 # And the drop location itself, belt and braces, since the next thing
 # arriving in it may be a shape nobody predicted.
@@ -55,3 +63,18 @@ DEVLOG-private.md
 *.jpg
 *.jpeg
 !docs/media/*.gif
+# The app icon's layers are ours, and the bundle needs them to build.
+!tools/xros/Assets.xcassets/**/*.png
+
+# What the visionOS scripts fetch and build. The sysroot is UTM's, the
+# sources are their projects', and the rest is output, so none of it is
+# ours to commit. sysroot* without a slash also covers a symlinked one.
+/tools/xros/src/
+/tools/xros/build/
+/tools/xros/build-venv/
+/tools/xros/glslang-xros*/
+/tools/xros/sdl3-xros/
+/tools/xros/samplerate-xros/
+/tools/xros/sysroot*
+/tools/xros/xros-arm64*.cross
+/tools/xros/fonts/
