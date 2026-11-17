@@ -28,7 +28,7 @@ The loop at the top is five seconds. **This is the full thing.**
 **[Click the image to watch on YouTube](https://youtu.be/AnmeuEjDdMU)**, shot
 on the headset rather than in a simulator, with sound.
 
-Ported and maintained by A. Cervantez. xemu and QEMU are the work of their respective projects and are GPL-2.0; so is everything here that touches them.
+Ported and maintained by A.Cervantez. xemu and QEMU are the work of their respective projects and are GPL-2.0; so is everything here that touches them.
 
 ## What it does today
 
