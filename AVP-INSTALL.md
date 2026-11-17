@@ -2,13 +2,15 @@
 
 Xbawks is an original Xbox emulator that runs on the headset itself. It is a port of [xemu](https://github.com/xemu-project/xemu) (a fork of QEMU) with a visionOS shell around it. It ships no Microsoft code and no game data.
 
+**Want to see it running before you build it? [Watch the promo ad](https://youtu.be/AnmeuEjDdMU) -- the emulator on a real Vision Pro, played with PSVR2 Sense controllers or a PS4 controller over Bluetooth.**
+
 ## Requirements
 
 - Apple Vision Pro on visionOS 26 or later
 - A Mac with Xcode 27 or later (built and tested with 27.0), on the same network as the headset
 - An Apple ID. A free developer account works; its signing profile lasts seven days, after which you sign and install again
 - [Apparition](https://apparition.illixion.com) 0.4.5 on the Mac ([release](https://github.com/illixion/Apparition/releases/tag/v0.4.5)), paired with the headset. **It is required at every launch**, not just the first. 1.0.0 does not start Xbawks yet (see JIT, below)
-- A game controller: a pair of PSVR2 Sense controllers, or an extended gamepad
+- A game controller: a pair of PSVR2 Sense controllers, or a PS4 controller (or another extended gamepad) over Bluetooth
 - Your own console's files and your own discs (see Game files)
 - About 7 GB of free disk on the Mac for the source and the build
 
@@ -92,7 +94,7 @@ The repository holds a pinned upstream commit and a patch series rather than a c
 ## Controls and known issues
 
 - Sticks, face buttons and analog triggers map to the Xbox controller.
-- Press the Xbox in the room to bring up your discs; picking one resets the console and boots it, as the hardware would.
+- Press or pinch the Xbox in the room to bring up your discs; picking one resets the console and boots it, as the hardware would.
 - If a launch sits at "Launching" and Apparition never attaches, the headset's debug service has wedged; restarting the headset clears it.
 - An optional file named `surface-scale` in the app's folder, containing `2` or `3`, raises the internal resolution. It suits titles with headroom, such as Doom 3; leave it out for native 640x480.
 - Per-title results, including what does not work yet, are in the compatibility table in the [README](README.md).
