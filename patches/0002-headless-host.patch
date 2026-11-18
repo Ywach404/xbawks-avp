@@ -6156,10 +6156,10 @@ index 0000000..e294825
 +}
 diff --git a/ui/xemu-host-bridge.h b/ui/xemu-host-bridge.h
 new file mode 100644
-index 0000000..19215da
+index 0000000..9d3f674
 --- /dev/null
 +++ b/ui/xemu-host-bridge.h
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,59 @@
 +/*
 + * What the Swift entry point sees of the Objective-C shell. Kept to the
 + * two classes it wraps and the one function it calls first.
@@ -6192,6 +6192,14 @@ index 0000000..19215da
 +/* True when the only controller is one PSVR2 Sense hand on its own: the
 + * other hand was turned on after launch and visionOS did not pass it on. */
 +bool xemu_host_one_sense_hand(void);
++/* Which controller plays: kinds of connected controllers ("sense" for the
++ * Sense pair, else the vendor name), newline separated; the chosen kind
++ * ("" is Automatic); set it; whether a kind is connected. The two strings
++ * are the caller's to free. */
++char *xemu_host_controller_kinds(void);
++char *xemu_host_controller_kind(void);
++void xemu_host_set_controller_kind(const char *kind);
++bool xemu_host_controller_kind_connected(const char *kind);
 +
 +/* Mid session disc changes. Both are safe to call from the UI thread. */
 +void xemu_host_load_disc(const char *filename);
@@ -6213,10 +6221,10 @@ index 0000000..19215da
 +@end
 diff --git a/ui/xemu-host-ios.m b/ui/xemu-host-ios.m
 new file mode 100644
-index 0000000..c27af9c
+index 0000000..1b0fa74
 --- /dev/null
 +++ b/ui/xemu-host-ios.m
-@@ -0,0 +1,898 @@
+@@ -0,0 +1,964 @@
 +/*
 + * xemu-host-ios.m -- the UIKit side of the house.
 + *
@@ -6768,6 +6776,66 @@ index 0000000..c27af9c
 + * claiming controller events in the space did not change it), and that hand
 + * then drives both sticks. Until that is understood, the picker says so.
 + */
++/*
++ * Which controller plays. Automatic (the default, an empty kind) reads
++ * every controller and merges them; otherwise only controllers of the
++ * chosen kind are read. The kind rule is controllerKind() in
++ * xbawks-editions.swift: every Sense name is "sense", so a saved choice
++ * matches the pair whether it arrived combined or as separate hands; any
++ * other controller is its own vendor name. A chosen kind that is not
++ * connected falls back to Automatic, so a game is never left without
++ * input. Saved in UserDefaults as xbawks.controller.
++ */
++static NSString *controller_kind_of(GCController *c)
++{
++    NSString *name = c.vendorName ?: @"";
++    return [name containsString:@"Sense Controller"] ? @"sense" : name;
++}
++
++/* Read every frame; UserDefaults answers from memory. */
++static NSString *chosen_kind(void)
++{
++    return [[NSUserDefaults standardUserDefaults]
++                stringForKey:@"xbawks.controller"] ?: @"";
++}
++
++bool xemu_host_controller_kind_connected(const char *kind)
++{
++    NSString *k = kind ? @(kind) : @"";
++    if (k.length == 0) {
++        return true;
++    }
++    for (GCController *c in GCController.controllers) {
++        if ([controller_kind_of(c) isEqualToString:k]) {
++            return true;
++        }
++    }
++    return false;
++}
++
++char *xemu_host_controller_kinds(void)
++{
++    NSMutableOrderedSet<NSString *> *kinds = [NSMutableOrderedSet orderedSet];
++    for (GCController *c in GCController.controllers) {
++        [kinds addObject:controller_kind_of(c)];
++    }
++    return strdup([[kinds.array componentsJoinedByString:@"\n"] UTF8String]);
++}
++
++char *xemu_host_controller_kind(void)
++{
++    return strdup(chosen_kind().UTF8String);
++}
++
++void xemu_host_set_controller_kind(const char *kind)
++{
++    NSString *k = kind ? @(kind) : @"";
++    [[NSUserDefaults standardUserDefaults] setObject:k forKey:@"xbawks.controller"];
++    fprintf(stderr, "[host] controller choice: %s\n",
++            k.length ? k.UTF8String : "automatic");
++    fflush(stderr);
++}
++
 +bool xemu_host_one_sense_hand(void)
 +{
 +    int hands = 0;
@@ -6912,7 +6980,13 @@ index 0000000..c27af9c
 +    if ([self injectInto:&b]) {
 +        any = YES;
 +    }
++    NSString *kind = chosen_kind();
++    BOOL filter = kind.length > 0
++        && xemu_host_controller_kind_connected(kind.UTF8String);
 +    for (GCController *c in GCController.controllers) {
++        if (filter && ![controller_kind_of(c) isEqualToString:kind]) {
++            continue;
++        }
 +        if (c.extendedGamepad) {
 +            [self readExtended:c.extendedGamepad into:&b axis:axis];
 +            haveLeft = haveRight = YES;
