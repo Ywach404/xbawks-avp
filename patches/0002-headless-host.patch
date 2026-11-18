@@ -4118,7 +4118,7 @@ index 7967bbc..6f3c51b 100644
  
  void tcg_func_start(TCGContext *s)
 diff --git a/ui/meson.build b/ui/meson.build
-index ea46bf0..fd185c8 100644
+index ea46bf0..50091a8 100644
 --- a/ui/meson.build
 +++ b/ui/meson.build
 @@ -27,10 +27,16 @@ xemu_ss.add(files(
@@ -4184,7 +4184,7 @@ index ea46bf0..fd185c8 100644
 +                         check: true).stdout().strip()
 +  swift_app = custom_target('xemu-host-app.o',
 +    input: ['xemu-host-app.swift', 'xbawks-picker.swift',
-+             'xbawks-console.swift'],
++             'xbawks-console.swift', 'xbawks-editions.swift'],
 +    output: 'xemu-host-app.o',
 +    depend_files: files('xemu-host-bridge.h'),
 +    command: [xcrun, '-sdk', 'xros', 'swiftc',
@@ -4790,6 +4790,201 @@ index 0000000..c997402
 +        onNudge(SIMD2<Float>(Float(v.translation.width),
 +                             Float(-v.translation.height)), done)
 +    }
++}
+diff --git a/ui/xbawks-editions.swift b/ui/xbawks-editions.swift
+new file mode 100644
+index 0000000..e2a9613
+--- /dev/null
++++ b/ui/xbawks-editions.swift
+@@ -0,0 +1,189 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Copyright (C) 2026 A. Cervantez
++//
++//  xbawks-editions.swift
++//
++/*
++ * Xbawks console editions: the looks the console in the room can wear.
++ *
++ * One entry per distinct look of the original Xbox chassis, stock and
++ * promotional. A look is the shell's colour, opacity and finish; editions
++ * that differ only by print, a signature or the jewel are folded into the
++ * look they share and named in its note. Printed and airbrushed one-offs
++ * are left out, because only colour, opacity, finish and glow can change,
++ * and so are the units that are not Xbox shaped (the Alpha towers, Big X).
++ *
++ * Colours are estimates from collector descriptions (consolevariations.com
++ * and others), not samples from photos.
++ *
++ * Foundation only, so the table and the classifiers below can be tested on
++ * the Mac: tests/xbawks/test_editions.swift.
++ */
++import Foundation
++
++enum EditionGroup: String, CaseIterable {
++    case retail, limited, promotional, developer
++
++    var title: String {
++        switch self {
++        case .retail: return "Retail"
++        case .limited: return "Limited"
++        case .promotional: return "Promotional"
++        case .developer: return "Developer"
++        }
++    }
++}
++
++enum Finish: Equatable {
++    case matte, gloss
++}
++
++struct Edition: Identifiable, Equatable {
++    let id: String
++    let name: String
++    let group: EditionGroup
++    let year: String
++    let note: String
++    let shell: UInt32
++    let opacity: Float
++    let finish: Finish
++    let jewel: UInt32
++    let ring: UInt32
++    let trim: UInt32
++    /// What shows inside a see-through shell under light; nil when opaque.
++    let glow: UInt32?
++
++    var seeThrough: Bool { opacity < 1 }
++}
++
++enum Editions {
++    private static let ring: UInt32 = 0x5BE33A
++    private static let greenJewel: UInt32 = 0x3C9A2E
++
++    static let standardBlack = Edition(
++        id: "standard-black", name: "Standard Black", group: .retail,
++        year: "2001",
++        note: "North America, Japan, PAL and Asia retail, and every black bundle",
++        shell: 0x141614, opacity: 1, finish: .matte,
++        jewel: greenJewel, ring: ring, trim: 0x0E0F0E, glow: nil)
++
++    static let all: [Edition] = [
++        standardBlack,
++        Edition(id: "skeleton-smoke", name: "Skeleton Smoke", group: .limited,
++                year: "2002",
++                note: "Japan, 50,000 made; also the Bill Gates signed lottery units",
++                shell: 0x2A2E31, opacity: 0.55, finish: .gloss,
++                jewel: 0x1B1C1D, ring: ring, trim: 0x1A1C1E, glow: 0x70777D),
++        Edition(id: "translucent-green", name: "Translucent Green", group: .limited,
++                year: "2001 to 2005",
++                note: "Halo Special Edition, EU 1st Anniversary, Canada Crystal Green, "
++                    + "HK and SG Halo editions, Launch Team, Partners, green Debug Kits",
++                shell: 0x2F9E3C, opacity: 0.45, finish: .gloss,
++                jewel: greenJewel, ring: ring, trim: 0x2A8A35, glow: 0x7CFF6A),
++        Edition(id: "crystal-clear", name: "Crystal Clear", group: .limited,
++                year: "2004",
++                note: "EU 2nd Anniversary, Halo 2 pack, AU and NZ, FIFA Italy, "
++                    + "MSN Norway, the DVT4 dev kit",
++                shell: 0xE4ECEE, opacity: 0.28, finish: .gloss,
++                jewel: greenJewel, ring: ring, trim: 0xD6DEE0, glow: 0xCFE8D4),
++        Edition(id: "ice-blue", name: "Ice Blue", group: .limited,
++                year: "2004 to 2005",
++                note: "Kasumi-chan Blue (Japan, 5,000), Halo 2 Ice Blue Canada and Asia",
++                shell: 0x4AA3DF, opacity: 0.45, finish: .gloss,
++                jewel: 0xC0C4C8, ring: ring, trim: 0x3C8FC8, glow: 0x9ED4FF),
++        Edition(id: "pure-white", name: "Pure White", group: .limited,
++                year: "2002 to 2004",
++                note: "Japan 2nd Anniversary (1,000), Panzer Dragoon Orta (999), "
++                    + "EA Special Edition, Ed Fries farewell",
++                shell: 0xF5F5F2, opacity: 1, finish: .gloss,
++                jewel: 0xC9CED3, ring: ring, trim: 0xEDEDEA, glow: nil),
++        Edition(id: "halo-orange", name: "Halo Orange", group: .limited,
++                year: "2004",
++                note: "Unreleased, fewer than 5 known",
++                shell: 0xF07A1A, opacity: 0.5, finish: .gloss,
++                jewel: greenJewel, ring: ring, trim: 0xD0661A, glow: 0xFFB070),
++        Edition(id: "mountain-dew", name: "Mountain Dew Lime", group: .promotional,
++                year: "2004",
++                note: "About 5,100 given away; also the Pepsi Hulk units",
++                shell: 0x8FD400, opacity: 1, finish: .gloss,
++                jewel: 0x2F8F2F, ring: ring, trim: 0x7DBB00, glow: nil),
++        Edition(id: "live-red", name: "Live Championship Red", group: .promotional,
++                year: "2003",
++                note: "Japan, Xbox Live Championship prize (Murakumo)",
++                shell: 0xC0262D, opacity: 1, finish: .gloss,
++                jewel: greenJewel, ring: ring, trim: 0xA01F25, glow: nil),
++        Edition(id: "live-pink", name: "Live Championship Pink", group: .promotional,
++                year: "2003",
++                note: "Japan, Xbox Live Championship prize (Otogi)",
++                shell: 0xE58AB4, opacity: 1, finish: .gloss,
++                jewel: greenJewel, ring: ring, trim: 0xC9709A, glow: nil),
++        Edition(id: "live-yellow", name: "Live Championship Yellow", group: .promotional,
++                year: "2003",
++                note: "Japan, Xbox Live Championship prize (Thousand Land)",
++                shell: 0xF2CF1F, opacity: 1, finish: .gloss,
++                jewel: greenJewel, ring: ring, trim: 0xD4B210, glow: nil),
++        Edition(id: "debug-pale-green", name: "Debug Kit Pale Green", group: .developer,
++                year: "2001 to 2005",
++                note: "The paler clear-green debug kit, 5,000 to 10,000",
++                shell: 0x7FC48A, opacity: 0.35, finish: .gloss,
++                jewel: greenJewel, ring: ring, trim: 0x5FA86A, glow: 0xB8F0B8),
++    ]
++
++    /// The edition with this id; Standard Black for nil or an id no longer
++    /// in the table (a renamed look must not leave a console unpainted).
++    static func named(_ id: String?) -> Edition {
++        all.first { $0.id == id } ?? standardBlack
++    }
++
++    static let savedKey = "xbawks.console.edition"
++
++    static var saved: Edition {
++        get { named(UserDefaults.standard.string(forKey: savedKey)) }
++        set { UserDefaults.standard.set(newValue.id, forKey: savedKey) }
++    }
++}
++
++/// The parts of the console model that are painted separately.
++enum ConsolePart: Equatable {
++    case shell, jewel, ring, trim, interior
++}
++
++/*
++ * Which part a mesh belongs to, from its own name and its ancestors'
++ * (first the mesh, then outward). The model's named parts ("Jewel Gloss --
++ * Opaque", "Eject Button Ring Light", "Rear Long Fins") are parents of
++ * meshes called "Cylinder.004" and the like, so matching the mesh alone
++ * painted everything as shell, black. The first name that is not shell
++ * decides; the ring is checked before "button" because it is the eject
++ * button's ring.
++ */
++func consolePart(names: [String]) -> ConsolePart {
++    for raw in names {
++        let n = raw.lowercased()
++        if n.contains("ring light") || n.contains("ring_light")
++            || n.contains("ringlight") {
++            return .ring
++        }
++        if n.contains("jewel") {
++            return .jewel
++        }
++        if n.contains("internal shield") || n.contains("internal_shield") {
++            return .interior
++        }
++        if n.contains("button") || n.contains("port") || n.contains("fins")
++            || n.contains("feet") || n.contains("rj45") {
++            return .trim
++        }
++    }
++    return .shell
++}
++
++/*
++ * The kind of controller, for the picker's choice. Every PSVR2 Sense name
++ * is one kind, "sense": the pair arrives as one combined "(L/R)" device
++ * when both are on before launch and as separate hands afterwards, and a
++ * saved choice has to match either. Anything else is its own name.
++ */
++func controllerKind(vendorName: String) -> String {
++    vendorName.contains("Sense Controller") ? "sense" : vendorName
 +}
 diff --git a/ui/xbawks-picker.swift b/ui/xbawks-picker.swift
 new file mode 100644
