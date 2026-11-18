@@ -4870,10 +4870,10 @@ index 0000000..fb58749
 +}
 diff --git a/ui/xbawks-editions.swift b/ui/xbawks-editions.swift
 new file mode 100644
-index 0000000..c9fab64
+index 0000000..a02ffaa
 --- /dev/null
 +++ b/ui/xbawks-editions.swift
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,200 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Copyright (C) 2026 A. Cervantez
 +//
@@ -4964,10 +4964,10 @@ index 0000000..c9fab64
 +                jewel: greenJewel, ring: ring, trim: 0xD6DEE0, glow: 0xCFE8D4),
 +        Edition(id: "kasumi-blue", name: "Kasumi-chan Blue", group: .limited,
 +                year: "2004",
-+                note: "Japan, Dead or Alive Ultimate, 5,000 made; a deeper sky blue "
++                note: "Japan, Dead or Alive Ultimate, 5,000 made; solid sky blue "
 +                    + "with a white jewel",
-+                shell: 0x3D9BE0, opacity: 0.5, finish: .gloss,
-+                jewel: 0xE3E7EA, ring: ring, trim: 0x2F86C8, glow: 0x9ED4FF),
++                shell: 0x3D9BE0, opacity: 1, finish: .gloss,
++                jewel: 0xE3E7EA, ring: ring, trim: 0x2F86C8, glow: nil),
 +        Edition(id: "ice-blue", name: "Halo 2 Ice Blue", group: .limited,
 +                year: "2005",
 +                note: "Canada (5,000) and Asia; paler and icier than Kasumi, "
@@ -5011,6 +5011,10 @@ index 0000000..c9fab64
 +                shell: 0x7FC48A, opacity: 0.35, finish: .gloss,
 +                jewel: greenJewel, ring: ring, trim: 0x5FA86A, glow: 0xB8F0B8),
 +    ]
++
++    /// The picker's two sections, each in table order.
++    static var solid: [Edition] { all.filter { !$0.seeThrough } }
++    static var translucent: [Edition] { all.filter(\.seeThrough) }
 +
 +    /// The edition with this id; Standard Black for nil or an id no longer
 +    /// in the table (a renamed look must not leave a console unpainted).
@@ -5072,10 +5076,10 @@ index 0000000..c9fab64
 +}
 diff --git a/ui/xbawks-options.swift b/ui/xbawks-options.swift
 new file mode 100644
-index 0000000..52eb19f
+index 0000000..ff68627
 --- /dev/null
 +++ b/ui/xbawks-options.swift
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,136 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Copyright (C) 2026 A. Cervantez
 +//
@@ -5135,21 +5139,11 @@ index 0000000..52eb19f
 +                    NotificationCenter.default.post(name: .xbawksEditionChanged,
 +                                                    object: Editions.saved)
 +                }))
-+            ForEach(EditionGroup.allCases, id: \.self) { group in
-+                Section(group.title) {
-+                    ForEach(Editions.all.filter { $0.group == group }) { e in
-+                        Button {
-+                            choose(e)
-+                        } label: {
-+                            Label {
-+                                Text("\(e.name)  \(e.year)")
-+                            } icon: {
-+                                Image(systemName: e.seeThrough ? "circle.lefthalf.filled" : "circle.fill")
-+                                    .foregroundStyle(Color(UIColor(hex: e.shell)))
-+                            }
-+                        }
-+                    }
-+                }
++            Section("Solid") {
++                ForEach(Editions.solid) { e in editionButton(e) }
++            }
++            Section("Translucent") {
++                ForEach(Editions.translucent) { e in editionButton(e) }
 +            }
 +        } label: {
 +            Label("Console: \(edition.name)", systemImage: "cube.fill")
@@ -5157,6 +5151,19 @@ index 0000000..52eb19f
 +        }
 +        .menuStyle(.button)
 +        .help(edition.note)
++    }
++
++    private func editionButton(_ e: Edition) -> some View {
++        Button {
++            choose(e)
++        } label: {
++            Label {
++                Text("\(e.name)  \(e.year)")
++            } icon: {
++                Image(systemName: e.seeThrough ? "circle.lefthalf.filled" : "circle.fill")
++                    .foregroundStyle(Color(XbawksConsole.vivid(e.shell)))
++            }
++        }
 +    }
 +
 +    private var controllerMenu: some View {
