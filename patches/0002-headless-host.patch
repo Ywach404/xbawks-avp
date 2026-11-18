@@ -5094,10 +5094,10 @@ index 0000000..7941af4
 +}
 diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
 new file mode 100644
-index 0000000..b84c431
+index 0000000..e294825
 --- /dev/null
 +++ b/ui/xemu-host-app.swift
-@@ -0,0 +1,759 @@
+@@ -0,0 +1,839 @@
 +// The entry point, and now the screen.
 +//
 +// Measured on 2026-10-29: a spatial controller (the PSVR2 Sense pair)
@@ -5111,6 +5111,7 @@ index 0000000..b84c431
 +import SwiftUI
 +import RealityKit
 +import Metal
++import UIKit
 +
 +@main struct XbawksApp: App {
 +    @UIApplicationDelegateAdaptor(XbawksAppDelegate.self) var delegate
@@ -5163,15 +5164,21 @@ index 0000000..b84c431
 +         * process ("the matching Window in your app body is already
 +         * connected"), which Apparition saw as brk #0x1 before the JIT
 +         * request. Every such crash left another stale session, so it got
-+         * more likely each time. A WindowGroup accepts the extra scene, and
-+         * the newest launcher closes the older ones (keeping the first
-+         * instead kept the stale, invisible one and closed the window on
-+         * screen), so there is still only ever one launcher.
++         * more likely each time. A WindowGroup accepts the extra scene; the
++         * launcher that goes active (the one actually on screen) stays and
++         * the others close, and stale sessions are destroyed at launch so
++         * they stop accumulating. Keeping the first or the newest arrival
++         * each kept an invisible stale one in some launch.
 +         */
 +        WindowGroup("XBAWKS", id: "launcher") {
 +            LauncherView()
 +        }
-+        .defaultSize(width: 760, height: 620)
++        /*
++         * Sized by its content, not a fixed 760 by 620: the notices (no
++         * Apparition, one controller) add lines, and a fixed height cut off
++         * the title, ended the notices in an ellipsis and dropped Rescan.
++         */
++        .windowResizability(.contentSize)
 +        .restorationBehavior(.disabled)
 +
 +        ImmersiveSpace(id: "screen") {
@@ -5195,10 +5202,13 @@ index 0000000..b84c431
 +    @Environment(\.openImmersiveSpace) private var openImmersive
 +    @Environment(\.dismissWindow) private var dismissWindow
 +    @Environment(\.dismiss) private var dismissThis
-+    /// Each launcher scene takes a number as it appears; only the newest
-+    /// stays. The older ones are the stale sessions visionOS reconnects at
-+    /// launch, which are not the window on screen.
-+    @MainActor static var newest = 0
++    @Environment(\.scenePhase) private var phase
++    /// Each launcher scene takes a number as it appears. The one that goes
++    /// active is the window on screen and stays; any other launcher closes.
++    /// Neither the first nor the newest to arrive is reliably the visible
++    /// one: visionOS reconnects stale sessions in either order and leaves
++    /// them in the background.
++    @MainActor static var count = 0
 +    @State private var mine = 0
 +    @State private var status = ""
 +    @State private var discs: [DiscEntry] = []
@@ -5208,6 +5218,8 @@ index 0000000..b84c431
 +    /// disc is chosen, and again every second while the picker is up, so
 +    /// the reason is on the screen instead of only in the log.
 +    @State private var traced = xemu_host_debugger_attached()
++    /// One Sense hand on its own: the other was turned on after launch.
++    @State private var oneHand = xemu_host_one_sense_hand()
 +
 +    var body: some View {
 +        ZStack {
@@ -5281,6 +5293,24 @@ index 0000000..b84c431
 +                } else {
 +                    DiscCoverFlow(discs: discs, selectedIndex: $selected)
 +
++                    if oneHand {
++                        VStack(spacing: 4) {
++                            Text("ONE CONTROLLER")
++                                .font(XbawksTheme.face(12, .bold))
++                                .tracking(3)
++                                .foregroundStyle(.orange)
++                            Text("Only one Sense controller reached Xbawks, so it will "
++                                 + "drive both sticks. Turn both controllers on, then "
++                                 + "quit and relaunch: visionOS only hands over the pair "
++                                 + "when both are on before the app starts.")
++                                .font(XbawksTheme.face(11))
++                                .foregroundStyle(.secondary)
++                                .multilineTextAlignment(.center)
++                                .padding(.horizontal, 40)
++                        }
++                        .padding(.vertical, 6)
++                    }
++
 +                    if !traced {
 +                        VStack(spacing: 4) {
 +                            Text("NEEDS APPARITION")
@@ -5326,28 +5356,52 @@ index 0000000..b84c431
 +                }
 +            }
 +            .padding(.vertical, 28)
++            /* Every line at its full height; the window grows to fit. */
++            .frame(width: 760)
++            .fixedSize(horizontal: false, vertical: true)
 +        }
++        /* The width the launcher always had. The deck's horizontal scroller
++         * has no natural width, so without this the window sized to fit
++         * took it as a reason to go very wide. */
++        .frame(width: 760)
 +        .onAppear {
-+            LauncherView.newest += 1
-+            mine = LauncherView.newest
-+            if mine > 1 {
-+                fputs("[host] launcher: scene \(mine) arrived; older launchers close\n", stderr)
-+                fflush(stderr)
-+                NotificationCenter.default.post(name: .xbawksLauncherSuperseded,
-+                                                object: nil, userInfo: ["by": mine])
++            LauncherView.count += 1
++            mine = LauncherView.count
++            if mine == 1 {
++                /* After launch has settled: a session still unconnected
++                 * then is stale, but at first appear the real window's
++                 * session may not have connected yet. */
++                Task { @MainActor in
++                    try? await Task.sleep(for: .seconds(5))
++                    LauncherView.dropStaleSessions()
++                }
++            }
++            if phase == .active {
++                claimScreen()
++            }
++        }
++        .onChange(of: phase) { _, now in
++            if now == .active {
++                claimScreen()
 +            }
 +        }
 +        .onReceive(NotificationCenter.default.publisher(for: .xbawksLauncherSuperseded)) { n in
-+            if let by = n.userInfo?["by"] as? Int, by > mine {
-+                fputs("[host] launcher: scene \(mine) closing, superseded by \(by)\n", stderr)
++            if let by = n.userInfo?["by"] as? Int, by != mine, phase != .active {
++                fputs("[host] launcher: scene \(mine) closing, scene \(by) is on screen\n", stderr)
 +                fflush(stderr)
 +                dismissThis()
 +            }
 +        }
 +        .task {
-+            /* Re-check the debugger once a second until a game starts; the
-+             * attach can arrive after the window is up. */
++            /* Re-check the debugger and the controllers once a second until
++             * a game starts; either can change after the window is up. */
 +            while !started {
++                let hand = xemu_host_one_sense_hand()
++                if hand != oneHand {
++                    oneHand = hand
++                    fputs("[host] launcher: one Sense hand only: \(hand)\n", stderr)
++                    fflush(stderr)
++                }
 +                let now = xemu_host_debugger_attached()
 +                if now != traced {
 +                    traced = now
@@ -5376,6 +5430,32 @@ index 0000000..b84c431
 +                fflush(stderr)
 +            }
 +        }
++    }
++
++    /// This launcher is the one on screen: the others close.
++    @MainActor private func claimScreen() {
++        fputs("[host] launcher: scene \(mine) is on screen\n", stderr)
++        fflush(stderr)
++        NotificationCenter.default.post(name: .xbawksLauncherSuperseded,
++                                        object: nil, userInfo: ["by": mine])
++    }
++
++    /// Scene sessions visionOS is holding for windows that are not
++    /// connected are the stale launchers it would otherwise reconnect at
++    /// the next launch; ask for them to be destroyed so they stop piling
++    /// up. Immersive space sessions are left alone.
++    @MainActor static func dropStaleSessions() {
++        var dropped = 0
++        for session in UIApplication.shared.openSessions
++            where session.scene == nil && session.role == .windowApplication {
++            UIApplication.shared.requestSceneSessionDestruction(session,
++                                                                options: nil,
++                                                                errorHandler: nil)
++            dropped += 1
++        }
++        fputs("[host] launcher: \(UIApplication.shared.openSessions.count) scene sessions, "
++              + "\(dropped) stale dropped\n", stderr)
++        fflush(stderr)
 +    }
 +
 +    private func rescan() {
@@ -5859,10 +5939,10 @@ index 0000000..b84c431
 +}
 diff --git a/ui/xemu-host-bridge.h b/ui/xemu-host-bridge.h
 new file mode 100644
-index 0000000..b6e20f0
+index 0000000..19215da
 --- /dev/null
 +++ b/ui/xemu-host-bridge.h
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,51 @@
 +/*
 + * What the Swift entry point sees of the Objective-C shell. Kept to the
 + * two classes it wraps and the one function it calls first.
@@ -5892,6 +5972,9 @@ index 0000000..b6e20f0
 +void xemu_host_start_with_disc(const char *filename);
 +bool xemu_host_started(void);
 +bool xemu_host_debugger_attached(void);
++/* True when the only controller is one PSVR2 Sense hand on its own: the
++ * other hand was turned on after launch and visionOS did not pass it on. */
++bool xemu_host_one_sense_hand(void);
 +
 +/* Mid session disc changes. Both are safe to call from the UI thread. */
 +void xemu_host_load_disc(const char *filename);
@@ -5913,10 +5996,10 @@ index 0000000..b6e20f0
 +@end
 diff --git a/ui/xemu-host-ios.m b/ui/xemu-host-ios.m
 new file mode 100644
-index 0000000..2a2d084
+index 0000000..c27af9c
 --- /dev/null
 +++ b/ui/xemu-host-ios.m
-@@ -0,0 +1,876 @@
+@@ -0,0 +1,898 @@
 +/*
 + * xemu-host-ios.m -- the UIKit side of the house.
 + *
@@ -6460,6 +6543,28 @@ index 0000000..2a2d084
 +extern uint64_t xemu_host_frame_take(uint64_t last_seq, void **bgra,
 +                                     int *w, int *h);
 +extern void xemu_host_pad_set(uint16_t buttons, const int16_t axis[6]);
++
++/*
++ * Sense controllers turned on before launch arrive as one combined "(L/R)"
++ * device with both sticks. Turned on afterwards, visionOS passes only the
++ * right hand to the app (measured 2026-11-17; declaring SpatialGamepad and
++ * claiming controller events in the space did not change it), and that hand
++ * then drives both sticks. Until that is understood, the picker says so.
++ */
++bool xemu_host_one_sense_hand(void)
++{
++    int hands = 0;
++    for (GCController *c in GCController.controllers) {
++        if (c.extendedGamepad) {
++            return false;
++        }
++        NSString *name = c.vendorName ?: @"";
++        if ([name containsString:@"Sense Controller ("]) {
++            hands++;
++        }
++    }
++    return hands == 1;
++}
 +
 +static inline int16_t axis_of(float v)
 +{
