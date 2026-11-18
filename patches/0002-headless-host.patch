@@ -4202,10 +4202,10 @@ index ea46bf0..ca1cd7f 100644
  system_ss.add(when: pixman, if_true: files('console-vc.c'), if_false: files('console-vc-stubs.c'))
 diff --git a/ui/xbawks-console.swift b/ui/xbawks-console.swift
 new file mode 100644
-index 0000000..fb58749
+index 0000000..8e2d461
 --- /dev/null
 +++ b/ui/xbawks-console.swift
-@@ -0,0 +1,662 @@
+@@ -0,0 +1,674 @@
 +/*
 + * The console in the room, and the button that swaps a disc.
 + *
@@ -4511,14 +4511,26 @@ index 0000000..fb58749
 +        pulse = nil
 +        if glowOn {
 +            let base = shell
-+            pulse = Task { @MainActor in
++            pulse = Task { @MainActor [weak root] in
 +                let start = Date()
++                var last = -1
 +                while !Task.isCancelled {
++                    /* Stop with the console: once the space is gone the
++                     * tree is detached but each mesh still has a parent,
++                     * so the scene is the only honest test. */
++                    guard let root, root.scene != nil else { break }
 +                    let t = Date().timeIntervalSince(start)
++                    /* Twenty brightness steps; write only on a change. */
++                    let step = Int((0.5 + 0.5 * sin(t * .pi)) * 20)
++                    if step == last {
++                        try? await Task.sleep(for: .milliseconds(50))
++                        continue
++                    }
++                    last = step
 +                    var m = base
 +                    m.emissiveColor = .init(color: shellColour)
-+                    m.emissiveIntensity = Float(0.15 + 0.85 * (0.5 + 0.5 * sin(t * .pi)))
-+                    for entity in shells where entity.parent != nil {
++                    m.emissiveIntensity = 0.15 + 0.85 * Float(step) / 20
++                    for entity in shells {
 +                        if var model = entity.components[ModelComponent.self] {
 +                            model.materials = Array(repeating: m,
 +                                                    count: max(1, model.materials.count))
@@ -5076,10 +5088,10 @@ index 0000000..a02ffaa
 +}
 diff --git a/ui/xbawks-options.swift b/ui/xbawks-options.swift
 new file mode 100644
-index 0000000..ff68627
+index 0000000..259aa3c
 --- /dev/null
 +++ b/ui/xbawks-options.swift
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,142 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Copyright (C) 2026 A. Cervantez
 +//
@@ -5107,7 +5119,7 @@ index 0000000..ff68627
 +        HStack(spacing: 14) {
 +            consoleMenu
 +            controllerMenu
-+            Toggle(midSession ? "Boot animation (applies next start)"
++            Toggle(midSession ? "Boot animation (applies next launch)"
 +                              : "Boot animation",
 +                   isOn: Binding(get: { bootAnim },
 +                                 set: { on in
@@ -5204,7 +5216,13 @@ index 0000000..ff68627
 +        kind.withCString { xemu_host_set_controller_kind($0) }
 +    }
 +
++    /* Two rows can be on screen at once (the picker and the deck in the
++     * room), so each re-reads the shared settings rather than trusting
++     * what it read when it appeared. */
 +    private func refreshControllers() {
++        edition = Editions.saved
++        glow = XbawksConsole.glowOn
++        bootAnim = xemu_host_boot_anim()
 +        if let list = xemu_host_controller_kinds() {
 +            let text = String(cString: list)
 +            free(list)
