@@ -6156,10 +6156,10 @@ index 0000000..e294825
 +}
 diff --git a/ui/xemu-host-bridge.h b/ui/xemu-host-bridge.h
 new file mode 100644
-index 0000000..9d3f674
+index 0000000..9aa0248
 --- /dev/null
 +++ b/ui/xemu-host-bridge.h
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,62 @@
 +/*
 + * What the Swift entry point sees of the Objective-C shell. Kept to the
 + * two classes it wraps and the one function it calls first.
@@ -6189,6 +6189,9 @@ index 0000000..9d3f674
 +void xemu_host_start_with_disc(const char *filename);
 +bool xemu_host_started(void);
 +bool xemu_host_debugger_attached(void);
++/* The Xbox start-up animation; a change applies at the next start. */
++bool xemu_host_boot_anim(void);
++void xemu_host_set_boot_anim(bool on);
 +/* True when the only controller is one PSVR2 Sense hand on its own: the
 + * other hand was turned on after launch and visionOS did not pass it on. */
 +bool xemu_host_one_sense_hand(void);
@@ -7224,10 +7227,10 @@ index 0000000..1dd3732
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000..6818e6b
+index 0000000..39d8ba4
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,1795 @@
+@@ -0,0 +1,1814 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -7632,6 +7635,25 @@ index 0000000..6818e6b
 +bool xemu_host_started(void)
 +{
 +    return qatomic_read(&g_emulator_started);
++}
++
++/*
++ * The Xbox start-up animation, as a switch in the picker. xemu keeps it as
++ * skip_boot_anim and reads it only when it builds the machine, so a change
++ * mid session applies at the next start. Saved straight away in xemu's own
++ * settings file rather than only at exit, so a crash does not lose it.
++ */
++bool xemu_host_boot_anim(void)
++{
++    return !g_config.general.skip_boot_anim;
++}
++
++void xemu_host_set_boot_anim(bool on)
++{
++    g_config.general.skip_boot_anim = !on;
++    xemu_settings_save();
++    fprintf(stderr, "[host] boot animation: %s\n", on ? "on" : "off");
++    fflush(stderr);
 +}
 +
 +/*
