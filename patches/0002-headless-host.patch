@@ -4118,7 +4118,7 @@ index 7967bbc..6f3c51b 100644
  
  void tcg_func_start(TCGContext *s)
 diff --git a/ui/meson.build b/ui/meson.build
-index ea46bf0..50091a8 100644
+index ea46bf0..ca1cd7f 100644
 --- a/ui/meson.build
 +++ b/ui/meson.build
 @@ -27,10 +27,16 @@ xemu_ss.add(files(
@@ -4140,7 +4140,7 @@ index ea46bf0..50091a8 100644
    'xemu-widescreen.c',
  ))
  
-@@ -40,21 +46,50 @@ if host_os == 'windows'
+@@ -40,21 +46,51 @@ if host_os == 'windows'
    xemu_ss.add(nvapi, d3d11, dxgi)
  endif
  
@@ -4184,7 +4184,8 @@ index ea46bf0..50091a8 100644
 +                         check: true).stdout().strip()
 +  swift_app = custom_target('xemu-host-app.o',
 +    input: ['xemu-host-app.swift', 'xbawks-picker.swift',
-+             'xbawks-console.swift', 'xbawks-editions.swift'],
++             'xbawks-console.swift', 'xbawks-editions.swift',
++             'xbawks-options.swift'],
 +    output: 'xemu-host-app.o',
 +    depend_files: files('xemu-host-bridge.h'),
 +    command: [xcrun, '-sdk', 'xros', 'swiftc',
@@ -4201,10 +4202,10 @@ index ea46bf0..50091a8 100644
  system_ss.add(when: pixman, if_true: files('console-vc.c'), if_false: files('console-vc-stubs.c'))
 diff --git a/ui/xbawks-console.swift b/ui/xbawks-console.swift
 new file mode 100644
-index 0000000..b19a521
+index 0000000..fb58749
 --- /dev/null
 +++ b/ui/xbawks-console.swift
-@@ -0,0 +1,608 @@
+@@ -0,0 +1,662 @@
 +/*
 + * The console in the room, and the button that swaps a disc.
 + *
@@ -4396,20 +4397,52 @@ index 0000000..b19a521
 +        return root
 +    }
 +
++    /// Whether the shell pulses in its own colour. An option, off by
++    /// default; saved as xbawks.console.glow.
++    static var glowOn: Bool {
++        get { UserDefaults.standard.bool(forKey: "xbawks.console.glow") }
++        set { UserDefaults.standard.set(newValue, forKey: "xbawks.console.glow") }
++    }
++
++    /*
++     * Colours as the eye should read them. The catalogue's values are
++     * estimates and on the muted side, and physically based plastic in a
++     * dim room renders darker than its swatch, so A. saw every edition as
++     * dull. Saturation and brightness are raised for anything coloured;
++     * black and white are left as they are.
++     */
++    static func vivid(_ hex: UInt32) -> UIColor {
++        let c = UIColor(hex: hex)
++        var h: CGFloat = 0, sat: CGFloat = 0, v: CGFloat = 0, a: CGFloat = 0
++        c.getHue(&h, saturation: &sat, brightness: &v, alpha: &a)
++        guard sat > 0.15 else { return c }
++        return UIColor(hue: h, saturation: min(1, sat * 1.35 + 0.05),
++                       brightness: min(1, v * 1.2 + 0.05), alpha: 1)
++    }
++
++    private static var pulse: Task<Void, Never>?
++
 +    /*
 +     * Paint the console as an edition. The model carries no materials at
 +     * all (the project's website paints it in the browser) and renders as
 +     * white plastic unpainted. Each mesh is classified by its own name and
 +     * its ancestors' (consolePart), because the named parts are parents of
 +     * generically named meshes. Called at construction and again whenever
-+     * the edition changes, on the same hierarchy: no reload.
++     * the edition or the glow option changes, on the same hierarchy.
 +     */
 +    static func repaint(_ root: Entity, _ e: Edition) {
++        let shellColour = vivid(e.shell)
 +        var shell = PhysicallyBasedMaterial()
-+        shell.baseColor = .init(tint: UIColor(hex: e.shell))
++        shell.baseColor = .init(tint: shellColour)
 +        shell.metallic = .init(floatLiteral: 0.0)
++        /* A faint self-light, so a colour reads the same in a dim room as
++         * in a bright one. Not on black, which must stay black. */
++        if e.shell != Editions.standardBlack.shell {
++            shell.emissiveColor = .init(color: shellColour)
++            shell.emissiveIntensity = 0.12
++        }
 +        if e.seeThrough {
-+            /* Tinted, glossy plastic you can see into. */
++            /* Tinted, glossy plastic with the colour showing through. */
 +            shell.blending = .transparent(opacity: .init(floatLiteral: e.opacity))
 +            shell.roughness = .init(floatLiteral: 0.15)
 +            shell.clearcoat = .init(floatLiteral: 1.0)
@@ -4418,42 +4451,41 @@ index 0000000..b19a521
 +        }
 +
 +        var trim = PhysicallyBasedMaterial()
-+        trim.baseColor = .init(tint: UIColor(hex: e.trim))
++        trim.baseColor = .init(tint: vivid(e.trim))
 +        trim.roughness = .init(floatLiteral: 0.45)
 +
 +        var jewel = PhysicallyBasedMaterial()
-+        jewel.baseColor = .init(tint: UIColor(hex: e.jewel))
++        jewel.baseColor = .init(tint: vivid(e.jewel))
 +        jewel.roughness = .init(floatLiteral: 0.15)
-+        jewel.emissiveColor = .init(color: UIColor(hex: e.jewel))
++        jewel.emissiveColor = .init(color: vivid(e.jewel))
 +        jewel.emissiveIntensity = 0.6
 +
 +        /* Lit, so the thing you press announces itself. */
 +        var ring = PhysicallyBasedMaterial()
-+        ring.baseColor = .init(tint: UIColor(hex: e.ring))
-+        ring.emissiveColor = .init(color: UIColor(hex: e.ring))
++        ring.baseColor = .init(tint: vivid(e.ring))
++        ring.emissiveColor = .init(color: vivid(e.ring))
 +        ring.emissiveIntensity = 2.0
 +
-+        /* The inner shield glows in a see-through edition; otherwise it is
-+         * just more shell. */
-+        var interior = shell
-+        if let glow = e.glow {
-+            interior = PhysicallyBasedMaterial()
-+            interior.baseColor = .init(tint: UIColor(hex: glow))
-+            interior.emissiveColor = .init(color: UIColor(hex: glow))
-+            interior.emissiveIntensity = 0.8
-+        }
-+
++        var shells: [Entity] = []
 +        func walk(_ entity: Entity, _ outer: [String]) {
 +            let names = [entity.name] + outer
 +            if var model = entity.components[ModelComponent.self] {
++                let part = consolePart(names: names)
++                /*
++                 * The internal shield read as a grey box inside every
++                 * see-through shell. Hidden there, so the plastic is just
++                 * tinted plastic; shell coloured when opaque, where it
++                 * cannot be seen anyway.
++                 */
++                entity.isEnabled = !(part == .interior && e.seeThrough)
 +                let material: PhysicallyBasedMaterial
-+                switch consolePart(names: names) {
++                switch part {
 +                case .jewel: material = jewel
 +                case .ring: material = ring
 +                case .trim: material = trim
-+                case .interior: material = interior
-+                case .shell: material = shell
++                case .interior, .shell: material = shell
 +                }
++                if part == .shell { shells.append(entity) }
 +                model.materials = Array(repeating: material,
 +                                        count: max(1, model.materials.count))
 +                entity.components.set(model)
@@ -4468,18 +4500,36 @@ index 0000000..b19a521
 +            for child in entity.children { walk(child, names) }
 +        }
 +        walk(root, [])
-+
-+        /* A soft light inside a see-through shell, in its glow colour. */
 +        root.findEntity(named: "xbawks-glow")?.removeFromParent()
-+        if let glow = e.glow {
-+            let light = Entity()
-+            light.name = "xbawks-glow"
-+            light.components.set(PointLightComponent(
-+                color: UIColor(hex: glow), intensity: 800,
-+                attenuationRadius: 0.5))
-+            root.addChild(light)
++
++        /*
++         * The glow option: the shell pulses in its own colour, a slow
++         * breath of about two seconds. One material per frame step on the
++         * shell meshes only.
++         */
++        pulse?.cancel()
++        pulse = nil
++        if glowOn {
++            let base = shell
++            pulse = Task { @MainActor in
++                let start = Date()
++                while !Task.isCancelled {
++                    let t = Date().timeIntervalSince(start)
++                    var m = base
++                    m.emissiveColor = .init(color: shellColour)
++                    m.emissiveIntensity = Float(0.15 + 0.85 * (0.5 + 0.5 * sin(t * .pi)))
++                    for entity in shells where entity.parent != nil {
++                        if var model = entity.components[ModelComponent.self] {
++                            model.materials = Array(repeating: m,
++                                                    count: max(1, model.materials.count))
++                            entity.components.set(model)
++                        }
++                    }
++                    try? await Task.sleep(for: .milliseconds(50))
++                }
++            }
 +        }
-+        fputs("[host] console: painted as \(e.name)\n", stderr)
++        fputs("[host] console: painted as \(e.name)\(glowOn ? ", glowing" : "")\n", stderr)
 +        fflush(stderr)
 +    }
 +
@@ -4768,6 +4818,11 @@ index 0000000..b19a521
 +
 +            DiscCoverFlow(discs: discs, selectedIndex: $selected)
 +
++            /* The same choices as the picker, so the console's edition, the
++             * controller and the boot animation can change mid game from
++             * the console itself. */
++            OptionsRow(midSession: true)
++
 +            HStack(spacing: 16) {
 +                Button {
 +                    if let d = current, !d.isDashboard { onSwap(d) }
@@ -4815,10 +4870,10 @@ index 0000000..b19a521
 +}
 diff --git a/ui/xbawks-editions.swift b/ui/xbawks-editions.swift
 new file mode 100644
-index 0000000..e2a9613
+index 0000000..c9fab64
 --- /dev/null
 +++ b/ui/xbawks-editions.swift
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,196 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Copyright (C) 2026 A. Cervantez
 +//
@@ -4907,11 +4962,18 @@ index 0000000..e2a9613
 +                    + "MSN Norway, the DVT4 dev kit",
 +                shell: 0xE4ECEE, opacity: 0.28, finish: .gloss,
 +                jewel: greenJewel, ring: ring, trim: 0xD6DEE0, glow: 0xCFE8D4),
-+        Edition(id: "ice-blue", name: "Ice Blue", group: .limited,
-+                year: "2004 to 2005",
-+                note: "Kasumi-chan Blue (Japan, 5,000), Halo 2 Ice Blue Canada and Asia",
-+                shell: 0x4AA3DF, opacity: 0.45, finish: .gloss,
-+                jewel: 0xC0C4C8, ring: ring, trim: 0x3C8FC8, glow: 0x9ED4FF),
++        Edition(id: "kasumi-blue", name: "Kasumi-chan Blue", group: .limited,
++                year: "2004",
++                note: "Japan, Dead or Alive Ultimate, 5,000 made; a deeper sky blue "
++                    + "with a white jewel",
++                shell: 0x3D9BE0, opacity: 0.5, finish: .gloss,
++                jewel: 0xE3E7EA, ring: ring, trim: 0x2F86C8, glow: 0x9ED4FF),
++        Edition(id: "ice-blue", name: "Halo 2 Ice Blue", group: .limited,
++                year: "2005",
++                note: "Canada (5,000) and Asia; paler and icier than Kasumi, "
++                    + "silver jewel in Canada, black in Asia",
++                shell: 0xA8D8F2, opacity: 0.35, finish: .gloss,
++                jewel: 0xC0C4C8, ring: ring, trim: 0x8CC4E4, glow: 0xCFEAFF),
 +        Edition(id: "pure-white", name: "Pure White", group: .limited,
 +                year: "2002 to 2004",
 +                note: "Japan 2nd Anniversary (1,000), Panzer Dragoon Orta (999), "
@@ -5007,6 +5069,145 @@ index 0000000..e2a9613
 + */
 +func controllerKind(vendorName: String) -> String {
 +    vendorName.contains("Sense Controller") ? "sense" : vendorName
++}
+diff --git a/ui/xbawks-options.swift b/ui/xbawks-options.swift
+new file mode 100644
+index 0000000..52eb19f
+--- /dev/null
++++ b/ui/xbawks-options.swift
+@@ -0,0 +1,133 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Copyright (C) 2026 A. Cervantez
++//
++//  xbawks-options.swift
++//
++//  The picker's options row: which edition the console in the room wears,
++//  which controller plays, and whether the Xbox start-up plays. Three
++//  menus in one row, so the window keeps its width; a menu truncates its
++//  own label rather than pushing the window wider.
++//
++
++import SwiftUI
++
++struct OptionsRow: View {
++    /// Summoned from the console during play, rather than before a game.
++    let midSession: Bool
++
++    @State private var edition = Editions.saved
++    @State private var kinds: [String] = []
++    @State private var chosen = ""
++    @State private var bootAnim = xemu_host_boot_anim()
++    @State private var glow = XbawksConsole.glowOn
++
++    var body: some View {
++        HStack(spacing: 14) {
++            consoleMenu
++            controllerMenu
++            Toggle(midSession ? "Boot animation (applies next start)"
++                              : "Boot animation",
++                   isOn: Binding(get: { bootAnim },
++                                 set: { on in
++                                     bootAnim = on
++                                     xemu_host_set_boot_anim(on)
++                                 }))
++                .toggleStyle(.switch)
++                .font(XbawksTheme.face(12))
++                .fixedSize()
++        }
++        .font(XbawksTheme.face(12))
++        .padding(.horizontal, 24)
++        .task {
++            /* Controllers come and go; refresh the list once a second. */
++            while !Task.isCancelled {
++                refreshControllers()
++                try? await Task.sleep(for: .seconds(1))
++            }
++        }
++    }
++
++    private var consoleMenu: some View {
++        Menu {
++            Toggle("Glow", isOn: Binding(
++                get: { glow },
++                set: { on in
++                    glow = on
++                    XbawksConsole.glowOn = on
++                    NotificationCenter.default.post(name: .xbawksEditionChanged,
++                                                    object: Editions.saved)
++                }))
++            ForEach(EditionGroup.allCases, id: \.self) { group in
++                Section(group.title) {
++                    ForEach(Editions.all.filter { $0.group == group }) { e in
++                        Button {
++                            choose(e)
++                        } label: {
++                            Label {
++                                Text("\(e.name)  \(e.year)")
++                            } icon: {
++                                Image(systemName: e.seeThrough ? "circle.lefthalf.filled" : "circle.fill")
++                                    .foregroundStyle(Color(UIColor(hex: e.shell)))
++                            }
++                        }
++                    }
++                }
++            }
++        } label: {
++            Label("Console: \(edition.name)", systemImage: "cube.fill")
++                .lineLimit(1)
++        }
++        .menuStyle(.button)
++        .help(edition.note)
++    }
++
++    private var controllerMenu: some View {
++        Menu {
++            Button("Automatic") { pick("") }
++            ForEach(kinds, id: \.self) { kind in
++                Button(Self.label(kind)) { pick(kind) }
++            }
++            if !chosen.isEmpty && !kinds.contains(chosen) {
++                Button("\(Self.label(chosen)) (not connected)") { pick(chosen) }
++                    .disabled(true)
++            }
++        } label: {
++            Label("Controller: \(controllerLabel)", systemImage: "gamecontroller.fill")
++                .lineLimit(1)
++        }
++        .menuStyle(.button)
++    }
++
++    private var controllerLabel: String {
++        if chosen.isEmpty { return "Automatic" }
++        return kinds.contains(chosen) ? Self.label(chosen)
++                                      : "\(Self.label(chosen)) (not connected)"
++    }
++
++    private static func label(_ kind: String) -> String {
++        kind == "sense" ? "Sense controllers" : kind
++    }
++
++    private func choose(_ e: Edition) {
++        edition = e
++        Editions.saved = e
++        NotificationCenter.default.post(name: .xbawksEditionChanged, object: e)
++    }
++
++    private func pick(_ kind: String) {
++        chosen = kind
++        kind.withCString { xemu_host_set_controller_kind($0) }
++    }
++
++    private func refreshControllers() {
++        if let list = xemu_host_controller_kinds() {
++            let text = String(cString: list)
++            free(list)
++            kinds = text.split(separator: "\n").map(String.init)
++        }
++        if let c = xemu_host_controller_kind() {
++            chosen = String(cString: c)
++            free(c)
++        }
++    }
 +}
 diff --git a/ui/xbawks-picker.swift b/ui/xbawks-picker.swift
 new file mode 100644
@@ -5311,10 +5512,10 @@ index 0000000..7941af4
 +}
 diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
 new file mode 100644
-index 0000000..2e98161
+index 0000000..049656f
 --- /dev/null
 +++ b/ui/xemu-host-app.swift
-@@ -0,0 +1,844 @@
+@@ -0,0 +1,856 @@
 +// The entry point, and now the screen.
 +//
 +// Measured on 2026-10-29: a spatial controller (the PSVR2 Sense pair)
@@ -5463,6 +5664,8 @@ index 0000000..2e98161
 +
 +                    DiscCoverFlow(discs: discs, selectedIndex: $selected)
 +
++                    OptionsRow(midSession: true)
++
 +                    HStack(spacing: 18) {
 +                        Button {
 +                            swap(discs.indices.contains(selected)
@@ -5545,6 +5748,8 @@ index 0000000..2e98161
 +                        }
 +                        .padding(.vertical, 6)
 +                    }
++
++                    OptionsRow(midSession: false)
 +
 +                    Button {
 +                        Task { await start(discs.indices.contains(selected)
@@ -5762,6 +5967,8 @@ index 0000000..2e98161
 +     * console jumped as the move began. */
 +    @State private var dragBase: SIMD3<Float>?
 +    @State private var spinOrigin: simd_quatf?
++    /// The console in the room, so a new edition from the picker repaints it.
++    @State private var consoleEntity: Entity?
 +
 +    /// Long enough that a quick flick is not a move.
 +    private static let holdToAdjust = 0.25
@@ -5776,6 +5983,7 @@ index 0000000..2e98161
 +            }
 +            let t0 = Date()
 +            let console = await XbawksConsole.make()
++            consoleEntity = console
 +            console.position = ConsolePlacement.loadPosition()
 +            console.orientation = ConsolePlacement.loadRotation()
 +            content.add(console)
@@ -5895,6 +6103,11 @@ index 0000000..2e98161
 +                    fflush(stderr)
 +                }
 +        )
++        .onReceive(NotificationCenter.default.publisher(for: .xbawksEditionChanged)) { n in
++            if let e = n.object as? Edition, let console = consoleEntity {
++                XbawksConsole.repaint(console, e)
++            }
++        }
 +        .gesture(
 +            DragGesture()
 +                .targetedToAnyEntity()
