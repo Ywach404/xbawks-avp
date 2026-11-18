@@ -3147,10 +3147,10 @@ index be70ec3..51e8114 100644
  	DEF_HELPER_1(name ## __soft, ret, t1) \
  	DEF_HELPER_1(name ## __hard, ret, t1)
 diff --git a/target/i386/tcg/fpu_helper.c b/target/i386/tcg/fpu_helper.c
-index 9c540b1..60bbd83 100644
+index 9c540b1..3ac2342 100644
 --- a/target/i386/tcg/fpu_helper.c
 +++ b/target/i386/tcg/fpu_helper.c
-@@ -73,12 +73,149 @@
+@@ -73,12 +73,173 @@
  #define floatx80_ln2_d make_floatx80(0x3ffe, 0xb17217f7d1cf79abLL)
  #define floatx80_pi_d make_floatx80(0x4000, 0xc90fdaa22168c234LL)
  
@@ -3162,31 +3162,48 @@ index 9c540b1..60bbd83 100644
   */
  
 +#if !defined(__x86_64__)
++/*
++ * floatx80 to and from host double, for the aarch64 hard path (upstream
++ * PR #2981). That version truncated the 64 bit mantissa to 52 bits, flushed
++ * anything below double's normal range to zero in both directions, and
++ * turned a NaN whose payload sat only in the low mantissa bits into an
++ * infinity. Halo 2's soldiers went black for a frame at a time with it, and
++ * not with softfloat. Values that came out of a double op, which is nearly
++ * all of them, still take the exact bit packing; anything else is converted
++ * through the host's own correctly rounded integer to double conversion and
++ * ldexp, which also handles the subnormal range.
++ */
 +static inline double fx80_to_host(floatx80 a)
 +{
 +    int exp = a.high & 0x7fff;
 +    uint64_t sign = (uint64_t)(a.high & 0x8000) << 48;
++    uint64_t m = a.low;
 +    union { uint64_t b; double d; } u;
 +
-+    if (exp == 0) {
-+        u.b = sign;
++    if (exp == 0x7fff) {
++        uint64_t frac = m & 0x7fffffffffffffffull;
++        if (frac == 0) {
++            u.b = sign | 0x7ff0000000000000ull;           /* infinity */
++        } else {
++            /* A NaN stays a NaN: keep what payload fits, and quiet it. */
++            u.b = sign | 0x7ff8000000000000ull | (frac >> 11);
++        }
 +        return u.d;
 +    }
-+    if (exp == 0x7fff) {
-+        u.b = sign | 0x7ff0000000000000ull |
-+              ((a.low & 0x7fffffffffffffffull) >> 11);
++    if (m == 0) {
++        u.b = sign;                                       /* signed zero */
 +        return u.d;
 +    }
 +    int dexp = exp - 16383 + 1023;
-+    if (dexp <= 0) {
-+        u.b = sign;
-+    } else if (dexp >= 0x7ff) {
-+        u.b = sign | 0x7ff0000000000000ull;
-+    } else {
++    if ((m & 0x7ff) == 0 && (m >> 63) && dexp > 0 && dexp < 0x7ff) {
 +        u.b = sign | ((uint64_t)dexp << 52) |
-+              ((a.low & 0x7fffffffffffffffull) >> 11);
++              ((m & 0x7fffffffffffffffull) >> 11);       /* exact */
++        return u.d;
 +    }
-+    return u.d;
++    /* Value is m * 2^(e - 63), with e = 1 - 16383 for x87 denormals. */
++    int e = (exp == 0 ? 1 : exp) - 16383 - 63;
++    double v = ldexp((double)m, e);
++    return sign ? -v : v;
 +}
 +
 +static inline floatx80 host_to_fx80(double v)
@@ -3198,8 +3215,15 @@ index 9c540b1..60bbd83 100644
 +    floatx80 r;
 +
 +    if (dexp == 0) {
-+        r.low = 0;
-+        r.high = sign;
++        if (dman == 0) {
++            r.low = 0;
++            r.high = sign;
++        } else {
++            /* A double subnormal is a normal number to the x87. */
++            int lz = __builtin_clzll(dman);
++            r.low = dman << lz;
++            r.high = sign | (uint16_t)(15372 - lz);
++        }
 +    } else if (dexp == 0x7ff) {
 +        r.low = 0x8000000000000000ull | (dman << 11);
 +        r.high = sign | 0x7fff;
@@ -3301,7 +3325,7 @@ index 9c540b1..60bbd83 100644
  static inline
  floatx80 pack(floatx80 v, float_status *status)
  {
-@@ -165,6 +302,8 @@ floatx80 int32_to_floatx80__hard(int32_t a, float_status *status)
+@@ -165,6 +326,8 @@ floatx80 int32_to_floatx80__hard(int32_t a, float_status *status)
      return (floatx80){ .fval = a };
  }
  
@@ -3310,7 +3334,7 @@ index 9c540b1..60bbd83 100644
  #define floatx80_add          floatx80_add__hard
  #define floatx80_sub          floatx80_sub__hard
  #define floatx80_mul          floatx80_mul__hard
-@@ -3449,6 +3588,7 @@ void update_mxcsr_status(CPUX86State *env)
+@@ -3449,6 +3612,7 @@ void update_mxcsr_status(CPUX86State *env)
      uint32_t mxcsr = env->mxcsr;
      int rnd_type;
  
@@ -5070,10 +5094,10 @@ index 0000000..7941af4
 +}
 diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
 new file mode 100644
-index 0000000..88e53cd
+index 0000000..b84c431
 --- /dev/null
 +++ b/ui/xemu-host-app.swift
-@@ -0,0 +1,708 @@
+@@ -0,0 +1,759 @@
 +// The entry point, and now the screen.
 +//
 +// Measured on 2026-10-29: a spatial controller (the PSVR2 Sense pair)
@@ -5130,18 +5154,25 @@ index 0000000..88e53cd
 +         * there is nothing of the app's to look at.
 +         */
 +        /*
-+         * Window and not WindowGroup. A WindowGroup is a template the
-+         * system will happily instantiate again every time openWindow is
-+         * called, so pressing the console twice gave two decks, and ten
-+         * times gave ten. Window is a single instance by definition: the
-+         * second openWindow brings the existing one forward instead of
-+         * making another. The framework enforces it, so no bookkeeping
-+         * here can drift out of step with reality.
++         * A WindowGroup, with a guard. This was a Window, the single
++         * instance kind, so that pressing the console twice could not give
++         * two decks; the deck has since moved into the immersive space and
++         * nothing in the app opens this window any more. But visionOS keeps
++         * scene sessions for the app and reconnects them at launch, and
++         * when it handed over a second launcher scene SwiftUI ended the
++         * process ("the matching Window in your app body is already
++         * connected"), which Apparition saw as brk #0x1 before the JIT
++         * request. Every such crash left another stale session, so it got
++         * more likely each time. A WindowGroup accepts the extra scene, and
++         * the newest launcher closes the older ones (keeping the first
++         * instead kept the stale, invisible one and closed the window on
++         * screen), so there is still only ever one launcher.
 +         */
-+        Window("XBAWKS", id: "launcher") {
++        WindowGroup("XBAWKS", id: "launcher") {
 +            LauncherView()
 +        }
 +        .defaultSize(width: 760, height: 620)
++        .restorationBehavior(.disabled)
 +
 +        ImmersiveSpace(id: "screen") {
 +            ScreenSpace()
@@ -5163,6 +5194,12 @@ index 0000000..88e53cd
 +struct LauncherView: View {
 +    @Environment(\.openImmersiveSpace) private var openImmersive
 +    @Environment(\.dismissWindow) private var dismissWindow
++    @Environment(\.dismiss) private var dismissThis
++    /// Each launcher scene takes a number as it appears; only the newest
++    /// stays. The older ones are the stale sessions visionOS reconnects at
++    /// launch, which are not the window on screen.
++    @MainActor static var newest = 0
++    @State private var mine = 0
 +    @State private var status = ""
 +    @State private var discs: [DiscEntry] = []
 +    @State private var selected = 0
@@ -5289,6 +5326,23 @@ index 0000000..88e53cd
 +                }
 +            }
 +            .padding(.vertical, 28)
++        }
++        .onAppear {
++            LauncherView.newest += 1
++            mine = LauncherView.newest
++            if mine > 1 {
++                fputs("[host] launcher: scene \(mine) arrived; older launchers close\n", stderr)
++                fflush(stderr)
++                NotificationCenter.default.post(name: .xbawksLauncherSuperseded,
++                                                object: nil, userInfo: ["by": mine])
++            }
++        }
++        .onReceive(NotificationCenter.default.publisher(for: .xbawksLauncherSuperseded)) { n in
++            if let by = n.userInfo?["by"] as? Int, by > mine {
++                fputs("[host] launcher: scene \(mine) closing, superseded by \(by)\n", stderr)
++                fflush(stderr)
++                dismissThis()
++            }
 +        }
 +        .task {
 +            /* Re-check the debugger once a second until a game starts; the
@@ -5451,7 +5505,23 @@ index 0000000..88e53cd
 +                SwapPanel(selected: $selected,
 +                          discs: discs,
 +                          onSwap: { disc in
-+                              disc.id.withCString { xemu_host_load_disc($0) }
++                              /*
++                               * Before anything has booted there is nothing
++                               * to swap: this is the first choice, so start
++                               * the machine with it, as the launcher does.
++                               * With the launcher window closed (or a
++                               * duplicate of it closed on arrival) the deck
++                               * in the room is where that choice is made.
++                               */
++                              if !xemu_host_started() {
++                                  if disc.isDashboard {
++                                      xemu_host_start_with_disc(nil)
++                                  } else {
++                                      disc.id.withCString { xemu_host_start_with_disc($0) }
++                                  }
++                              } else {
++                                  disc.id.withCString { xemu_host_load_disc($0) }
++                              }
 +                              showPanel = false
 +                          },
 +                          onEject: {
@@ -5781,6 +5851,11 @@ index 0000000..88e53cd
 +        }
 +        self.init(cgImage: img.cgImage!)
 +    }
++}
++
++extension Notification.Name {
++    /// A newer launcher scene appeared; older ones close themselves.
++    static let xbawksLauncherSuperseded = Notification.Name("xbawksLauncherSuperseded")
 +}
 diff --git a/ui/xemu-host-bridge.h b/ui/xemu-host-bridge.h
 new file mode 100644
