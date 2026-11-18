@@ -636,6 +636,49 @@ index 66cc710..9c98e5e 100644
          }
  
          if (d->exiting) {
+diff --git a/hw/xbox/nv2a/pgraph/glsl/psh.c b/hw/xbox/nv2a/pgraph/glsl/psh.c
+index e9a7ab8..678c980 100644
+--- a/hw/xbox/nv2a/pgraph/glsl/psh.c
++++ b/hw/xbox/nv2a/pgraph/glsl/psh.c
+@@ -31,6 +31,20 @@
+ #include "hw/xbox/nv2a/pgraph/pgraph.h"
+ #include "psh.h"
+ 
++/*
++ * Fast depth on Vulkan without geometry shaders (every draw on visionOS):
++ * how a fragment at the clip range bounds is treated. Upstream's Vulkan
++ * branch discards anything outside the range with no tolerance, which on
++ * Metal threw away Halo 2's HUD and its menu screens: they sit exactly on a
++ * bound and come back from the rasteriser a rounding step outside it. 1, the
++ * default, takes the GL branch's tolerance at the bounds and brought them
++ * back with nothing else changed. 0 is upstream's discard; 2 clamps instead
++ * of discarding, which also restored the HUD but tore geometry the game
++ * means to clip. Documents/vk-zmode overrides it before any shader is
++ * generated.
++ */
++int xemu_vk_zmode = 1;
++
+ DEF_UNIFORM_INFO_ARR(PshUniform, PSH_UNIFORM_DECL_X)
+ 
+ // TODO: https://github.com/xemu-project/xemu/issues/2260
+@@ -1027,7 +1041,7 @@ static MString* psh_convert(struct PixelShader *ps)
+         if (ps->state->z_perspective) {
+             mstring_append(clip,
+                            "float zvalue = 1.0/gl_FragCoord.w + depthOffset;\n");
+-        } else if (ps->opts.vulkan) {
++        } else if (ps->opts.vulkan && xemu_vk_zmode != 1) {
+             mstring_append(clip, "float zvalue = gl_FragCoord.z*clipRange.y;\n");
+         } else {
+             /* Tolerate GL [-1,1] NDC imprecision at the clip range bounds,
+@@ -1096,7 +1110,7 @@ static MString* psh_convert(struct PixelShader *ps)
+     }
+ 
+     /* Depth clipping */
+-    if (ps->state->depth_clipping) {
++    if (ps->state->depth_clipping && !(ps->opts.vulkan && xemu_vk_zmode == 2)) {
+         mstring_append(
+             clip, "if (zvalue < clipRange.z || clipRange.w < zvalue) {\n"
+                   "  discard;\n"
 diff --git a/hw/xbox/nv2a/pgraph/meson.build b/hw/xbox/nv2a/pgraph/meson.build
 index fc52f60..ca105c5 100644
 --- a/hw/xbox/nv2a/pgraph/meson.build
@@ -6710,10 +6753,10 @@ index 0000000..1dd3732
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000..942467b
+index 0000000..6818e6b
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,1781 @@
+@@ -0,0 +1,1795 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -7736,6 +7779,20 @@ index 0000000..942467b
 +            }
 +            fprintf(stderr, "[host] x87: %s\n", g_config.perf.hard_fpu
 +                    ? "host double" : "softfloat (Documents/soft-fpu)");
++        }
++        {
++            extern int xemu_vk_zmode;
++            g_autofree char *zp = g_strdup_printf("%s/Documents/vk-zmode",
++                                                  getenv("HOME"));
++            g_autofree char *zc = NULL;
++            if (g_file_get_contents(zp, &zc, NULL, NULL)) {
++                int v = atoi(zc);
++                xemu_vk_zmode = (v >= 0 && v <= 2) ? v : 1;
++            }
++            fprintf(stderr, "[host] fast depth at the clip bounds: %s\n",
++                    xemu_vk_zmode == 1 ? "GL tolerance" :
++                    xemu_vk_zmode == 2 ? "clamp, no discard (Documents/vk-zmode)" :
++                                         "discard, as upstream (Documents/vk-zmode)");
 +        }
 +        fprintf(stderr, "[host] bootrom  %s\n", g_config.sys.files.bootrom_path);
 +        fprintf(stderr, "[host] flashrom %s\n", g_config.sys.files.flashrom_path);
