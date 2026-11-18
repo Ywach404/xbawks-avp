@@ -5311,10 +5311,10 @@ index 0000000..7941af4
 +}
 diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
 new file mode 100644
-index 0000000..e294825
+index 0000000..2e98161
 --- /dev/null
 +++ b/ui/xemu-host-app.swift
-@@ -0,0 +1,839 @@
+@@ -0,0 +1,844 @@
 +// The entry point, and now the screen.
 +//
 +// Measured on 2026-10-29: a spatial controller (the PSVR2 Sense pair)
@@ -5757,6 +5757,10 @@ index 0000000..e294825
 +    @State private var claimTouched = Date.distantPast
 +    private static let claimStale = 0.75
 +    @State private var dragOrigin: SIMD3<Float>?
++    /* The hand's travel when the move began. The move starts after a hold,
++     * and the drift during the hold used to be applied in one step: the
++     * console jumped as the move began. */
++    @State private var dragBase: SIMD3<Float>?
 +    @State private var spinOrigin: simd_quatf?
 +
 +    /// Long enough that a quick flick is not a move.
@@ -5905,16 +5909,17 @@ index 0000000..e294825
 +                        pressBegan = value.time
 +                    }
 +                    claimTouched = Date()
++                    let travel = value.convert(value.translation3D,
++                                               from: .local, to: .scene)
 +                    if claim != .moving {
 +                        guard value.time.timeIntervalSince(pressBegan!)
 +                                >= Self.holdToAdjust else { return }
 +                        claim = .moving
 +                        dragOrigin = console.position
++                        dragBase = travel
 +                        Task { await surfaces.startIfNeeded() }
 +                    }
-+                    var p = dragOrigin! + value.convert(value.translation3D,
-+                                                        from: .local,
-+                                                        to: .scene)
++                    var p = dragOrigin! + travel - (dragBase ?? .zero)
 +                    if let rest = surfaces.restingY(
 +                            x: p.x, z: p.z, draggedTo: p.y,
 +                            objectHeight: ConsoleMetrics.height) {
@@ -5923,7 +5928,7 @@ index 0000000..e294825
 +                    console.position = p
 +                }
 +                .onEnded { value in
-+                    defer { pressBegan = nil; dragOrigin = nil }
++                    defer { pressBegan = nil; dragOrigin = nil; dragBase = nil }
 +                    guard claim == .moving,
 +                          let console = Self.console(of: value.entity)
 +                    else { return }
