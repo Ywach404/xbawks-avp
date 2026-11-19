@@ -4202,10 +4202,10 @@ index ea46bf0..ca1cd7f 100644
  system_ss.add(when: pixman, if_true: files('console-vc.c'), if_false: files('console-vc-stubs.c'))
 diff --git a/ui/xbawks-console.swift b/ui/xbawks-console.swift
 new file mode 100644
-index 0000000..5549dd9
+index 0000000..7c5aa80
 --- /dev/null
 +++ b/ui/xbawks-console.swift
-@@ -0,0 +1,676 @@
+@@ -0,0 +1,678 @@
 +/*
 + * The console in the room, and the button that swaps a disc.
 + *
@@ -4685,6 +4685,8 @@ index 0000000..5549dd9
 +    }
 +
 +    private var surfaces: [UUID: Surface] = [:]
++    /// How many surfaces are known, for the log.
++    var count: Int { surfaces.count }
 +    private var session: ARKitSession?
 +    private var misses = 0
 +
@@ -5593,10 +5595,10 @@ index 0000000..7941af4
 +}
 diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
 new file mode 100644
-index 0000000..f0a890b
+index 0000000..7b4834b
 --- /dev/null
 +++ b/ui/xemu-host-app.swift
-@@ -0,0 +1,822 @@
+@@ -0,0 +1,876 @@
 +// The entry point, and now the screen.
 +//
 +// Measured on 2026-10-29: a spatial controller (the PSVR2 Sense pair)
@@ -6050,8 +6052,6 @@ index 0000000..f0a890b
 +    @State private var spinOrigin: simd_quatf?
 +    /// The console in the room, so a new edition from the picker repaints it.
 +    @State private var consoleEntity: Entity?
-+    /// The manipulation event subscriptions, held for the space's life.
-+    @State private var manipulationSubs: [EventSubscription] = []
 +
 +    /// Long enough that a quick flick is not a move.
 +    private static let holdToAdjust = 0.25
@@ -6070,44 +6070,6 @@ index 0000000..f0a890b
 +            console.position = ConsolePlacement.loadPosition()
 +            console.orientation = ConsolePlacement.loadRotation()
 +            content.add(console)
-+            /*
-+             * Picking the console up is the system's own manipulation, the
-+             * one Apple's 3D viewers use: pinch and move with one hand,
-+             * turn the wrist or use two hands to rotate, no hold timer.
-+             * The hand written drag (after a hold) and two handed twist it
-+             * replaces misread pinches and often did not fire at all. A
-+             * plain tap still opens the deck. Rotation is kept upright, a
-+             * turn on the spot only, because the system offers rotation
-+             * free or not at all; on release it settles onto a table if
-+             * one is under it and the placement is saved.
-+             */
-+            var manipulation = ManipulationComponent()
-+            manipulation.releaseBehavior = .stay
-+            manipulation.dynamics.scalingBehavior = .none
-+            manipulation.dynamics.inertia = .low
-+            ManipulationComponent.configureEntity(console)
-+            console.components.set(manipulation)
-+            manipulationSubs = [
-+                content.subscribe(to: ManipulationEvents.WillBegin.self, on: console) { _ in
-+                    Task { await surfaces.startIfNeeded() }
-+                },
-+                content.subscribe(to: ManipulationEvents.DidUpdateTransform.self,
-+                                  on: console) { e in
-+                    Self.keepUpright(e.entity)
-+                },
-+                content.subscribe(to: ManipulationEvents.WillEnd.self, on: console) { e in
-+                    let c = e.entity
-+                    Self.keepUpright(c)
-+                    if let rest = surfaces.restingY(
-+                            x: c.position.x, z: c.position.z, draggedTo: c.position.y,
-+                            objectHeight: ConsoleMetrics.height) {
-+                        c.position.y = max(c.position.y, rest)
-+                    }
-+                    ConsolePlacement.save(position: c.position, rotation: c.orientation)
-+                    fputs("[host] console placed at \(c.position)\n", stderr)
-+                    fflush(stderr)
-+                },
-+            ]
 +            fputs("[host] boot \(XbawksApp.sinceLaunch()): console ready "
 +                  + "(\(String(format: "%.2fs", -t0.timeIntervalSinceNow)) "
 +                  + "to build it)\n", stderr)
@@ -6229,15 +6191,109 @@ index 0000000..f0a890b
 +                XbawksConsole.repaint(console, e)
 +            }
 +        }
++        .gesture(
++            DragGesture()
++                .targetedToAnyEntity()
++                .onChanged { value in
++                    guard claim != .turning,
++                          let console = Self.console(of: value.entity)
++                    else { return }
++                    /* A press start left over from a cancelled drag would
++                     * make the next pinch move the console at once. */
++                    if pressBegan == nil
++                        || value.time.timeIntervalSince(pressBegan!) > 2 {
++                        pressBegan = value.time
++                    }
++                    claimTouched = Date()
++                    let travel = value.convert(value.translation3D,
++                                               from: .local, to: .scene)
++                    if claim != .moving {
++                        guard value.time.timeIntervalSince(pressBegan!)
++                                >= Self.holdToAdjust else { return }
++                        claim = .moving
++                        dragOrigin = console.position
++                        dragBase = travel
++                        Task { await surfaces.startIfNeeded() }
++                    }
++                    var p = dragOrigin! + travel - (dragBase ?? .zero)
++                    /* Over a known table the tabletop is the floor, so the
++                     * console meets it rather than passing through. */
++                    if let rest = surfaces.restingY(
++                            x: p.x, z: p.z, draggedTo: p.y,
++                            objectHeight: ConsoleMetrics.height) {
++                        p.y = max(p.y, rest)
++                    }
++                    console.position = p
++                }
++                .onEnded { value in
++                    defer { pressBegan = nil; dragOrigin = nil; dragBase = nil }
++                    guard claim == .moving,
++                          let console = Self.console(of: value.entity)
++                    else { return }
++                    claim = nil
++                    /* Settle onto the table under it, from above too: a
++                     * console let go just over a table should land on it. */
++                    var t = console.transform
++                    if let rest = surfaces.restingY(
++                            x: t.translation.x, z: t.translation.z,
++                            draggedTo: t.translation.y,
++                            objectHeight: ConsoleMetrics.height) {
++                        t.translation.y = rest
++                        console.move(to: t, relativeTo: console.parent,
++                                     duration: 0.2, timingFunction: .easeOut)
++                    }
++                    ConsolePlacement.save(position: t.translation,
++                                          rotation: t.rotation)
++                    fputs("[host] console placed at \(t.translation)\n",
++                          stderr)
++                    fflush(stderr)
++                }
++        )
++        .gesture(
++            /*
++             * Two hands, any twist. Pinch with one hand, then the other, and
++             * move the hands around each other: the console turns on the
++             * spot. The gesture reports a rotation about the line between
++             * the hands; the natural moves are a turn about vertical (hands
++             * circling) and a steering wheel twist (a roll), so whichever
++             * of those dominates becomes the turn, clockwise to the right.
++             * It stays level. A 1 degree threshold so small motions count.
++             */
++            RotateGesture3D(minimumAngleDelta: .degrees(1))
++                .targetedToAnyEntity()
++                .onChanged { value in
++                    guard claim != .moving,
++                          let console = Self.console(of: value.entity)
++                    else { return }
++                    claim = .turning
++                    claimTouched = Date()
++                    if spinOrigin == nil { spinOrigin = console.orientation }
++                    let r = value.rotation
++                    let axis = r.axis
++                    let turn = Float(r.angle.radians)
++                        * Float(abs(axis.y) >= abs(axis.z) ? axis.y : -axis.z)
++                    console.orientation =
++                        simd_quatf(angle: turn, axis: [0, 1, 0]) * spinOrigin!
++                }
++                .onEnded { value in
++                    defer { spinOrigin = nil }
++                    guard claim == .turning,
++                          let console = Self.console(of: value.entity)
++                    else { return }
++                    claim = nil
++                    ConsolePlacement.save(position: console.position,
++                                          rotation: console.orientation)
++                    fputs("[host] console turned\n", stderr); fflush(stderr)
++                }
++        )
 +    }
 +
-+    /// Keep only the turn about vertical: the console stays level however
-+    /// the hand is held.
-+    private static func keepUpright(_ e: Entity) {
-+        let f = e.orientation.act(SIMD3<Float>(0, 0, -1))
-+        guard abs(f.x) + abs(f.z) > 1e-4 else { return }
-+        let yaw = atan2(-f.x, -f.z)
-+        e.orientation = simd_quatf(angle: yaw, axis: [0, 1, 0])
++    /// Only the turn about vertical of an orientation, so the console sits
++    /// level however the hand was held.
++    private static func upright(_ q: simd_quatf) -> simd_quatf {
++        let f = q.act(SIMD3<Float>(0, 0, -1))
++        guard abs(f.x) + abs(f.z) > 1e-4 else { return q }
++        return simd_quatf(angle: atan2(-f.x, -f.z), axis: [0, 1, 0])
 +    }
 +
 +    /// 28 cm up and a little forward, plus whatever the bar was dragged
