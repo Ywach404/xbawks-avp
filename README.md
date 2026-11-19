@@ -34,8 +34,9 @@ Ported and maintained by A.Cervantez. xemu and QEMU are the work of their respec
 
 - Boots the Xbox dashboard and a retail game from a disc image, standalone, no Mac streaming.
 - Presents the picture on a 2.8 metre screen in a mixed immersive space, fed straight from the GPU.
-- Puts a true scale Xbox in the room. It rests on real tables, you can move it and turn it, and pressing it brings up a Cover Flow deck of your discs. Swapping a disc resets the console and boots the new one, as the hardware would; eject returns to the dashboard.
-- Takes input from a pair of PSVR2 Sense controllers (or an extended gamepad): sticks, face buttons, analog triggers.
+- Puts a true scale Xbox in the room. It rests on real tables, you can move it and turn it, and pressing it brings up a Cover Flow deck of your discs. Swapping a disc resets the console and boots the new one, as the hardware would; eject returns to the dashboard. The console can wear thirteen original Xbox editions, solid and translucent, from Standard Black to the Skeleton smoke, Crystal and Halo greens, with an optional glow.
+- Takes input from a pair of PSVR2 Sense controllers or a PS4 controller over Bluetooth: sticks, face buttons, analog triggers. With more than one connected, the picker chooses which one plays.
+- Skips the Xbox start-up animation if you would rather go straight into the game, a switch in the picker.
 - Pauses when you leave and resumes when you come back.
 
 What it does not do yet: save state, or let you move the screen. Higher internal resolution is a switch rather than a setting so far (see `AVP-INSTALL.md`). The devlog has the measurements behind every one of those.
@@ -54,7 +55,7 @@ Measured on the headset between 2026-11-10 and 2026-11-17, each title played for
 | Blinx: The Time Sweeper | Plays | 33 fps on Deja Vu Canals, which ran at 6 before the vertex work. |
 | Cel Damage | Plays | 32 fps, up from 25 once x87 floating point ran on the headset's own hardware. |
 | Fuzion Frenzy | Plays | Launch title, no issues seen in a short run. |
-| Halo 2 | Plays | 33 fps through the Cairo Station firefight, memory flat at 4.6 GB. HUD shield bar and ammo boxes missing, no zoom view, armour pops in. |
+| Halo 2 | Plays | 33 fps through the Cairo Station firefight, memory flat at 4.6 GB. HUD, menus and scope all draw, and nothing else looked wrong. |
 | The Elder Scrolls III: Morrowind | Plays | 18 to 28 fps outdoors in Balmora, 65 indoors, measured before the x87 change. A save in Balmora loads in under a minute, down from four. Hung on the prison ship until 2026-11-15; see the devlog for what it was waiting on. |
 
 "Plays" means I played it through; anything that looked wrong is in its notes. "Starts" means it got to gameplay and then failed in a way that is recorded in the devlog with the numbers.
