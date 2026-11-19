@@ -4202,10 +4202,10 @@ index ea46bf0..ca1cd7f 100644
  system_ss.add(when: pixman, if_true: files('console-vc.c'), if_false: files('console-vc-stubs.c'))
 diff --git a/ui/xbawks-console.swift b/ui/xbawks-console.swift
 new file mode 100644
-index 0000000..8e2d461
+index 0000000..5549dd9
 --- /dev/null
 +++ b/ui/xbawks-console.swift
-@@ -0,0 +1,674 @@
+@@ -0,0 +1,676 @@
 +/*
 + * The console in the room, and the button that swaps a disc.
 + *
@@ -4511,6 +4511,7 @@ index 0000000..8e2d461
 +        pulse = nil
 +        if glowOn {
 +            let base = shell
++            let pulseColour = GlowColour.saved.hex.map { UIColor(hex: $0) } ?? shellColour
 +            pulse = Task { @MainActor [weak root] in
 +                let start = Date()
 +                var last = -1
@@ -4528,7 +4529,7 @@ index 0000000..8e2d461
 +                    }
 +                    last = step
 +                    var m = base
-+                    m.emissiveColor = .init(color: shellColour)
++                    m.emissiveColor = .init(color: pulseColour)
 +                    m.emissiveIntensity = 0.15 + 0.85 * Float(step) / 20
 +                    for entity in shells {
 +                        if var model = entity.components[ModelComponent.self] {
@@ -4541,7 +4542,8 @@ index 0000000..8e2d461
 +                }
 +            }
 +        }
-+        fputs("[host] console: painted as \(e.name)\(glowOn ? ", glowing" : "")\n", stderr)
++        fputs("[host] console: painted as \(e.name)"
++              + (glowOn ? ", glowing \(GlowColour.saved.name)" : "") + "\n", stderr)
 +        fflush(stderr)
 +    }
 +
@@ -4882,10 +4884,10 @@ index 0000000..8e2d461
 +}
 diff --git a/ui/xbawks-editions.swift b/ui/xbawks-editions.swift
 new file mode 100644
-index 0000000..a02ffaa
+index 0000000..21a9943
 --- /dev/null
 +++ b/ui/xbawks-editions.swift
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,235 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Copyright (C) 2026 A. Cervantez
 +//
@@ -5086,12 +5088,47 @@ index 0000000..a02ffaa
 +func controllerKind(vendorName: String) -> String {
 +    vendorName.contains("Sense Controller") ? "sense" : vendorName
 +}
++
++/*
++ * The colour the glow pulses in. The edition's own colour by default; or
++ * one of a short list chosen to look good as light, which is easier to pick
++ * from in a headset than a full colour wheel. Saved as
++ * xbawks.console.glowColour.
++ */
++struct GlowColour: Identifiable, Equatable {
++    let id: String
++    let name: String
++    /// nil means the edition's own shell colour.
++    let hex: UInt32?
++
++    static let presets: [GlowColour] = [
++        GlowColour(id: "edition", name: "Edition colour", hex: nil),
++        GlowColour(id: "xbox-green", name: "Xbox Green", hex: 0x5BE33A),
++        GlowColour(id: "ice-blue", name: "Ice Blue", hex: 0x7FD4FF),
++        GlowColour(id: "red", name: "Red", hex: 0xFF3B30),
++        GlowColour(id: "purple", name: "Purple", hex: 0xB45CFF),
++        GlowColour(id: "orange", name: "Orange", hex: 0xFF8A1F),
++        GlowColour(id: "pink", name: "Pink", hex: 0xFF5FB8),
++        GlowColour(id: "white", name: "White", hex: 0xF4F8FF),
++    ]
++
++    static func named(_ id: String?) -> GlowColour {
++        presets.first { $0.id == id } ?? presets[0]
++    }
++
++    static let savedKey = "xbawks.console.glowColour"
++
++    static var saved: GlowColour {
++        get { named(UserDefaults.standard.string(forKey: savedKey)) }
++        set { UserDefaults.standard.set(newValue.id, forKey: savedKey) }
++    }
++}
 diff --git a/ui/xbawks-options.swift b/ui/xbawks-options.swift
 new file mode 100644
-index 0000000..259aa3c
+index 0000000..ef9a144
 --- /dev/null
 +++ b/ui/xbawks-options.swift
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,161 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Copyright (C) 2026 A. Cervantez
 +//
@@ -5114,6 +5151,7 @@ index 0000000..259aa3c
 +    @State private var chosen = ""
 +    @State private var bootAnim = xemu_host_boot_anim()
 +    @State private var glow = XbawksConsole.glowOn
++    @State private var glowColour = GlowColour.saved
 +
 +    var body: some View {
 +        HStack(spacing: 14) {
@@ -5151,6 +5189,23 @@ index 0000000..259aa3c
 +                    NotificationCenter.default.post(name: .xbawksEditionChanged,
 +                                                    object: Editions.saved)
 +                }))
++            Menu("Glow colour: \(glowColour.name)") {
++                ForEach(GlowColour.presets) { g in
++                    Button {
++                        glowColour = g
++                        GlowColour.saved = g
++                        NotificationCenter.default.post(name: .xbawksEditionChanged,
++                                                        object: Editions.saved)
++                    } label: {
++                        Label {
++                            Text(g.name)
++                        } icon: {
++                            Image(systemName: g.hex == nil ? "circle.dashed" : "circle.fill")
++                                .foregroundStyle(Color(UIColor(hex: g.hex ?? 0xFFFFFF)))
++                        }
++                    }
++                }
++            }
 +            Section("Solid") {
 +                ForEach(Editions.solid) { e in editionButton(e) }
 +            }
@@ -5222,6 +5277,7 @@ index 0000000..259aa3c
 +    private func refreshControllers() {
 +        edition = Editions.saved
 +        glow = XbawksConsole.glowOn
++        glowColour = GlowColour.saved
 +        bootAnim = xemu_host_boot_anim()
 +        if let list = xemu_host_controller_kinds() {
 +            let text = String(cString: list)
@@ -5537,10 +5593,10 @@ index 0000000..7941af4
 +}
 diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
 new file mode 100644
-index 0000000..049656f
+index 0000000..f0a890b
 --- /dev/null
 +++ b/ui/xemu-host-app.swift
-@@ -0,0 +1,856 @@
+@@ -0,0 +1,822 @@
 +// The entry point, and now the screen.
 +//
 +// Measured on 2026-10-29: a spatial controller (the PSVR2 Sense pair)
@@ -5994,6 +6050,8 @@ index 0000000..049656f
 +    @State private var spinOrigin: simd_quatf?
 +    /// The console in the room, so a new edition from the picker repaints it.
 +    @State private var consoleEntity: Entity?
++    /// The manipulation event subscriptions, held for the space's life.
++    @State private var manipulationSubs: [EventSubscription] = []
 +
 +    /// Long enough that a quick flick is not a move.
 +    private static let holdToAdjust = 0.25
@@ -6012,6 +6070,44 @@ index 0000000..049656f
 +            console.position = ConsolePlacement.loadPosition()
 +            console.orientation = ConsolePlacement.loadRotation()
 +            content.add(console)
++            /*
++             * Picking the console up is the system's own manipulation, the
++             * one Apple's 3D viewers use: pinch and move with one hand,
++             * turn the wrist or use two hands to rotate, no hold timer.
++             * The hand written drag (after a hold) and two handed twist it
++             * replaces misread pinches and often did not fire at all. A
++             * plain tap still opens the deck. Rotation is kept upright, a
++             * turn on the spot only, because the system offers rotation
++             * free or not at all; on release it settles onto a table if
++             * one is under it and the placement is saved.
++             */
++            var manipulation = ManipulationComponent()
++            manipulation.releaseBehavior = .stay
++            manipulation.dynamics.scalingBehavior = .none
++            manipulation.dynamics.inertia = .low
++            ManipulationComponent.configureEntity(console)
++            console.components.set(manipulation)
++            manipulationSubs = [
++                content.subscribe(to: ManipulationEvents.WillBegin.self, on: console) { _ in
++                    Task { await surfaces.startIfNeeded() }
++                },
++                content.subscribe(to: ManipulationEvents.DidUpdateTransform.self,
++                                  on: console) { e in
++                    Self.keepUpright(e.entity)
++                },
++                content.subscribe(to: ManipulationEvents.WillEnd.self, on: console) { e in
++                    let c = e.entity
++                    Self.keepUpright(c)
++                    if let rest = surfaces.restingY(
++                            x: c.position.x, z: c.position.z, draggedTo: c.position.y,
++                            objectHeight: ConsoleMetrics.height) {
++                        c.position.y = max(c.position.y, rest)
++                    }
++                    ConsolePlacement.save(position: c.position, rotation: c.orientation)
++                    fputs("[host] console placed at \(c.position)\n", stderr)
++                    fflush(stderr)
++                },
++            ]
 +            fputs("[host] boot \(XbawksApp.sinceLaunch()): console ready "
 +                  + "(\(String(format: "%.2fs", -t0.timeIntervalSinceNow)) "
 +                  + "to build it)\n", stderr)
@@ -6133,89 +6229,15 @@ index 0000000..049656f
 +                XbawksConsole.repaint(console, e)
 +            }
 +        }
-+        .gesture(
-+            DragGesture()
-+                .targetedToAnyEntity()
-+                .onChanged { value in
-+                    guard claim != .turning,
-+                          let console = Self.console(of: value.entity)
-+                    else { return }
-+                    /* A press start left over from a cancelled drag would
-+                     * make the next pinch move the console at once. */
-+                    if pressBegan == nil
-+                        || value.time.timeIntervalSince(pressBegan!) > 2 {
-+                        pressBegan = value.time
-+                    }
-+                    claimTouched = Date()
-+                    let travel = value.convert(value.translation3D,
-+                                               from: .local, to: .scene)
-+                    if claim != .moving {
-+                        guard value.time.timeIntervalSince(pressBegan!)
-+                                >= Self.holdToAdjust else { return }
-+                        claim = .moving
-+                        dragOrigin = console.position
-+                        dragBase = travel
-+                        Task { await surfaces.startIfNeeded() }
-+                    }
-+                    var p = dragOrigin! + travel - (dragBase ?? .zero)
-+                    if let rest = surfaces.restingY(
-+                            x: p.x, z: p.z, draggedTo: p.y,
-+                            objectHeight: ConsoleMetrics.height) {
-+                        p.y = max(p.y, rest)
-+                    }
-+                    console.position = p
-+                }
-+                .onEnded { value in
-+                    defer { pressBegan = nil; dragOrigin = nil; dragBase = nil }
-+                    guard claim == .moving,
-+                          let console = Self.console(of: value.entity)
-+                    else { return }
-+                    claim = nil
-+                    ConsolePlacement.save(position: console.position,
-+                                          rotation: console.orientation)
-+                    fputs("[host] console placed at \(console.position)\n",
-+                          stderr)
-+                    fflush(stderr)
-+                }
-+        )
-+        .gesture(
-+            /*
-+             * Unconstrained, with the yaw taken out afterwards. Pinning
-+             * the gesture to the vertical axis made it refuse most real
-+             * two handed twists, which never line up exactly with an
-+             * axis; it fired twice in a whole session. Accept any
-+             * rotation, then use only the part that turns it on the spot.
-+             */
-+            RotateGesture3D()
-+                .targetedToAnyEntity()
-+                .onChanged { value in
-+                    guard claim != .moving,
-+                          let console = Self.console(of: value.entity)
-+                    else { return }
-+                    claim = .turning
-+                    claimTouched = Date()
-+                    if spinOrigin == nil { spinOrigin = console.orientation }
-+                    /* Vertical only, so it turns on the spot. The axis
-+                     * already carries the direction of the twist, so the
-+                     * angle must not be negated on top of it. */
-+                    /* Project the gesture onto vertical: the component
-+                     * of its axis along Y, times its angle. */
-+                    let r = value.rotation
-+                    let yaw = Float(r.angle.radians) * Float(r.axis.y)
-+                    console.orientation =
-+                        simd_quatf(angle: yaw, axis: [0, 1, 0]) * spinOrigin!
-+                }
-+                .onEnded { value in
-+                    defer { spinOrigin = nil }
-+                    guard claim == .turning,
-+                          let console = Self.console(of: value.entity)
-+                    else { return }
-+                    claim = nil
-+                    ConsolePlacement.save(position: console.position,
-+                                          rotation: console.orientation)
-+                    fputs("[host] console turned\n", stderr); fflush(stderr)
-+                }
-+        )
++    }
++
++    /// Keep only the turn about vertical: the console stays level however
++    /// the hand is held.
++    private static func keepUpright(_ e: Entity) {
++        let f = e.orientation.act(SIMD3<Float>(0, 0, -1))
++        guard abs(f.x) + abs(f.z) > 1e-4 else { return }
++        let yaw = atan2(-f.x, -f.z)
++        e.orientation = simd_quatf(angle: yaw, axis: [0, 1, 0])
 +    }
 +
 +    /// 28 cm up and a little forward, plus whatever the bar was dragged
