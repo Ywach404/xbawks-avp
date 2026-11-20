@@ -1,6 +1,6 @@
 # Xbawks
 
-![Xbawks running on an Apple Vision Pro](docs/media/promo.gif)
+[![Xbawks running on an Apple Vision Pro. Click to watch the full video on YouTube.](docs/media/promo.gif)](https://youtu.be/AnmeuEjDdMU)
 
 An original Xbox emulator for Apple Vision Pro, running on the headset itself. It is a port of [xemu](https://xemu.app), which is a fork of QEMU, with a visionOS shell around it: a JIT that works within the platform's rules, a screen inside an immersive space, and the PSVR2 Sense controllers as the gamepad.
 
