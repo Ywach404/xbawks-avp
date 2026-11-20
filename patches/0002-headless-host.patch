@@ -77,10 +77,24 @@ index 1433c0d..6980702 100644
      qemu_plugin_disable_mem_helpers(cpu);
      /*
 diff --git a/accel/tcg/tcg-accel-ops-mttcg.c b/accel/tcg/tcg-accel-ops-mttcg.c
-index 25dbb19..5dc2de1 100644
+index 25dbb19..3bc5cd3 100644
 --- a/accel/tcg/tcg-accel-ops-mttcg.c
 +++ b/accel/tcg/tcg-accel-ops-mttcg.c
-@@ -85,6 +85,30 @@ static void *mttcg_cpu_thread_fn(void *arg)
+@@ -78,6 +78,13 @@ static void *mttcg_cpu_thread_fn(void *arg)
+ 
+     bql_lock();
+     qemu_thread_get_self(cpu->thread);
++#ifdef __APPLE__
++    {
++        /* For the host's vCPU profiler (ui/xemu-host.c). */
++        extern void xemu_profile_register_vcpu(void);
++        xemu_profile_register_vcpu();
++    }
++#endif
+ 
+     cpu->thread_id = qemu_get_thread_id();
+     cpu->neg.can_do_io = true;
+@@ -85,6 +92,30 @@ static void *mttcg_cpu_thread_fn(void *arg)
      cpu_thread_signal_created(cpu);
      qemu_guest_random_seed_thread_part2(cpu->random_seed);
  
@@ -111,6 +125,24 @@ index 25dbb19..5dc2de1 100644
      do {
          qemu_process_cpu_events(cpu);
  
+diff --git a/accel/tcg/tcg-accel-ops-rr.c b/accel/tcg/tcg-accel-ops-rr.c
+index a4bf4bd..131f92e 100644
+--- a/accel/tcg/tcg-accel-ops-rr.c
++++ b/accel/tcg/tcg-accel-ops-rr.c
+@@ -191,6 +191,13 @@ static void *rr_cpu_thread_fn(void *arg)
+ 
+     bql_lock();
+     qemu_thread_get_self(cpu->thread);
++#ifdef __APPLE__
++    {
++        /* For the host's vCPU profiler (ui/xemu-host.c). */
++        extern void xemu_profile_register_vcpu(void);
++        xemu_profile_register_vcpu();
++    }
++#endif
+ 
+     cpu->thread_id = qemu_get_thread_id();
+     cpu->neg.can_do_io = true;
 diff --git a/block/file-posix.c b/block/file-posix.c
 index 6265d2e..cb337c0 100644
 --- a/block/file-posix.c
@@ -5595,10 +5627,10 @@ index 0000000..7941af4
 +}
 diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
 new file mode 100644
-index 0000000..7b4834b
+index 0000000..9caeca9
 --- /dev/null
 +++ b/ui/xemu-host-app.swift
-@@ -0,0 +1,876 @@
+@@ -0,0 +1,882 @@
 +// The entry point, and now the screen.
 +//
 +// Measured on 2026-10-29: a spatial controller (the PSVR2 Sense pair)
@@ -5835,6 +5867,9 @@ index 0000000..7b4834b
 +                    OptionsRow(midSession: false)
 +
 +                    Button {
++                        fputs("[host] launcher: insert pressed, \(discs.count) discs, "
++                              + "selected \(selected), debugger \(traced)\n", stderr)
++                        fflush(stderr)
 +                        Task { await start(discs.indices.contains(selected)
 +                                           ? discs[selected] : nil) }
 +                    } label: {
@@ -6097,6 +6132,9 @@ index 0000000..7b4834b
 +                SwapPanel(selected: $selected,
 +                          discs: discs,
 +                          onSwap: { disc in
++                              fputs("[host] deck: swap pressed (\(disc.id)), started \(xemu_host_started())\n",
++                                    stderr)
++                              fflush(stderr)
 +                              /*
 +                               * Before anything has booted there is nothing
 +                               * to swap: this is the first choice, so start
@@ -7548,10 +7586,10 @@ index 0000000..1dd3732
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000..39d8ba4
+index 0000000..c98d205
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,1814 @@
+@@ -0,0 +1,1977 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -8139,6 +8177,155 @@ index 0000000..39d8ba4
 +    return g_strdup_printf("%s/media/%s", bundle, file);
 +}
 +
++/*
++ * Where the vCPU thread's time goes, sampled. A thread wakes about a
++ * thousand times a second, suspends the vCPU thread, reads its program
++ * counter, resumes it, and sorts the sample by what the PC is in:
++ * translated guest code, the x87 helpers, softfloat, other helpers, memory
++ * access, the translator and dispatch, or anything else. Every 5 s the
++ * sampler prints the shares and the busiest functions. Built to decide
++ * whether x87 is worth inlining (it is worth at most its share), and kept
++ * because "where does the CPU go" comes up for every slow title.
++ */
++#include <mach/mach.h>
++#include <dlfcn.h>
++
++static mach_port_t profile_vcpu = MACH_PORT_NULL;
++
++void xemu_profile_register_vcpu(void)
++{
++    profile_vcpu = mach_thread_self();
++}
++
++enum { PB_GUEST, PB_X87, PB_SOFTFLOAT, PB_HELPER, PB_MEMORY, PB_TCG, PB_OTHER, PB_N };
++static const char *const profile_bucket_names[PB_N] = {
++    "guest code", "x87", "softfloat", "other helpers", "memory", "translator", "other",
++};
++static unsigned long profile_counts[PB_N];
++static GHashTable *profile_by_fn;   /* function start -> sample count */
++static GMutex profile_lock;       /* the table only; never the BQL */
++
++static int profile_bucket(const char *n)
++{
++    if (!n) {
++        return PB_OTHER;
++    }
++    if (!strncmp(n, "helper_f", 8) || strstr(n, "floatx80") || strstr(n, "fpu_")) {
++        return PB_X87;
++    }
++    if (strstr(n, "float32") || strstr(n, "float64") || strstr(n, "parts64")
++        || strstr(n, "parts_") || strstr(n, "softfloat")) {
++        return PB_SOFTFLOAT;
++    }
++    if (!strncmp(n, "helper_", 7)) {
++        return PB_HELPER;
++    }
++    if (strstr(n, "cpu_ld") || strstr(n, "cpu_st") || strstr(n, "tlb")
++        || strstr(n, "address_space") || strstr(n, "memory_region")
++        || strstr(n, "flatview") || strstr(n, "ld_") || strstr(n, "st_")) {
++        return PB_MEMORY;
++    }
++    if (!strncmp(n, "tb_", 3) || !strncmp(n, "tcg_", 4) || strstr(n, "cpu_exec")
++        || strstr(n, "translate") || strstr(n, "gen_")) {
++        return PB_TCG;
++    }
++    return PB_OTHER;
++}
++
++static void *profile_thread(void *arg)
++{
++    extern bool in_code_gen_buffer(const void *p);
++    extern ptrdiff_t tcg_splitwx_diff;
++    while (true) {
++        g_usleep(1000);
++        if (profile_vcpu == MACH_PORT_NULL) {
++            continue;
++        }
++        arm_thread_state64_t st;
++        mach_msg_type_number_t n = ARM_THREAD_STATE64_COUNT;
++        if (thread_suspend(profile_vcpu) != KERN_SUCCESS) {
++            continue;
++        }
++        kern_return_t kr = thread_get_state(profile_vcpu, ARM_THREAD_STATE64,
++                                            (thread_state_t)&st, &n);
++        thread_resume(profile_vcpu);
++        if (kr != KERN_SUCCESS) {
++            continue;
++        }
++        void *pc = (void *)arm_thread_state64_get_pc(st);
++        if (in_code_gen_buffer((char *)pc - tcg_splitwx_diff)) {
++            qatomic_inc(&profile_counts[PB_GUEST]);
++            continue;
++        }
++        Dl_info info;
++        const char *name = NULL;
++        void *start = pc;
++        if (dladdr(pc, &info) && info.dli_sname) {
++            name = info.dli_sname;
++            start = info.dli_saddr;
++        }
++        qatomic_inc(&profile_counts[profile_bucket(name)]);
++        g_mutex_lock(&profile_lock);
++        gpointer prev = g_hash_table_lookup(profile_by_fn, start);
++        g_hash_table_insert(profile_by_fn, start,
++                            GSIZE_TO_POINTER(GPOINTER_TO_SIZE(prev) + 1));
++        g_mutex_unlock(&profile_lock);
++    }
++    return NULL;
++}
++
++/* One line of shares and one of the busiest functions, then reset. */
++static void profile_report(void)
++{
++    if (!profile_by_fn) {
++        return;
++    }
++    unsigned long total = 0, c[PB_N];
++    for (int i = 0; i < PB_N; i++) {
++        c[i] = qatomic_xchg(&profile_counts[i], 0);
++        total += c[i];
++    }
++    if (!total) {
++        return;
++    }
++    char line[512];
++    int off = snprintf(line, sizeof(line), "[host]   vcpu profile (%lu samples):", total);
++    for (int i = 0; i < PB_N && off < (int)sizeof(line); i++) {
++        off += snprintf(line + off, sizeof(line) - off, " %s %lu%%",
++                        profile_bucket_names[i], c[i] * 100 / total);
++    }
++    fprintf(stderr, "%s\n", line);
++
++    g_mutex_lock(&profile_lock);
++    GHashTableIter it;
++    gpointer k, v;
++    void *top[5] = { 0 };
++    size_t topn[5] = { 0 };
++    g_hash_table_iter_init(&it, profile_by_fn);
++    while (g_hash_table_iter_next(&it, &k, &v)) {
++        size_t cnt = GPOINTER_TO_SIZE(v);
++        for (int i = 0; i < 5; i++) {
++            if (cnt > topn[i]) {
++                memmove(&top[i + 1], &top[i], (4 - i) * sizeof(top[0]));
++                memmove(&topn[i + 1], &topn[i], (4 - i) * sizeof(topn[0]));
++                top[i] = k;
++                topn[i] = cnt;
++                break;
++            }
++        }
++    }
++    g_hash_table_remove_all(profile_by_fn);
++    g_mutex_unlock(&profile_lock);
++    off = snprintf(line, sizeof(line), "[host]   vcpu top:");
++    for (int i = 0; i < 5 && topn[i] && off < (int)sizeof(line); i++) {
++        Dl_info info;
++        const char *nm = (dladdr(top[i], &info) && info.dli_sname) ? info.dli_sname : "?";
++        off += snprintf(line + off, sizeof(line) - off, " %s %lu%%", nm,
++                        topn[i] * 100 / total);
++    }
++    fprintf(stderr, "%s\n", line);
++}
++
 +static int      g_argc;
 +static char   **g_argv;
 +static int      exit_status;
@@ -8365,6 +8552,19 @@ index 0000000..39d8ba4
 +        QemuThread ticker;
 +        qemu_thread_create(&ticker, "footprint", footprint_ticker, NULL,
 +                           QEMU_THREAD_DETACHED);
++    }
++    {
++        /* Opt in, Documents/profile content 1: the first version ran on
++         * every launch and the machine never started under it. */
++        g_autofree char *pp = g_strdup_printf("%s/Documents/profile", getenv("HOME"));
++        g_autofree char *pc = NULL;
++        if (g_file_get_contents(pp, &pc, NULL, NULL) && pc[0] == '1') {
++            QemuThread prof;
++            profile_by_fn = g_hash_table_new(g_direct_hash, g_direct_equal);
++            qemu_thread_create(&prof, "vcpu-profile", profile_thread, NULL,
++                               QEMU_THREAD_DETACHED);
++            fprintf(stderr, "[host] vcpu profiler on (Documents/profile)\n");
++        }
 +    }
 +    if (!xemu_settings_load()) {
 +        fprintf(stderr, "%s", xemu_settings_get_error_message());
@@ -8947,6 +9147,7 @@ index 0000000..39d8ba4
 +                        (xemu_pusher_bytes - last_push_bytes) / 1024,
 +                        (xemu_pusher_bytes - last_push_bytes) / 1024 / 5,
 +                        (ts >= 0 && ts < 4) ? thermal[ts] : "?");
++                profile_report();
 +                last_push_bytes = xemu_pusher_bytes;
 +                last_flips = flips;
 +                last_blocks = blocks;
