@@ -37,9 +37,10 @@ Ported and maintained by A.Cervantez. xemu and QEMU are the work of their respec
 - Puts a true scale Xbox in the room. It rests on real tables, you can move it and turn it, and pressing it brings up a Cover Flow deck of your discs. Swapping a disc resets the console and boots the new one, as the hardware would; eject returns to the dashboard. The console can wear thirteen original Xbox editions, solid and translucent, from Standard Black to the Skeleton smoke, Crystal and Halo greens, with an optional glow.
 - Takes input from a pair of PSVR2 Sense controllers or a PS4 controller over Bluetooth: sticks, face buttons, analog triggers. With more than one connected, the picker chooses which one plays.
 - Skips the Xbox start-up animation if you would rather go straight into the game, a switch in the picker.
+- Runs every game at twice the Xbox's resolution by default (1x and 3x are in the picker); Halo 2 holds 30 fps at 2x. The screen can be moved anywhere with the bar under it.
 - Pauses when you leave and resumes when you come back.
 
-What it does not do yet: save state, or let you move the screen. Runs every game at twice the Xbox's resolution by default (1x and 3x are in the picker); Halo 2 holds 30 fps at 2x. The devlog has the measurements behind every one of those.
+What it does not do yet: save state. The devlog has the measurements behind that.
 
 ## What runs
 
