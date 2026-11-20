@@ -4234,10 +4234,10 @@ index ea46bf0..ca1cd7f 100644
  system_ss.add(when: pixman, if_true: files('console-vc.c'), if_false: files('console-vc-stubs.c'))
 diff --git a/ui/xbawks-console.swift b/ui/xbawks-console.swift
 new file mode 100644
-index 0000000..7c5aa80
+index 0000000..cd0aeb5
 --- /dev/null
 +++ b/ui/xbawks-console.swift
-@@ -0,0 +1,678 @@
+@@ -0,0 +1,698 @@
 +/*
 + * The console in the room, and the button that swaps a disc.
 + *
@@ -4613,6 +4613,26 @@ index 0000000..7c5aa80
 +        disc.position = [0, ConsoleMetrics.height / 2 + 0.001, 0]
 +        body.addChild(disc)
 +        return body
++    }
++}
++
++/*
++ * Where the game screen was left, if it was moved. Nil keeps the default
++ * placement in front of the player.
++ */
++enum ScreenPlacement {
++    private static let key = "xbawks.screen.position"
++
++    static func load() -> SIMD3<Float>? {
++        guard let a = UserDefaults.standard.array(forKey: key) as? [Double],
++              a.count == 3 else { return nil }
++        let p = SIMD3<Float>(Float(a[0]), Float(a[1]), Float(a[2]))
++        /* Within a room: a screen saved kilometres away is a bug's leftover. */
++        return simd_length(p) < 10 ? p : nil
++    }
++
++    static func save(_ p: SIMD3<Float>) {
++        UserDefaults.standard.set([Double(p.x), Double(p.y), Double(p.z)], forKey: key)
 +    }
 +}
 +
@@ -5159,10 +5179,10 @@ index 0000000..21a9943
 +}
 diff --git a/ui/xbawks-options.swift b/ui/xbawks-options.swift
 new file mode 100644
-index 0000000..ef9a144
+index 0000000..9c4bd3c
 --- /dev/null
 +++ b/ui/xbawks-options.swift
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,186 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Copyright (C) 2026 A. Cervantez
 +//
@@ -5184,13 +5204,19 @@ index 0000000..ef9a144
 +    @State private var kinds: [String] = []
 +    @State private var chosen = ""
 +    @State private var bootAnim = xemu_host_boot_anim()
++    @State private var resolution = Int(xemu_host_resolution())
 +    @State private var glow = XbawksConsole.glowOn
 +    @State private var glowColour = GlowColour.saved
 +
 +    var body: some View {
-+        HStack(spacing: 14) {
-+            consoleMenu
-+            controllerMenu
++        VStack(spacing: 8) {
++            /* Two lines, so four controls fit the 680 point deck in the
++             * room as well as the 760 point picker. */
++            HStack(spacing: 14) {
++                consoleMenu
++                controllerMenu
++                resolutionMenu
++            }
 +            Toggle(midSession ? "Boot animation (applies next launch)"
 +                              : "Boot animation",
 +                   isOn: Binding(get: { bootAnim },
@@ -5267,6 +5293,24 @@ index 0000000..ef9a144
 +        }
 +    }
 +
++    private var resolutionMenu: some View {
++        Menu {
++            ForEach([1, 2, 3], id: \.self) { scale in
++                Button {
++                    resolution = scale
++                    xemu_host_set_resolution(Int32(scale))
++                } label: {
++                    Text(scale == 1 ? "1x (native 640x480)" : "\(scale)x")
++                }
++            }
++            Text("Applies at the next launch")
++        } label: {
++            Label("Resolution: \(resolution)x", systemImage: "sparkles.tv")
++                .lineLimit(1)
++        }
++        .menuStyle(.button)
++    }
++
 +    private var controllerMenu: some View {
 +        Menu {
 +            Button("Automatic") { pick("") }
@@ -5313,6 +5357,7 @@ index 0000000..ef9a144
 +        glow = XbawksConsole.glowOn
 +        glowColour = GlowColour.saved
 +        bootAnim = xemu_host_boot_anim()
++        resolution = Int(xemu_host_resolution())
 +        if let list = xemu_host_controller_kinds() {
 +            let text = String(cString: list)
 +            free(list)
@@ -5326,10 +5371,10 @@ index 0000000..ef9a144
 +}
 diff --git a/ui/xbawks-picker.swift b/ui/xbawks-picker.swift
 new file mode 100644
-index 0000000..7941af4
+index 0000000..45a8ba3
 --- /dev/null
 +++ b/ui/xbawks-picker.swift
-@@ -0,0 +1,295 @@
+@@ -0,0 +1,268 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Copyright (C) 2026 A. Cervantez
 +//
@@ -5339,15 +5384,10 @@ index 0000000..7941af4
 +//  which took it from swiftui-gallery-seed. The three things that are not
 +//  obvious are carried over verbatim rather than rediscovered:
 +//
-+//  1. `.contentMargins(..., for: .scrollContent)` is LOAD-BEARING and is not
-+//     centring. Insetting by half a column less half a card shrinks the
-+//     measured region to exactly one card, so only the centred card reaches
-+//     `.identity` and every other card gets a tilt. Remove it as redundant
-+//     and several cards sit flat in the middle with no Cover Flow at all.
-+//  2. `ScrollTransitionPhase` gives three keyframes (-1, 0, +1), not a
-+//     continuous value. No easing can live in that closure; the constants
-+//     below are the entire design surface.
-+//  3. `rotation3DEffect`'s `perspective:` label chooses the overload. With it
++//  (The Quake deck was a ScrollView; this one no longer is, see
++//  DiscCoverFlow, so its notes on content margins and scroll transition
++//  phases no longer apply.)
++//  `rotation3DEffect`'s `perspective:` label chooses the overload. With it
 +//     you get the flat projection; without it Swift resolves to the
 +//     RotationAxis3D overload, a true depth rotation that the window's depth
 +//     budget may clip. Keeping the flat one.
@@ -5440,57 +5480,57 @@ index 0000000..7941af4
 +struct DiscCoverFlow: View {
 +    let discs: [DiscEntry]
 +    @Binding var selectedIndex: Int
-+    @State private var scrollID: Int?
++    /// How far the current drag has moved the deck, in points.
++    @State private var drag: CGFloat = 0
 +
-+    private var revision: [String] { discs.map(\.id) }
++    /*
++     * Not a ScrollView. The cards overlap (each one's left third under its
++     * neighbour), and the scroll view's snapping and its idea of "centred"
++     * never agreed with where the cards actually were: let go slowly
++     * between two covers and it came to rest part of a card off, the hero
++     * left of centre and its neighbour flat beside it, with the scroll
++     * position insisting all was well (2026-11-20, after three fixes on top
++     * of it). Here the deck's position is plain arithmetic, the selected
++     * index less the drag in strides, so at rest it is a whole card by
++     * construction. Dragging slides it; letting go glides to the nearest
++     * card, a flick carrying further; a tap selects.
++     */
++    private static var stride: CGFloat {
++        DeckMetrics.cardWidth * (1 - DeckMetrics.flankerOverlapFraction)
++    }
 +
 +    var body: some View {
 +        GeometryReader { geo in
-+            ScrollView(.horizontal) {
-+                LazyHStack(spacing: -DeckMetrics.cardWidth
-+                                    * DeckMetrics.flankerOverlapFraction) {
-+                    ForEach(Array(discs.enumerated()), id: \.element.id) { index, disc in
-+                        card(disc, at: index).id(index)
++            let position = CGFloat(selectedIndex) - drag / Self.stride
++            ZStack {
++                ForEach(Array(discs.enumerated()), id: \.element.id) { index, disc in
++                    let rel = CGFloat(index) - position
++                    if abs(rel) < 4.5 {
++                        card(disc, at: index, rel: rel)
++                            .position(x: geo.size.width / 2 + rel * Self.stride
++                                         + max(-1, min(1, rel)) * DeckMetrics.cardWidth
++                                           * DeckMetrics.flankerPushAwayFraction,
++                                      y: geo.size.height / 2)
 +                    }
 +                }
-+                .scrollTargetLayout()
 +            }
-+            .scrollTargetBehavior(.viewAligned)
-+            /*
-+             * Centre anchored, so the snap grid is "a card's centre on the
-+             * deck's centre" by construction. With the default leading
-+             * anchor the grid is "a card's leading edge on the leading
-+             * margin", which is only centred if the margin below was
-+             * computed from the width the scroll view really has; after
-+             * the cold-launch rebuild it was not, and cards rested a
-+             * fraction of a stride off, at angles that never settled
-+             * (2026-11-15).
-+             */
-+            .scrollPosition(id: $scrollID, anchor: .center)
-+            .scrollIndicators(.hidden)
-+            // Not centring. See note 1 at the top.
-+            .contentMargins(.horizontal,
-+                            DeckMetrics.contentMargin(forWidth: geo.size.width),
-+                            for: .scrollContent)
-+            // No scrollClipDisabled, deliberately: it lets the deck spill
-+            // across the whole window. The mask is what stops the clip being
-+            // visible, by fading cards to nothing before the boundary.
-+            .id(revision)
-+            .onScrollPhaseChange { _, phase, context in
-+                /* Where the deck came to rest, in strides. A whole number
-+                 * is a card on the centre; anything else is the bug. */
-+                guard phase == .idle else { return }
-+                let stride = DeckMetrics.cardWidth
-+                    * (1 - DeckMetrics.flankerOverlapFraction)
-+                let g = context.geometry
-+                let inset = g.contentInsets.leading
-+                let strides = (g.contentOffset.x + inset) / stride
-+                fputs("[host] deck rest: offset \(Int(g.contentOffset.x)) "
-+                      + "inset \(Int(inset)) visible \(Int(g.visibleRect.width)) "
-+                      + "geo \(Int(geo.size.width)) = \(String(format: "%.2f", strides)) "
-+                      + "strides, selected \(selectedIndex), id \(String(describing: scrollID))\n",
-+                      stderr)
-+            }
++            .frame(width: geo.size.width, height: geo.size.height)
++            .contentShape(Rectangle())
++            .gesture(
++                DragGesture(minimumDistance: 8)
++                    .onChanged { v in drag = v.translation.width }
++                    .onEnded { v in
++                        let flung = CGFloat(selectedIndex)
++                            - v.predictedEndTranslation.width / Self.stride
++                        let target = min(max(Int(flung.rounded()), 0),
++                                         max(discs.count - 1, 0))
++                        withAnimation(.snappy(duration: 0.3)) {
++                            selectedIndex = target
++                            drag = 0
++                        }
++                        fputs("[host] deck rest: card \(target) of \(discs.count)\n", stderr)
++                    }
++            )
 +        }
 +        .frame(height: DeckMetrics.deckHeight)
 +        .mask {
@@ -5500,57 +5540,35 @@ index 0000000..7941af4
 +                                   .init(color: .clear, location: 1)],
 +                           startPoint: .leading, endPoint: .trailing)
 +        }
-+        .onChange(of: selectedIndex, initial: true) { _, index in
-+            guard scrollID != index else { return }
-+            withAnimation(.snappy(duration: 0.28)) { scrollID = index }
-+        }
-+        .onChange(of: scrollID) { _, id in
-+            guard let id, id != selectedIndex else { return }
-+            selectedIndex = id
++        .onChange(of: discs.count) { _, count in
++            if selectedIndex >= count { selectedIndex = max(0, count - 1) }
 +        }
 +    }
 +
-+    private func card(_ disc: DiscEntry, at index: Int) -> some View {
-+        let isCentre = index == selectedIndex
-+        return face(disc, isCentre: isCentre)
++    /// One card, its look from its distance to the centre in cards: the
++    /// centre card flat and full size, the others tilted away, smaller and
++    /// a little faded.
++    private func card(_ disc: DiscEntry, at index: Int, rel: CGFloat) -> some View {
++        let phase = max(-1, min(1, rel))
++        let centred = abs(rel) < 0.5
++        return face(disc, isCentre: index == selectedIndex && drag == 0)
 +            .frame(width: DeckMetrics.cardWidth, height: DeckMetrics.cardHeight)
 +            // Before the transform, so the gaze highlight follows the rotated
 +            // geometry rather than an untilted rectangle.
 +            .contentShape(.hoverEffect, RoundedRectangle(cornerRadius: 12))
 +            .hoverEffect()
-+            .zIndex(Double(discs.count - abs(index - selectedIndex)))
-+            /*
-+             * Each card's look comes from its own distance to the centre of
-+             * the visible deck, measured here, not from the scroll
-+             * transition's phase. The phase is derived from a region the
-+             * content margins are supposed to narrow to one card, and after
-+             * the empty-then-populated rebuild on a cold launch that region
-+             * came out two cards wide: two flat, full-size cards sat on top
-+             * of each other and no amount of scrolling separated them
-+             * (2026-11-15). Card centres are a fixed stride apart, so at most
-+             * one card can be within half a stride of the centre.
-+             */
-+            .visualEffect { content, proxy in
-+                let visible = proxy.bounds(of: .scrollView)
-+                    ?? CGRect(origin: .zero, size: proxy.size)
-+                let distance = proxy.size.width / 2 - visible.midX
-+                let stride = DeckMetrics.cardWidth
-+                    * (1 - DeckMetrics.flankerOverlapFraction)
-+                let phase = max(-1, min(1, distance / stride))
-+                let centred = abs(distance) < stride / 2
-+                return content
-+                    .rotation3DEffect(.degrees(phase * -DeckMetrics.tiltDegrees),
-+                                      axis: (x: 0, y: 1, z: 0), perspective: 0.7)
-+                    .scaleEffect(centred ? 1 : 0.78)
-+                    .offset(x: phase * DeckMetrics.cardWidth
-+                               * DeckMetrics.flankerPushAwayFraction)
-+                    .opacity(1 - 0.25 * abs(phase))
-+            }
++            .rotation3DEffect(.degrees(phase * -DeckMetrics.tiltDegrees),
++                              axis: (x: 0, y: 1, z: 0), perspective: 0.7)
++            .scaleEffect(centred ? 1 : 0.78)
++            .opacity(1 - 0.25 * abs(phase))
++            .zIndex(-Double(abs(rel)))
 +            // SELECTS, never loads. In the Quake deck a tap that loaded fired
 +            // by accident, because the gesture that summons the window
 +            // releases over the window the instant it appears. Loading gets
 +            // its own button.
-+            .onTapGesture { selectedIndex = index }
++            .onTapGesture {
++                withAnimation(.snappy(duration: 0.3)) { selectedIndex = index }
++            }
 +            .accessibilityLabel(disc.title)
 +    }
 +
@@ -5627,10 +5645,10 @@ index 0000000..7941af4
 +}
 diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
 new file mode 100644
-index 0000000..9caeca9
+index 0000000..d59477f
 --- /dev/null
 +++ b/ui/xemu-host-app.swift
-@@ -0,0 +1,882 @@
+@@ -0,0 +1,936 @@
 +// The entry point, and now the screen.
 +//
 +// Measured on 2026-10-29: a spatial controller (the PSVR2 Sense pair)
@@ -6087,17 +6105,47 @@ index 0000000..9caeca9
 +    @State private var spinOrigin: simd_quatf?
 +    /// The console in the room, so a new edition from the picker repaints it.
 +    @State private var consoleEntity: Entity?
++    /// The game screen, and where it was when its bar was grabbed.
++    @State private var screenEntity: Entity?
++    @State private var screenOrigin: SIMD3<Float>?
 +
 +    /// Long enough that a quick flick is not a move.
 +    private static let holdToAdjust = 0.25
 +
 +    private static let consoleName = "xbawks-console"
 +    private static let panelID = "swap-panel"
++    private static let screenBarName = "xbawks-screen-bar"
 +
 +    var body: some View {
 +        RealityView { content, attachments in
 +            if let entity = screen.makeEntity() {
 +                content.add(entity)
++                screenEntity = entity
++                if let p = ScreenPlacement.load() {
++                    entity.position = p
++                    entity.orientation = Self.facingStart(p)
++                }
++                /*
++                 * A grab bar under the screen, so the screen can be put
++                 * where you want it rather than re-centred with the Digital
++                 * Crown. A bar and not the screen itself, so a stray pinch
++                 * during play cannot move the picture.
++                 */
++                var bar = PhysicallyBasedMaterial()
++                bar.baseColor = .init(tint: UIColor(white: 0.85, alpha: 1))
++                bar.blending = .transparent(opacity: .init(floatLiteral: 0.55))
++                bar.roughness = .init(floatLiteral: 0.4)
++                let handle = ModelEntity(
++                    mesh: .generateBox(width: 0.5, height: 0.035, depth: 0.02,
++                                       cornerRadius: 0.0175),
++                    materials: [bar])
++                handle.name = Self.screenBarName
++                handle.position = [0, -1.05 - 0.07, 0]
++                handle.components.set(CollisionComponent(
++                    shapes: [.generateBox(width: 0.6, height: 0.09, depth: 0.06)]))
++                handle.components.set(InputTargetComponent())
++                handle.components.set(HoverEffectComponent())
++                entity.addChild(handle)
 +            }
 +            let t0 = Date()
 +            let console = await XbawksConsole.make()
@@ -6233,6 +6281,16 @@ index 0000000..9caeca9
 +            DragGesture()
 +                .targetedToAnyEntity()
 +                .onChanged { value in
++                    if value.entity.name == Self.screenBarName,
++                       let scr = screenEntity {
++                        let travel = value.convert(value.translation3D,
++                                                   from: .local, to: .scene)
++                        if screenOrigin == nil { screenOrigin = scr.position }
++                        let p = screenOrigin! + travel
++                        scr.position = p
++                        scr.orientation = Self.facingStart(p)
++                        return
++                    }
 +                    guard claim != .turning,
 +                          let console = Self.console(of: value.entity)
 +                    else { return }
@@ -6264,6 +6322,14 @@ index 0000000..9caeca9
 +                    console.position = p
 +                }
 +                .onEnded { value in
++                    if value.entity.name == Self.screenBarName,
++                       let scr = screenEntity {
++                        screenOrigin = nil
++                        ScreenPlacement.save(scr.position)
++                        fputs("[host] screen placed at \(scr.position)\n", stderr)
++                        fflush(stderr)
++                        return
++                    }
 +                    defer { pressBegan = nil; dragOrigin = nil; dragBase = nil }
 +                    guard claim == .moving,
 +                          let console = Self.console(of: value.entity)
@@ -6332,6 +6398,12 @@ index 0000000..9caeca9
 +        let f = q.act(SIMD3<Float>(0, 0, -1))
 +        guard abs(f.x) + abs(f.z) > 1e-4 else { return q }
 +        return simd_quatf(angle: atan2(-f.x, -f.z), axis: [0, 1, 0])
++    }
++
++    /// Turned to face where the session started, so a moved screen is
++    /// still square on to the player.
++    private static func facingStart(_ p: SIMD3<Float>) -> simd_quatf {
++        simd_quatf(angle: atan2(-p.x, -p.z), axis: [0, 1, 0])
 +    }
 +
 +    /// 28 cm up and a little forward, plus whatever the bar was dragged
@@ -6515,10 +6587,10 @@ index 0000000..9caeca9
 +}
 diff --git a/ui/xemu-host-bridge.h b/ui/xemu-host-bridge.h
 new file mode 100644
-index 0000000..9aa0248
+index 0000000..8f5b7cf
 --- /dev/null
 +++ b/ui/xemu-host-bridge.h
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,65 @@
 +/*
 + * What the Swift entry point sees of the Objective-C shell. Kept to the
 + * two classes it wraps and the one function it calls first.
@@ -6548,6 +6620,9 @@ index 0000000..9aa0248
 +void xemu_host_start_with_disc(const char *filename);
 +bool xemu_host_started(void);
 +bool xemu_host_debugger_attached(void);
++/* Internal resolution, 1 to 3 (2 by default); applies at the next launch. */
++int xemu_host_resolution(void);
++void xemu_host_set_resolution(int scale);
 +/* The Xbox start-up animation; a change applies at the next start. */
 +bool xemu_host_boot_anim(void);
 +void xemu_host_set_boot_anim(bool on);
@@ -7586,10 +7661,10 @@ index 0000000..1dd3732
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000..c98d205
+index 0000000..646da50
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,1977 @@
+@@ -0,0 +1,1997 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -7994,6 +8069,35 @@ index 0000000..c98d205
 +bool xemu_host_started(void)
 +{
 +    return qatomic_read(&g_emulator_started);
++}
++
++/*
++ * Internal resolution, chosen in the picker and stored in
++ * Documents/surface-scale. 2x by default: on a screen this size the
++ * upscale is most of the presentation, and Doom 3 held 32 fps at 2x.
++ * Read when the renderer starts, so a change applies at the next launch.
++ */
++int xemu_host_resolution(void)
++{
++    g_autofree char *p = g_strdup_printf("%s/Documents/surface-scale", getenv("HOME"));
++    g_autofree char *c = NULL;
++    int scale = 2;
++    if (g_file_get_contents(p, &c, NULL, NULL)) {
++        scale = atoi(c);
++    }
++    return (scale >= 1 && scale <= 3) ? scale : 2;
++}
++
++void xemu_host_set_resolution(int scale)
++{
++    if (scale < 1 || scale > 3) {
++        return;
++    }
++    g_autofree char *p = g_strdup_printf("%s/Documents/surface-scale", getenv("HOME"));
++    g_autofree char *c = g_strdup_printf("%d", scale);
++    g_file_set_contents(p, c, -1, NULL);
++    fprintf(stderr, "[host] resolution: %dx from the next launch\n", scale);
++    fflush(stderr);
 +}
 +
 +/*
@@ -8757,25 +8861,16 @@ index 0000000..c98d205
 +        fprintf(stderr, "[host] renderer forced to Vulkan\n");
 +        {
 +            /*
-+             * Internal resolution, as a switch. Documents/surface-scale
-+             * holds 1 (native 640x480, the default), 2 or 3. Read once
++             * Internal resolution. Documents/surface-scale holds 1 (native
++             * 640x480), 2 (the default) or 3; the picker writes it. Read once
 +             * here, before the renderer initialises its surfaces. Every
-+             * surface costs the square of this in memory and fill, so it
-+             * is for titles with headroom: Doom 3 and the 60 fps games.
++             * surface costs the square of this in memory and fill; a title
++             * that struggles at 2x can go back to 1x from the picker.
 +             */
-+            g_autofree char *sp = g_strdup_printf("%s/Documents/surface-scale",
-+                                                  getenv("HOME"));
-+            g_autofree char *sc = NULL;
-+            int scale = 1;
-+            if (g_file_get_contents(sp, &sc, NULL, NULL)) {
-+                scale = atoi(sc);
-+            }
-+            if (scale < 1 || scale > 3) {
-+                scale = 1;
-+            }
++            int scale = xemu_host_resolution();
 +            g_config.display.quality.surface_scale = scale;
 +            fprintf(stderr, "[host] surface scale: %dx%s\n", scale,
-+                    scale == 1 ? " (native)" : " (Documents/surface-scale)");
++                    scale == 1 ? " (native)" : "");
 +        }
 +        {
 +            /*
