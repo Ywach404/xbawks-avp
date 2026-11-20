@@ -39,7 +39,7 @@ Ported and maintained by A.Cervantez. xemu and QEMU are the work of their respec
 - Skips the Xbox start-up animation if you would rather go straight into the game, a switch in the picker.
 - Pauses when you leave and resumes when you come back.
 
-What it does not do yet: save state, or let you move the screen. Higher internal resolution is a switch rather than a setting so far (see `AVP-INSTALL.md`). The devlog has the measurements behind every one of those.
+What it does not do yet: save state, or let you move the screen. Runs every game at twice the Xbox's resolution by default (1x and 3x are in the picker); Halo 2 holds 30 fps at 2x. The devlog has the measurements behind every one of those.
 
 ## What runs
 

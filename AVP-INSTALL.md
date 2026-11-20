@@ -96,5 +96,5 @@ The repository holds a pinned upstream commit and a patch series rather than a c
 - Sticks, face buttons and analog triggers map to the Xbox controller.
 - Press or pinch the Xbox in the room to bring up your discs; picking one resets the console and boots it, as the hardware would.
 - If a launch sits at "Launching" and Apparition never attaches, the headset's debug service has wedged; restarting the headset clears it.
-- An optional file named `surface-scale` in the app's folder, containing `2` or `3`, raises the internal resolution. It suits titles with headroom, such as Doom 3; leave it out for native 640x480.
+- The picker's Resolution menu sets the internal resolution: 2x by default, 1x for native 640x480, or 3x. It applies at the next launch.
 - Per-title results, including what does not work yet, are in the compatibility table in the [README](README.md).
