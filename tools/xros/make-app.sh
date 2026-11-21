@@ -63,10 +63,18 @@ cat > "$APP/Info.plist" <<PLIST
 	<key>CFBundleVersion</key><string>1</string>
 	<key>CFBundleSupportedPlatforms</key><array><string>XROS</string></array>
 	<key>MinimumOSVersion</key><string>26.0</string>
-	<!-- Game controllers: let a paired DualSense drive the app directly. -->
+	<!-- Game controllers. SpatialGamepad first, for the PSVR2 Sense
+	     controllers, one device per hand, as every shipping visionOS app that
+	     uses them declares it (ALVR, Klepton, the GoldenEye port). With only
+	     ExtendedGamepad, visionOS stood in a combined "(L/R)" device when both
+	     were on at launch and handed over only the right hand when they were
+	     turned on later. ExtendedGamepad for a DualSense or PS4 pad. -->
 	<key>GCSupportsControllerUserInteraction</key><true/>
 	<key>GCSupportedGameControllers</key>
-	<array><dict><key>ProfileName</key><string>ExtendedGamepad</string></dict></array>
+	<array>
+		<dict><key>ProfileName</key><string>SpatialGamepad</string></dict>
+		<dict><key>ProfileName</key><string>ExtendedGamepad</string></dict>
+	</array>
 	<key>UIDeviceFamily</key><array><integer>7</integer></array>
 	<!-- Plane detection, so the console can be put down on a real table
 	     instead of hovering through it. Without this string the

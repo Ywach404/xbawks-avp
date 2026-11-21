@@ -4234,10 +4234,10 @@ index ea46bf0..ca1cd7f 100644
  system_ss.add(when: pixman, if_true: files('console-vc.c'), if_false: files('console-vc-stubs.c'))
 diff --git a/ui/xbawks-console.swift b/ui/xbawks-console.swift
 new file mode 100644
-index 0000000..cd0aeb5
+index 0000000..c9bcc52
 --- /dev/null
 +++ b/ui/xbawks-console.swift
-@@ -0,0 +1,698 @@
+@@ -0,0 +1,860 @@
 +/*
 + * The console in the room, and the button that swaps a disc.
 + *
@@ -4613,6 +4613,168 @@ index 0000000..cd0aeb5
 +        disc.position = [0, ConsoleMetrics.height / 2 + 0.001, 0]
 +        body.addChild(disc)
 +        return body
++    }
++}
++
++/*
++ * How the screen looks and how dark the room behind it is, chosen in the
++ * picker and applied at once. Saved as xbawks.screen.curved and
++ * xbawks.room.dim.
++ */
++enum RoomDim: String, CaseIterable {
++    case off, dim, dark, darkest
++
++    var title: String {
++        switch self {
++        case .off: return "Off"
++        case .dim: return "Dim"
++        case .dark: return "Dark"
++        case .darkest: return "Darkest"
++        }
++    }
++
++}
++
++enum ScreenLook {
++    static var curved: Bool {
++        get { UserDefaults.standard.bool(forKey: "xbawks.screen.curved") }
++        set {
++            UserDefaults.standard.set(newValue, forKey: "xbawks.screen.curved")
++            NotificationCenter.default.post(name: .xbawksScreenLookChanged, object: nil)
++        }
++    }
++
++    static var room: RoomDim {
++        get { RoomDim(rawValue: UserDefaults.standard.string(forKey: "xbawks.room.dim") ?? "") ?? .off }
++        set {
++            UserDefaults.standard.set(newValue.rawValue, forKey: "xbawks.room.dim")
++            NotificationCenter.default.post(name: .xbawksScreenLookChanged, object: nil)
++        }
++    }
++}
++
++extension Notification.Name {
++    /// The screen's shape or the room's dimming changed.
++    static let xbawksScreenLookChanged = Notification.Name("xbawksScreenLookChanged")
++}
++
++/*
++ * The buttons beside the game screen: curve it, and step the room's
++ * dimming. On the screen rather than in the picker, because they are
++ * about the screen and are wanted mid game.
++ */
++struct ScreenControls: View {
++    @State private var curved = ScreenLook.curved
++    @State private var room = ScreenLook.room
++
++    /*
++     * Two labelled rows of direct choices, sized for a panel two and a half
++     * metres away: the first version cycled through levels on one small
++     * button, which A. found hard to read and slow to use.
++     */
++    var body: some View {
++        /* One strip across the top of the screen. */
++        HStack(spacing: 36) {
++            row("Screen") {
++                Picker("Screen", selection: Binding(
++                    get: { curved },
++                    set: { v in curved = v; ScreenLook.curved = v })) {
++                    Text("Flat").tag(false)
++                    Text("Curved").tag(true)
++                }
++                .frame(width: 240)
++            }
++            row("Room") {
++                Picker("Room", selection: Binding(
++                    get: { room },
++                    set: { v in room = v; ScreenLook.room = v })) {
++                    ForEach(RoomDim.allCases, id: \.self) { d in
++                        Text(d.title).tag(d)
++                    }
++                }
++                .frame(width: 420)
++            }
++        }
++        .padding(.horizontal, 28)
++        .padding(.vertical, 18)
++        .glassBackgroundEffect()
++        .fixedSize()
++    }
++
++    private func row<P: View>(_ title: String, @ViewBuilder _ picker: () -> P) -> some View {
++        HStack(spacing: 16) {
++            Text(title)
++                .font(XbawksTheme.face(20, .semibold))
++                .fixedSize()
++            picker()
++                .pickerStyle(.segmented)
++                .controlSize(.large)
++                .font(XbawksTheme.face(18, .medium))
++        }
++    }
++}
++
++/*
++ * A d-pad beside the screen, for the Sense controllers, which have none.
++ * Menus in many games (Doom 3's main menu and PDA) move only on the d-pad.
++ * Held while pressed, like the real one. Shown only while the Sense
++ * controllers are what is playing; a pad with its own d-pad hides it.
++ */
++struct VirtualDPad: View {
++    @State private var held: UInt16 = 0
++    @State private var shown = xemu_host_wants_virtual_dpad()
++
++    var body: some View {
++        Group {
++            if shown {
++                VStack(spacing: 6) {
++                    key("chevron.up", 1 << 5)
++                    HStack(spacing: 6) {
++                        key("chevron.left", 1 << 4)
++                        Color.clear.frame(width: 64, height: 64)
++                        key("chevron.right", 1 << 6)
++                    }
++                    key("chevron.down", 1 << 7)
++                }
++                .padding(14)
++                .glassBackgroundEffect()
++            }
++        }
++        .task {
++            while !Task.isCancelled {
++                let want = xemu_host_wants_virtual_dpad()
++                if want != shown {
++                    shown = want
++                    if !want { held = 0; xemu_host_set_virtual_dpad(0) }
++                }
++                try? await Task.sleep(for: .seconds(1))
++            }
++        }
++    }
++
++    /* Pressed while touched, released on lift: a drag of no distance. */
++    private func key(_ symbol: String, _ bit: UInt16) -> some View {
++        Image(systemName: symbol)
++            .font(.system(size: 30, weight: .bold))
++            .frame(width: 64, height: 64)
++            .background((held & bit) != 0 ? XbawksTheme.green.opacity(0.6)
++                                          : Color.white.opacity(0.12),
++                        in: RoundedRectangle(cornerRadius: 14))
++            .contentShape(.hoverEffect, RoundedRectangle(cornerRadius: 14))
++            .hoverEffect()
++            .gesture(
++                DragGesture(minimumDistance: 0)
++                    .onChanged { _ in
++                        if held & bit == 0 {
++                            held |= bit
++                            xemu_host_set_virtual_dpad(held)
++                        }
++                    }
++                    .onEnded { _ in
++                        held &= ~bit
++                        xemu_host_set_virtual_dpad(held)
++                    }
++            )
 +    }
 +}
 +
@@ -5179,10 +5341,10 @@ index 0000000..21a9943
 +}
 diff --git a/ui/xbawks-options.swift b/ui/xbawks-options.swift
 new file mode 100644
-index 0000000..9c4bd3c
+index 0000000..418ac81
 --- /dev/null
 +++ b/ui/xbawks-options.swift
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,187 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Copyright (C) 2026 A. Cervantez
 +//
@@ -5217,16 +5379,17 @@ index 0000000..9c4bd3c
 +                controllerMenu
 +                resolutionMenu
 +            }
-+            Toggle(midSession ? "Boot animation (applies next launch)"
-+                              : "Boot animation",
-+                   isOn: Binding(get: { bootAnim },
-+                                 set: { on in
-+                                     bootAnim = on
-+                                     xemu_host_set_boot_anim(on)
-+                                 }))
-+                .toggleStyle(.switch)
-+                .font(XbawksTheme.face(12))
-+                .fixedSize()
++            HStack(spacing: 14) {
++                Toggle(midSession ? "Boot animation (next launch)"
++                                  : "Boot animation",
++                       isOn: Binding(get: { bootAnim },
++                                     set: { on in
++                                         bootAnim = on
++                                         xemu_host_set_boot_anim(on)
++                                     }))
++                    .toggleStyle(.switch)
++                    .fixedSize()
++            }
 +        }
 +        .font(XbawksTheme.face(12))
 +        .padding(.horizontal, 24)
@@ -5645,10 +5808,10 @@ index 0000000..45a8ba3
 +}
 diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
 new file mode 100644
-index 0000000..d59477f
+index 0000000..7eeba35
 --- /dev/null
 +++ b/ui/xemu-host-app.swift
-@@ -0,0 +1,936 @@
+@@ -0,0 +1,1066 @@
 +// The entry point, and now the screen.
 +//
 +// Measured on 2026-10-29: a spatial controller (the PSVR2 Sense pair)
@@ -6107,6 +6270,10 @@ index 0000000..d59477f
 +    @State private var consoleEntity: Entity?
 +    /// The game screen, and where it was when its bar was grabbed.
 +    @State private var screenEntity: Entity?
++    /// The dark shell that dims the room, and the buttons beside the screen.
++    @State private var dimmerEntity: Entity?
++    @State private var screenControlsEntity: Entity?
++    @State private var dpadEntity: Entity?
 +    @State private var screenOrigin: SIMD3<Float>?
 +
 +    /// Long enough that a quick flick is not a move.
@@ -6115,6 +6282,8 @@ index 0000000..d59477f
 +    private static let consoleName = "xbawks-console"
 +    private static let panelID = "swap-panel"
 +    private static let screenBarName = "xbawks-screen-bar"
++    private static let screenControlsID = "screen-controls"
++    private static let dpadID = "virtual-dpad"
 +
 +    var body: some View {
 +        RealityView { content, attachments in
@@ -6168,6 +6337,40 @@ index 0000000..d59477f
 +                console.addChild(panel)
 +            }
 +
++            /*
++             * The room dimmer: a dark shell around the player, 20 m out,
++             * drawn from the inside. visionOS's own surroundings effect
++             * darkened the game screen along with the room; the shell is
++             * behind everything, so the screen and the console keep their
++             * full brightness and only the passthrough beyond them dims.
++             */
++            let dome = ModelEntity(mesh: .generateSphere(radius: 20),
++                                   materials: [UnlitMaterial(color: .black)])
++            dome.name = "xbawks-dimmer"
++            dome.scale = [-1, 1, 1]          /* inside out, so it is seen from within */
++            Self.applyDim(dome, ScreenLook.room)
++            content.add(dome)
++            dimmerEntity = dome
++
++            if let controls = attachments.entity(for: Self.screenControlsID),
++               let scr = screenEntity {
++                controls.position = Self.screenControlsPosition(curved: ScreenLook.curved)
++                /* Read from where the player sits, 2.6 m back: at its
++                 * natural size the strip was far too small to read or hit. */
++                controls.scale = SIMD3<Float>(repeating: 2.5)
++                scr.addChild(controls)
++                screenControlsEntity = controls
++            }
++            /* Beside the screen's lower left; with the strip, it moves and
++             * curves with the screen. */
++            if let pad = attachments.entity(for: Self.dpadID),
++               let scr = screenEntity {
++                pad.position = Self.dpadPosition(curved: ScreenLook.curved)
++                pad.scale = SIMD3<Float>(repeating: 2.5)
++                scr.addChild(pad)
++                dpadEntity = pad
++            }
++
 +            screen.start()
 +        } update: { _, attachments in
 +            guard let panel = attachments.entity(for: Self.panelID) else {
@@ -6176,6 +6379,12 @@ index 0000000..d59477f
 +            panel.isEnabled = showPanel
 +            panel.position = Self.panelPosition(panelOffset)
 +        } attachments: {
++            Attachment(id: Self.screenControlsID) {
++                ScreenControls()
++            }
++            Attachment(id: Self.dpadID) {
++                VirtualDPad()
++            }
 +            Attachment(id: Self.panelID) {
 +                SwapPanel(selected: $selected,
 +                          discs: discs,
@@ -6272,6 +6481,18 @@ index 0000000..d59477f
 +                    fflush(stderr)
 +                }
 +        )
++        .onReceive(NotificationCenter.default.publisher(for: .xbawksScreenLookChanged)) { _ in
++            if let scr = screenEntity as? ModelEntity {
++                scr.model?.mesh = GuestScreen.screenMesh(curved: ScreenLook.curved)
++            }
++            if let dome = dimmerEntity {
++                Self.applyDim(dome, ScreenLook.room)
++            }
++            if let controls = screenControlsEntity {
++                controls.position = Self.screenControlsPosition(curved: ScreenLook.curved)
++            }
++            dpadEntity?.position = Self.dpadPosition(curved: ScreenLook.curved)
++        }
 +        .onReceive(NotificationCenter.default.publisher(for: .xbawksEditionChanged)) { n in
 +            if let e = n.object as? Edition, let console = consoleEntity {
 +                XbawksConsole.repaint(console, e)
@@ -6400,6 +6621,35 @@ index 0000000..d59477f
 +        return simd_quatf(angle: atan2(-f.x, -f.z), axis: [0, 1, 0])
 +    }
 +
++    /// The dimmer's darkness for a level: none, then progressively darker.
++    private static func applyDim(_ dome: Entity, _ level: RoomDim) {
++        let opacity: Float
++        switch level {
++        case .off: opacity = 0
++        case .dim: opacity = 0.45
++        case .dark: opacity = 0.72
++        case .darkest: opacity = 0.92
++        }
++        dome.isEnabled = opacity > 0
++        dome.components.set(OpacityComponent(opacity: opacity))
++    }
++
++    /// Just outside the screen's lower left edge, which moves in when it
++    /// curves.
++    private static func dpadPosition(curved: Bool) -> SIMD3<Float> {
++        if curved {
++            let a: Float = 1.4 / 2.6
++            return [-(2.6 * sin(a)) - 0.3, -0.6, 2.6 - 2.6 * cos(a) + 0.05]
++        }
++        return [-1.4 - 0.3, -0.6, 0.02]
++    }
++
++    /// Centred just above the screen's top edge. The middle of a curved
++    /// screen is where a flat one is, so the place is the same either way.
++    private static func screenControlsPosition(curved: Bool) -> SIMD3<Float> {
++        [0, 1.05 + 0.2, 0.02]
++    }
++
 +    /// Turned to face where the session started, so a moved screen is
 +    /// still square on to the player.
 +    private static func facingStart(_ p: SIMD3<Float>) -> simd_quatf {
@@ -6434,6 +6684,49 @@ index 0000000..d59477f
 +    private var entity: ModelEntity?
 +    private var shown: UInt64 = 0
 +
++    /*
++     * The screen's shape. Flat, or curved round the player: an arc of a
++     * circle whose centre is where the player sits (2.6 m in front of the
++     * screen), so the edges are as far from the eyes as the middle, as on
++     * a cinema screen or an ultrawide monitor. Same 2.8 m of width along
++     * the curve, so the picture is the same size either way.
++     */
++    static func screenMesh(curved: Bool) -> MeshResource {
++        let width: Float = 2.8, height: Float = 2.1
++        guard curved else {
++            return MeshResource.generatePlane(width: width, height: height)
++        }
++        let radius: Float = 2.6
++        let columns = 48
++        let span = width / radius
++        var positions: [SIMD3<Float>] = []
++        var normals: [SIMD3<Float>] = []
++        var uvs: [SIMD2<Float>] = []
++        var indices: [UInt32] = []
++        for i in 0...columns {
++            let u = Float(i) / Float(columns)
++            let a = (u - 0.5) * span
++            let x = radius * sin(a)
++            let z = radius - radius * cos(a)   /* edges come towards the player */
++            for (row, y) in [(0, -height / 2), (1, height / 2)] {
++                positions.append([x, y, z])
++                normals.append(simd_normalize([-sin(a), 0, cos(a)]))
++                uvs.append([u, Float(row)])
++            }
++        }
++        for i in 0..<columns {
++            let b = UInt32(i * 2)
++            indices += [b, b + 2, b + 1, b + 1, b + 2, b + 3]
++        }
++        var d = MeshDescriptor(name: "curved-screen")
++        d.positions = MeshBuffer(positions)
++        d.normals = MeshBuffer(normals)
++        d.textureCoordinates = MeshBuffer(uvs)
++        d.primitives = .triangles(indices)
++        return (try? MeshResource.generate(from: [d]))
++            ?? MeshResource.generatePlane(width: width, height: height)
++    }
++
 +    func makeEntity() -> ModelEntity? {
 +        do {
 +            try rebuild(width: 640, height: 480)
@@ -6454,7 +6747,7 @@ index 0000000..d59477f
 +         * lever for sharpness is the surface scale factor, which is 1 on
 +         * this build and multiplies pixel work by its square.
 +         */
-+        let mesh = MeshResource.generatePlane(width: 2.8, height: 2.1)
++        let mesh = Self.screenMesh(curved: ScreenLook.curved)
 +        let e = ModelEntity(mesh: mesh, materials: [material])
 +        e.position = [0, 1.5, -2.6]
 +        /*
@@ -6587,10 +6880,10 @@ index 0000000..d59477f
 +}
 diff --git a/ui/xemu-host-bridge.h b/ui/xemu-host-bridge.h
 new file mode 100644
-index 0000000..8f5b7cf
+index 0000000..9d3032c
 --- /dev/null
 +++ b/ui/xemu-host-bridge.h
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,69 @@
 +/*
 + * What the Swift entry point sees of the Objective-C shell. Kept to the
 + * two classes it wraps and the one function it calls first.
@@ -6629,6 +6922,10 @@ index 0000000..8f5b7cf
 +/* True when the only controller is one PSVR2 Sense hand on its own: the
 + * other hand was turned on after launch and visionOS did not pass it on. */
 +bool xemu_host_one_sense_hand(void);
++/* The virtual d-pad beside the screen: Xbox d-pad bits 4 to 7 held, and
++ * whether it should be shown (Sense controllers, no real pad). */
++void xemu_host_set_virtual_dpad(uint16_t bits);
++bool xemu_host_wants_virtual_dpad(void);
 +/* Which controller plays: kinds of connected controllers ("sense" for the
 + * Sense pair, else the vendor name), newline separated; the chosen kind
 + * ("" is Automatic); set it; whether a kind is connected. The two strings
@@ -6658,10 +6955,10 @@ index 0000000..8f5b7cf
 +@end
 diff --git a/ui/xemu-host-ios.m b/ui/xemu-host-ios.m
 new file mode 100644
-index 0000000..1b0fa74
+index 0000000..827d105
 --- /dev/null
 +++ b/ui/xemu-host-ios.m
-@@ -0,0 +1,964 @@
+@@ -0,0 +1,1039 @@
 +/*
 + * xemu-host-ios.m -- the UIKit side of the house.
 + *
@@ -7130,9 +7427,10 @@ index 0000000..1b0fa74
 +                     queue:NSOperationQueue.mainQueue
 +                usingBlock:^(NSNotification *n) {
 +        GCController *c = n.object;
-+        fprintf(stderr, "[host] controller connected: %s (extended %s)\n",
++        fprintf(stderr, "[host] controller connected: %s (extended %s, %s)\n",
 +                c.vendorName.UTF8String ?: "?",
-+                c.extendedGamepad ? "yes" : "no");
++                c.extendedGamepad ? "yes" : "no",
++                c.productCategory.UTF8String ?: "?");
 +        if (c.extendedGamepad) {
 +            /* No stick value has ever reached the app through either
 +             * profile; ask the sticks themselves. */
@@ -7277,7 +7575,8 @@ index 0000000..1b0fa74
 +{
 +    int hands = 0;
 +    for (GCController *c in GCController.controllers) {
-+        if (c.extendedGamepad) {
++        BOOL spatial = [c.productCategory isEqualToString:GCProductCategorySpatialController];
++        if (c.extendedGamepad && !spatial) {
 +            return false;
 +        }
 +        NSString *name = c.vendorName ?: @"";
@@ -7330,6 +7629,32 @@ index 0000000..1b0fa74
 +    axis[5] = axis_of(g.rightThumbstick.yAxis.value);
 +}
 +
++/* Directions held on the virtual d-pad beside the screen (Xbox d-pad
++ * bits 4 to 7), set from the UI thread, read here every frame. */
++static _Atomic uint16_t virtual_dpad;
++
++void xemu_host_set_virtual_dpad(uint16_t bits)
++{
++    virtual_dpad = bits & 0xF0;
++}
++
++/* Whether input is coming from Sense controllers with no real pad, the
++ * case the virtual d-pad is for. */
++bool xemu_host_wants_virtual_dpad(void)
++{
++    BOOL sense = NO;
++    for (GCController *c in GCController.controllers) {
++        BOOL spatial = [c.productCategory isEqualToString:GCProductCategorySpatialController];
++        if (c.extendedGamepad && !spatial) {
++            return false;
++        }
++        if ([c.vendorName ?: @"" containsString:@"Sense Controller"]) {
++            sense = YES;
++        }
++    }
++    return sense;
++}
++
 +- (void)readPhysical:(GCController *)c into:(uint16_t *)b axis:(int16_t *)axis
 +{
 +    GCPhysicalInputProfile *p = c.physicalInputProfile;
@@ -7363,11 +7688,36 @@ index 0000000..1b0fa74
 +    if (trig) {
 +        axis[right ? 1 : 0] = axis_of(trig.value);
 +    }
-+    GCControllerDirectionPad *stick = pads[GCInputThumbstick]
-+        ?: pads[right ? GCInputRightThumbstick : GCInputLeftThumbstick];
-+    if (stick) {
-+        axis[right ? 4 : 2] = axis_of(stick.xAxis.value);
-+        axis[right ? 5 : 3] = axis_of(stick.yAxis.value);
++    /*
++     * A Sense hand's stick through the live input, not the profile. With
++     * the hands arriving as spatial controllers, the left hand's profile
++     * thumbstick fired change events but always read 0 (logged
++     * 2026-11-20 in Doom 3, held fully forward), so the player could not
++     * walk; Apple's guidance for these controllers is controller.input.
++     * The profile stays the fallback for anything else.
++     */
++    float sx = 0, sy = 0;
++    BOOL have = NO;
++    if ([c.productCategory isEqualToString:GCProductCategorySpatialController]) {
++        id<GCDirectionPadElement> live = c.input.dpads[GCInputThumbstick];
++        if (live) {
++            sx = live.xAxis.value;
++            sy = live.yAxis.value;
++            have = YES;
++        }
++    }
++    if (!have) {
++        GCControllerDirectionPad *stick = pads[GCInputThumbstick]
++            ?: pads[right ? GCInputRightThumbstick : GCInputLeftThumbstick];
++        if (stick) {
++            sx = stick.xAxis.value;
++            sy = stick.yAxis.value;
++            have = YES;
++        }
++    }
++    if (have) {
++        axis[right ? 4 : 2] = axis_of(sx);
++        axis[right ? 5 : 3] = axis_of(sy);
 +    }
 +}
 +
@@ -7413,7 +7763,7 @@ index 0000000..1b0fa74
 +{
 +    uint16_t b = 0;
 +    int16_t axis[6] = { 0 };
-+    BOOL any = NO, haveLeft = NO, haveRight = NO;
++    BOOL any = NO, haveLeft = NO, haveRight = NO, havePad = NO;
 +    if ([self injectInto:&b]) {
 +        any = YES;
 +    }
@@ -7424,9 +7774,18 @@ index 0000000..1b0fa74
 +        if (filter && ![controller_kind_of(c) isEqualToString:kind]) {
 +            continue;
 +        }
-+        if (c.extendedGamepad) {
++        /*
++         * A Sense hand is a spatial controller and is read per hand, by its
++         * name, even if it also offers an extended profile; only a device
++         * that is not spatial (a DualSense, a PS4 pad, the old combined
++         * "(L/R)" stand in) is read as a whole gamepad. The rule the
++         * shipping visionOS apps use.
++         */
++        BOOL spatial = [c.productCategory isEqualToString:GCProductCategorySpatialController];
++        if (c.extendedGamepad && !spatial) {
 +            [self readExtended:c.extendedGamepad into:&b axis:axis];
 +            haveLeft = haveRight = YES;
++            havePad = YES;
 +        } else if (c.physicalInputProfile) {
 +            [self readPhysical:c into:&b axis:axis];
 +            NSString *name = c.vendorName ?: @"";
@@ -7454,12 +7813,21 @@ index 0000000..1b0fa74
 +        axis[4] = axis[2];
 +        axis[5] = axis[3];
 +    }
-+    if (!(haveLeft && haveRight)) {
-+        const int16_t edge = 16000;
-+        if (axis[2] < -edge) b |= 1 << 4;   /* d-pad left */
-+        if (axis[3] >  edge) b |= 1 << 5;   /* up */
-+        if (axis[2] >  edge) b |= 1 << 6;   /* right */
-+        if (axis[3] < -edge) b |= 1 << 7;   /* down */
++    /*
++     * What reaches the guest, five times a second while a stick is off
++     * centre, to see whether a menu that will not move is being sent the
++     * stick at all.
++     */
++    static CFAbsoluteTime last_axis_log;
++    if ((abs(axis[2]) > 8000 || abs(axis[3]) > 8000)
++        && CFAbsoluteTimeGetCurrent() - last_axis_log > 0.2) {
++        last_axis_log = CFAbsoluteTimeGetCurrent();
++        fprintf(stderr, "[host] pad out: buttons %04x left %d,%d right %d,%d\n",
++                b, axis[2], axis[3], axis[4], axis[5]);
++    }
++    b |= virtual_dpad;
++    if (b & 0xF0) {
++        any = YES;
 +    }
 +    xemu_host_pad_set(b, axis);
 +
@@ -7485,8 +7853,12 @@ index 0000000..1b0fa74
 +                    p.buttons[GCInputButtonMenu].pressed,
 +                    p.buttons[GCInputGripButton].value,
 +                    p.buttons[GCInputTrigger].value,
-+                    p.dpads[GCInputThumbstick].xAxis.value,
-+                    p.dpads[GCInputThumbstick].yAxis.value,
++                    ([c.productCategory isEqualToString:GCProductCategorySpatialController]
++                        ? c.input.dpads[GCInputThumbstick].xAxis.value
++                        : p.dpads[GCInputThumbstick].xAxis.value),
++                    ([c.productCategory isEqualToString:GCProductCategorySpatialController]
++                        ? c.input.dpads[GCInputThumbstick].yAxis.value
++                        : p.dpads[GCInputThumbstick].yAxis.value),
 +                    (int)c.isAttachedToDevice,
 +                    (int)(GCController.current == c));
 +        }
