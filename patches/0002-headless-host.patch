@@ -1456,7 +1456,7 @@ index cbda578..2ec96d6 100644
          pgraph_vk_gpu_properties.no_geometry_shader = true;
          fprintf(stderr, "VK: no geometry shader support, using fast depth\n");
 diff --git a/hw/xbox/nv2a/pgraph/vk/instance.c b/hw/xbox/nv2a/pgraph/vk/instance.c
-index 430a40b..04307f9 100644
+index 430a40b..095a424 100644
 --- a/hw/xbox/nv2a/pgraph/vk/instance.c
 +++ b/hw/xbox/nv2a/pgraph/vk/instance.c
 @@ -160,6 +160,7 @@ add_optional_instance_extension_names(PGRAPHState *pg,
@@ -1510,6 +1510,36 @@ index 430a40b..04307f9 100644
  }
  #endif
  
+@@ -291,6 +315,20 @@ static bool create_instance(PGRAPHState *pg, Error **errp)
+         }
+     }
+ 
++    /*
++     * Halo's square radar, A/B: Documents/mask-fix bit 2 turns on MoltenVK's
++     * full image view swizzle, in case the alpha only texture views (A8,
++     * AL8, AY8 map alpha by component swizzle) read alpha as 1 on Metal.
++     * MoltenVK reads its configuration when the instance is created.
++     */
++    {
++        extern int xemu_mask_fix;
++        if (xemu_mask_fix & 2) {
++            setenv("MVK_CONFIG_FULL_IMAGE_VIEW_SWIZZLE", "1", 1);
++        }
++        fprintf(stderr, "[vk] mask-fix 0x%x (1 transparent border, 2 full swizzle)\n",
++                xemu_mask_fix);
++    }
+     result = vkCreateInstance(&create_info, NULL, &r->instance);
+     if (result != VK_SUCCESS) {
+         error_setg(errp, "Failed to create instance (%d)", result);
+@@ -391,6 +429,8 @@ static void add_optional_device_extension_names(
+     r->custom_border_color_extension_enabled =
+         add_extension_if_available(available_extensions, enabled_extension_names,
+                                    VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
++    fprintf(stderr, "[vk] custom border colour: %s\n",
++            r->custom_border_color_extension_enabled ? "yes" : "no, fallback colours");
+ 
+     r->memory_budget_extension_enabled = add_extension_if_available(
+         available_extensions, enabled_extension_names,
 diff --git a/hw/xbox/nv2a/pgraph/vk/meson.build b/hw/xbox/nv2a/pgraph/vk/meson.build
 index 668a8ff..b311510 100644
 --- a/hw/xbox/nv2a/pgraph/vk/meson.build
@@ -2505,7 +2535,7 @@ index f61079b..068b51b 100644
 +    qemu_event_set(&r->present_complete);
 +}
 diff --git a/hw/xbox/nv2a/pgraph/vk/texture.c b/hw/xbox/nv2a/pgraph/vk/texture.c
-index f1550f7..9223bf1 100644
+index f1550f7..20f53a5 100644
 --- a/hw/xbox/nv2a/pgraph/vk/texture.c
 +++ b/hw/xbox/nv2a/pgraph/vk/texture.c
 @@ -583,7 +583,7 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
@@ -2539,7 +2569,57 @@ index f1550f7..9223bf1 100644
  
      VkImageViewCreateInfo image_view_create_info = {
          .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-@@ -1469,6 +1471,11 @@ static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBindin
+@@ -1302,7 +1304,48 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
+         } else if (border_color_pack32 == 0xff000000) {
+             vk_border_color = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+         } else {
+-            vk_border_color = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
++            /*
++             * The nearest colour Metal can do. Without custom border
++             * colours there are only transparent black, opaque black and
++             * opaque white, and every other colour used to become opaque
++             * white. Halo's motion tracker clamps its circle to a border of
++             * 0x46000000, black at 27 per cent, which came out as an opaque
++             * white square: the white square in Halo and the square sweep in
++             * both Halos. Colour counts twice as much as alpha: Halo 2's
++             * character shadows multiply the scene by a texture bordered in
++             * transparent white, 0x00FFFFFF, where white leaves the scene
++             * alone and black (the nearest by alpha) darkened a square under
++             * every character. Opaque white keeps those right; the radar's
++             * faint black still becomes transparent black.
++             */
++            float a = ((border_color_pack32 >> 24) & 0xff) / 255.0f;
++            float r = ((border_color_pack32 >> 16) & 0xff) / 255.0f;
++            float g = ((border_color_pack32 >> 8) & 0xff) / 255.0f;
++            float b = (border_color_pack32 & 0xff) / 255.0f;
++            float lum = (r + g + b) / 3.0f;
++            float d_clear = 2 * lum + a;                         /* (0,0,0,0) */
++            float d_black = 2 * lum + (1 - a);                   /* (0,0,0,1) */
++            float d_white = 2 * (1 - lum) + (1 - a);             /* (1,1,1,1) */
++            if (d_clear <= d_black && d_clear <= d_white) {
++                vk_border_color = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
++            } else if (d_black <= d_white) {
++                vk_border_color = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
++            } else {
++                vk_border_color = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
++            }
++        }
++        {
++            static uint32_t seen[32];
++            static int nseen;
++            bool known = false;
++            for (int i = 0; i < nseen; i++) {
++                known |= seen[i] == border_color_pack32;
++            }
++            if (!known && nseen < 32) {
++                seen[nseen++] = border_color_pack32;
++                fprintf(stderr, "[vk] border colour %08x -> %d\n",
++                        border_color_pack32, (int)vk_border_color);
++            }
+         }
+     }
+ 
+@@ -1469,6 +1512,11 @@ static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBindin
      vkDestroyImageView(r->device, snode->image_view, NULL);
      snode->image_view = VK_NULL_HANDLE;
  
@@ -2551,7 +2631,7 @@ index f1550f7..9223bf1 100644
      vmaDestroyImage(r->allocator, snode->image, snode->allocation);
      snode->image = VK_NULL_HANDLE;
      snode->allocation = VK_NULL_HANDLE;
-@@ -1553,8 +1560,24 @@ void pgraph_vk_init_textures(PGRAPHState *pg)
+@@ -1553,8 +1601,24 @@ void pgraph_vk_init_textures(PGRAPHState *pg)
  {
      PGRAPHVkState *r = pg->vk_renderer_state;
  
@@ -6955,10 +7035,10 @@ index 0000000..9d3032c
 +@end
 diff --git a/ui/xemu-host-ios.m b/ui/xemu-host-ios.m
 new file mode 100644
-index 0000000..827d105
+index 0000000..db60220
 --- /dev/null
 +++ b/ui/xemu-host-ios.m
-@@ -0,0 +1,1039 @@
+@@ -0,0 +1,1040 @@
 +/*
 + * xemu-host-ios.m -- the UIKit side of the house.
 + *
@@ -7667,8 +7747,21 @@ index 0000000..827d105
 +    NSDictionary<NSString *, GCControllerButtonInput *> *btn = p.buttons;
 +    NSDictionary<NSString *, GCControllerDirectionPad *> *pads = p.dpads;
 +
-+    if (btn[GCInputButtonA].pressed)       *b |= 1 << 0;
-+    if (btn[GCInputButtonB].pressed)       *b |= 1 << 1;
++    /*
++     * Each Sense hand names its two face buttons "Button A" and "Button B",
++     * whichever hand it is (the elements list is identical for both). On
++     * the left hand they are the Duke's X and Y: read as A and B, the left
++     * hand duplicated the right and nothing could press X or Y (no weapon
++     * swap in Halo). The combined "(L/R)" device used to do this itself.
++     */
++    BOOL faceA = btn[GCInputButtonA].pressed, faceB = btn[GCInputButtonB].pressed;
++    if (left && !right) {
++        if (faceA) *b |= 1 << 2;           /* X */
++        if (faceB) *b |= 1 << 3;           /* Y */
++    } else {
++        if (faceA) *b |= 1 << 0;           /* A */
++        if (faceB) *b |= 1 << 1;           /* B */
++    }
 +    if (btn[GCInputButtonX].pressed)       *b |= 1 << 2;
 +    if (btn[GCInputButtonY].pressed)       *b |= 1 << 3;
 +    if (btn[GCInputButtonOptions].pressed) *b |= right ? 1 << 9 : 1 << 8;
@@ -7812,18 +7905,6 @@ index 0000000..827d105
 +    } else if (haveLeft && !haveRight) {
 +        axis[4] = axis[2];
 +        axis[5] = axis[3];
-+    }
-+    /*
-+     * What reaches the guest, five times a second while a stick is off
-+     * centre, to see whether a menu that will not move is being sent the
-+     * stick at all.
-+     */
-+    static CFAbsoluteTime last_axis_log;
-+    if ((abs(axis[2]) > 8000 || abs(axis[3]) > 8000)
-+        && CFAbsoluteTimeGetCurrent() - last_axis_log > 0.2) {
-+        last_axis_log = CFAbsoluteTimeGetCurrent();
-+        fprintf(stderr, "[host] pad out: buttons %04x left %d,%d right %d,%d\n",
-+                b, axis[2], axis[3], axis[4], axis[5]);
 +    }
 +    b |= virtual_dpad;
 +    if (b & 0xF0) {
@@ -8033,10 +8114,10 @@ index 0000000..1dd3732
 +}
 diff --git a/ui/xemu-host.c b/ui/xemu-host.c
 new file mode 100644
-index 0000000..646da50
+index 0000000..a886064
 --- /dev/null
 +++ b/ui/xemu-host.c
-@@ -0,0 +1,1997 @@
+@@ -0,0 +1,2008 @@
 +/*
 + * xemu-host.c -- the emulator without a desktop.
 + *
@@ -8471,6 +8552,9 @@ index 0000000..646da50
 +    fprintf(stderr, "[host] resolution: %dx from the next launch\n", scale);
 +    fflush(stderr);
 +}
++
++/* Halo's square radar, A/B bits; see vk/texture.c and vk/instance.c. */
++int xemu_mask_fix;
 +
 +/*
 + * The Xbox start-up animation, as a switch in the picker. xemu keeps it as
@@ -9118,6 +9202,14 @@ index 0000000..646da50
 +            }
 +        }
 +        fprintf(stderr, "[host] report waiting: %u us idle\n", xemu_report_confirm_us);
++        {
++            extern int xemu_mask_fix;
++            g_autofree char *mp = g_strdup_printf("%s/Documents/mask-fix", getenv("HOME"));
++            g_autofree char *mc = NULL;
++            if (g_file_get_contents(mp, &mc, NULL, NULL)) {
++                xemu_mask_fix = atoi(mc);
++            }
++        }
 +        /* Pusher pacing experiment: Documents/pace holds KB per ms. */
 +        extern unsigned xemu_pace_kb_per_ms;
 +        g_autofree char *pp = g_strdup_printf("%s/Documents/pace", getenv("HOME"));
