@@ -4231,10 +4231,10 @@ index 7967bbc..6f3c51b 100644
  void tcg_func_start(TCGContext *s)
 diff --git a/tests/xbawks/test_dpad.swift b/tests/xbawks/test_dpad.swift
 new file mode 100644
-index 0000000..0426615
+index 0000000..3892dec
 --- /dev/null
 +++ b/tests/xbawks/test_dpad.swift
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,93 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Copyright (C) 2026 A. Cervantez
 +//
@@ -4243,6 +4243,7 @@ index 0000000..0426615
 +// Pure tests for where the virtual d-pad goes and which entity does what,
 +// run on the Mac: swiftc -parse-as-library -o /tmp/xbd tests/xbawks/test_dpad.swift ui/xbawks-dpad-layout.swift && /tmp/xbd
 +import Foundation
++import simd
 +
 +@main
 +struct TestDPad {
@@ -4252,7 +4253,8 @@ index 0000000..0426615
 +    }
 +
 +    static func main() {
-+        check(DPadMount(rawValue: "") == nil && DPadMount.allCases.count == 3, "three mounts")
++        check(DPadMount(rawValue: "") == nil && DPadMount.allCases.count == 4, "four mounts")
++        check(DPadMount.upright.inRoom && DPadMount.flat.inRoom && !DPadMount.left.inRoom, "upright and flat are the room pad")
 +        check(DPadLayout.role(ofEntityNamed: DPadLayout.keyName(1 << 5)) == .key(1 << 5), "up key")
 +        check(DPadLayout.role(ofEntityNamed: DPadLayout.keyName(1 << 7)) == .key(1 << 7), "down key")
 +        check(DPadLayout.role(ofEntityNamed: DPadLayout.baseName) == .base, "base")
@@ -4275,6 +4277,53 @@ index 0000000..0426615
 +              "hidden releases")
 +        check(DPadLayout.releaseOnChange(held: 1 << 5, wasShowing: true, nowShowing: true) == 1 << 5,
 +              "still shown keeps")
++
++        let up = SIMD3<Float>(0, 1, 0)
++        let heading = simd_quatf(angle: .pi / 2, axis: [0, 1, 0])
++        let q = heading * simd_quatf(angle: 30 * .pi / 180, axis: [1, 0, 0])
++        let lv = DPadLayout.levelled(q)
++        let lvUp = lv.act(up)
++        check(abs(lvUp.y - 1) < 1e-4, "levelled is level")
++        let fwd = lv.act([0, 0, -1]), want = heading.act([0, 0, -1])
++        check(simd_length(fwd - want) < 1e-3, "levelled keeps the heading")
++
++        DPadLayout.saveFlatRotation(q)
++        if let back = DPadLayout.loadFlatRotation() {
++            check(simd_length(back.act([1, 2, 3]) - q.act([1, 2, 3])) < 1e-4, "rotation round trip")
++        } else {
++            check(false, "rotation saved")
++        }
++
++        DPadLock.saved = true
++        check(DPadLock.saved, "lock saved on")
++        DPadLock.saved = false
++        check(!DPadLock.saved, "lock saved off")
++
++        /* Toed in like speakers: each side turned toward the player, more
++         * so on a curved screen, whose edges already face in. */
++        let fl = DPadLayout.sideYaw(curved: false, mount: .left)
++        check(abs(fl - 5 * .pi / 180) < 1e-5 && fl == -DPadLayout.sideYaw(curved: false, mount: .right),
++              "flat screen: each side toed in")
++        let yl = DPadLayout.sideYaw(curved: true, mount: .left)
++        check(yl > fl && yl == -DPadLayout.sideYaw(curved: true, mount: .right),
++              "curved: the edge's turn plus the toe-in")
++
++        /* In front of where the player looks: a head at (1, 1.6, 0) looking
++         * along -x (turned 90 degrees left). */
++        var head = matrix_identity_float4x4
++        let look = simd_quatf(angle: .pi / 2, axis: [0, 1, 0])
++        head = simd_float4x4(look)
++        head.columns.3 = [1, 1.6, 0, 1]
++        let spot = DPadLayout.inFront(of: head, distance: 0.5, below: 0.15)
++        check(simd_length(spot - SIMD3<Float>(0.5, 1.45, 0)) < 1e-4, "half a metre ahead, a little low")
++        let face = DPadLayout.facing(head)
++        check(simd_length(face.act([0, 0, -1]) - SIMD3<Float>(-1, 0, 0)) < 1e-4,
++              "the pad's Up points the way the player looks")
++        var down = simd_float4x4(simd_quatf(angle: -1.2, axis: [1, 0, 0]))
++        down.columns.3 = [0, 1.6, 0, 1]
++        let ahead = DPadLayout.inFront(of: down, distance: 0.5, below: 0.15)
++        check(abs(ahead.z - (-0.5)) < 1e-4 && abs(ahead.x) < 1e-4,
++              "looking down still puts it ahead, not under the feet")
 +
 +        if failures > 0 { print("\(failures) failed"); exit(1) }
 +    }
@@ -4441,10 +4490,10 @@ index ea46bf0..9baa786 100644
  system_ss.add(when: pixman, if_true: files('console-vc.c'), if_false: files('console-vc-stubs.c'))
 diff --git a/ui/xbawks-console.swift b/ui/xbawks-console.swift
 new file mode 100644
-index 0000000..88c9bbf
+index 0000000..86a7ea2
 --- /dev/null
 +++ b/ui/xbawks-console.swift
-@@ -0,0 +1,890 @@
+@@ -0,0 +1,979 @@
 +/*
 + * The console in the room, and the button that swaps a disc.
 + *
@@ -4869,149 +4918,206 @@ index 0000000..88c9bbf
 +struct ScreenControls: View {
 +    @State private var curved = ScreenLook.curved
 +    @State private var room = ScreenLook.room
-+    @State private var mount = DPadMount.saved
++    @State private var hidden = ControlsShown.hidden
 +
 +    /*
-+     * Two labelled rows of direct choices, sized for a panel two and a half
-+     * metres away: the first version cycled through levels on one small
-+     * button, which A. found hard to read and slow to use.
++     * Small pills that fold out their choices when pressed, all in the
++     * Xbawks face: the segmented pickers before them were large and drew
++     * their labels in the system font. The eye hides every control on the
++     * screen down to itself.
 +     */
 +    var body: some View {
-+        /* One strip across the top of the screen. */
-+        HStack(spacing: 36) {
-+            row("Screen") {
-+                Picker("Screen", selection: Binding(
-+                    get: { curved },
-+                    set: { v in curved = v; ScreenLook.curved = v })) {
-+                    Text("Flat").tag(false)
-+                    Text("Curved").tag(true)
-+                }
-+                .frame(width: 240)
++        HStack(spacing: 14) {
++            if !hidden {
++                FoldOut(title: "Screen", size: 20,
++                        options: [(false, "Flat"), (true, "Curved")],
++                        value: Binding(get: { curved },
++                                       set: { v in curved = v; ScreenLook.curved = v }))
++                FoldOut(title: "Room", size: 20,
++                        options: RoomDim.allCases.map { ($0, $0.title) },
++                        value: Binding(get: { room },
++                                       set: { v in room = v; ScreenLook.room = v }))
 +            }
-+            row("Room") {
-+                Picker("Room", selection: Binding(
-+                    get: { room },
-+                    set: { v in room = v; ScreenLook.room = v })) {
-+                    ForEach(RoomDim.allCases, id: \.self) { d in
-+                        Text(d.title).tag(d)
-+                    }
-+                }
-+                .frame(width: 420)
++            Button {
++                hidden.toggle()
++                ControlsShown.hidden = hidden
++            } label: {
++                Image(systemName: hidden ? "eye" : "eye.slash")
++                    .font(.system(size: 20, weight: .semibold))
++                    .frame(width: 44, height: 44)
++                    .background(Color.white.opacity(0.12), in: Circle())
++                    .gazeBrighten(Circle())
 +            }
-+            row("D-pad") {
-+                Picker("D-pad", selection: Binding(
-+                    get: { mount },
-+                    set: { v in mount = v; DPadMount.saved = v })) {
-+                    ForEach(DPadMount.allCases, id: \.self) { m in
-+                        Text(m.title).tag(m)
-+                    }
-+                }
-+                .frame(width: 300)
-+            }
++            .buttonStyle(BareButtonStyle())
 +        }
-+        .padding(.horizontal, 28)
-+        .padding(.vertical, 18)
-+        .glassBackgroundEffect()
++        .padding(10)
++        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
 +        .fixedSize()
 +    }
++}
 +
-+    private func row<P: View>(_ title: String, @ViewBuilder _ picker: () -> P) -> some View {
-+        HStack(spacing: 16) {
-+            Text(title)
-+                .font(XbawksTheme.face(20, .semibold))
-+                .fixedSize()
-+            picker()
-+                .pickerStyle(.segmented)
-+                .controlSize(.large)
-+                .font(XbawksTheme.face(18, .medium))
++/// A button style that draws only its label: no system gaze highlight,
++/// which outlines a control in its own, differently curved shape.
++struct BareButtonStyle: ButtonStyle {
++    func makeBody(configuration: Configuration) -> some View {
++        configuration.label
++    }
++}
++
++extension View {
++    /// The gaze response for the controls here: a faint white wash in the
++    /// control's own shape fades in while it is looked at, in place of the
++    /// system highlight, whose outline did not match these shapes.
++    func gazeBrighten<S: Shape>(_ shape: S, amount: Double = 0.16) -> some View {
++        self
++            .overlay {
++                shape.fill(.white.opacity(amount))
++                    .allowsHitTesting(false)
++                    .hoverEffect { effect, isActive, _ in
++                        effect.animation(.easeOut(duration: 0.15)) {
++                            $0.opacity(isActive ? 1 : 0)
++                        }
++                    }
++            }
++            .contentShape(.hoverEffect, shape)
++            .hoverEffectGroup()
++    }
++}
++
++/*
++ * Whether the controls on the game screen are hidden (the eye on the
++ * strip). The d-pad itself stays: it is a controller, not a control.
++ */
++enum ControlsShown {
++    static var hidden: Bool {
++        get { UserDefaults.standard.bool(forKey: "xbawks.controls.hidden") }
++        set {
++            UserDefaults.standard.set(newValue, forKey: "xbawks.controls.hidden")
++            NotificationCenter.default.post(name: .xbawksScreenLookChanged, object: nil)
 +        }
 +    }
 +}
 +
 +/*
-+ * A d-pad beside the screen, for the Sense controllers, which have none.
-+ * Menus in many games (Doom 3's main menu and PDA) move only on the d-pad.
-+ * Held while pressed, like the real one. Shown only while the Sense
-+ * controllers are what is playing; a pad with its own d-pad hides it.
++ * A pill showing a setting's current choice; pressed, it folds out the
++ * choices beside it (or below it), and picking one folds it back. Every
++ * label in the Xbawks face, so nothing on screen mixes fonts.
 + */
-+struct VirtualDPad: View {
-+    /*
-+     * The key under a finger, as gesture state: SwiftUI resets it when the
-+     * gesture ends and also when it is cancelled (tracking lost, the panel
-+     * moved under the finger), which onEnded alone never hears about, so a
-+     * cancelled press cannot leave the guest holding a direction.
-+     */
-+    @GestureState private var held: UInt16 = 0
-+    @State private var shown = VirtualDPad.wanted()
-+    @State private var mount = DPadMount.saved
++struct FoldOut<V: Hashable>: View {
++    let title: String
++    var size: CGFloat = 18
++    var vertical = false
++    let options: [(V, String)]
++    @Binding var value: V
++    @State private var open = false
 +
-+    /// The panel is for the Left and Right mounts; Flat has its own pad.
-+    static func wanted() -> Bool {
-+        DPadMount.saved != .flat && xemu_host_wants_virtual_dpad()
++    var body: some View {
++        let layout = vertical ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
++                              : AnyLayout(HStackLayout(spacing: 8))
++        layout {
++            pill(open ? "\(title)" : "\(title): \(name(of: value))",
++                 symbol: open ? "chevron.left" : "chevron.right",
++                 lit: open) {
++                withAnimation(.snappy(duration: 0.2)) { open.toggle() }
++            }
++            if open {
++                ForEach(options.indices, id: \.self) { i in
++                    let (v, label) = options[i]
++                    /* Stays open after a pick, so levels can be tried in
++                     * turn; the title pill folds it away. */
++                    pill(label, symbol: v == value ? "checkmark" : nil, lit: v == value) {
++                        value = v
++                    }
++                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
++                }
++            }
++        }
 +    }
++
++    private func name(of v: V) -> String {
++        options.first { $0.0 == v }?.1 ?? ""
++    }
++
++    private func pill(_ text: String, symbol: String?, lit: Bool,
++                      _ action: @escaping () -> Void) -> some View {
++        Button(action: action) {
++            HStack(spacing: 6) {
++                Text(text).font(XbawksTheme.face(size, .medium))
++                if let symbol {
++                    Image(systemName: symbol).font(.system(size: size * 0.7, weight: .bold))
++                }
++            }
++            .padding(.horizontal, size * 0.8)
++            .padding(.vertical, size * 0.45)
++            .fixedSize()
++            .background(lit ? XbawksTheme.green.opacity(0.55) : Color.white.opacity(0.12),
++                        in: Capsule())
++            .gazeBrighten(Capsule())
++        }
++        .buttonStyle(BareButtonStyle())
++    }
++}
++
++/*
++ * The d-pad's own controls, on a panel at the screen's upper right: where
++ * it goes (beside the screen on either side, or the pad in the room,
++ * upright or flat) and whether the room pad is locked. Beside the screen
++ * as A. asked, rather than on the strip above it. Shown only while the
++ * Sense controllers are playing, since only they use the virtual d-pad.
++ */
++struct DPadControls: View {
++    @State private var mount = DPadMount.saved
++    @State private var locked = DPadLock.saved
++    @State private var shown = xemu_host_wants_virtual_dpad()
++    @State private var hidden = ControlsShown.hidden
 +
 +    var body: some View {
 +        Group {
-+            if shown {
-+                VStack(spacing: 6) {
-+                    key("chevron.up", 1 << 5)
-+                    HStack(spacing: 6) {
-+                        key("chevron.left", 1 << 4)
-+                        Color.clear.frame(width: 64, height: 64)
-+                        key("chevron.right", 1 << 6)
++            if shown && !hidden {
++                VStack(alignment: .leading, spacing: 8) {
++                    FoldOut(title: "D-pad", size: 18, vertical: true,
++                            options: DPadMount.allCases.map { ($0, $0.title) },
++                            value: Binding(get: { mount },
++                                           set: { v in mount = v; DPadMount.saved = v }))
++                    /* Holds the room pad where it is, keys still live; says
++                     * which state it is in. */
++                    if mount.inRoom {
++                        Button {
++                            locked.toggle()
++                            DPadLock.saved = locked
++                        } label: {
++                            HStack(spacing: 6) {
++                                Image(systemName: locked ? "lock.fill" : "lock.open")
++                                    .font(.system(size: 14, weight: .bold))
++                                Text(locked ? "Locked" : "Unlocked")
++                                    .font(XbawksTheme.face(18, .medium))
++                            }
++                            .padding(.horizontal, 14)
++                            .padding(.vertical, 8)
++                            .fixedSize()
++                            .background(locked ? XbawksTheme.green.opacity(0.55)
++                                               : Color.white.opacity(0.12), in: Capsule())
++                            .gazeBrighten(Capsule())
++                        }
++                        .buttonStyle(BareButtonStyle())
 +                    }
-+                    key("chevron.down", 1 << 7)
 +                }
 +                .padding(14)
-+                .glassBackgroundEffect()
++                .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
++                .fixedSize()
 +            }
-+        }
-+        .onChange(of: held) { _, h in
-+            xemu_host_set_virtual_dpad(shown ? h : 0)
 +        }
 +        .task {
 +            while !Task.isCancelled {
-+                refresh()
++                shown = xemu_host_wants_virtual_dpad()
 +                try? await Task.sleep(for: .seconds(1))
 +            }
 +        }
 +        .onReceive(NotificationCenter.default.publisher(for: .xbawksScreenLookChanged)) { _ in
-+            refresh()
++            mount = DPadMount.saved
++            locked = DPadLock.saved
++            hidden = ControlsShown.hidden
 +        }
-+    }
-+
-+    /* Hiding the panel, or moving it to the other side, lets go of
-+     * whatever it held. */
-+    private func refresh() {
-+        let want = VirtualDPad.wanted()
-+        let now = DPadMount.saved
-+        let moved = now != mount
-+        mount = now
-+        guard want != shown || moved else { return }
-+        if DPadLayout.releaseOnChange(held: held, wasShowing: shown, nowShowing: want) != held
-+            || (moved && held != 0) {
-+            xemu_host_set_virtual_dpad(0)
-+        }
-+        shown = want
-+    }
-+
-+    /* Pressed while touched, released on lift: a drag of no distance. */
-+    private func key(_ symbol: String, _ bit: UInt16) -> some View {
-+        Image(systemName: symbol)
-+            .font(.system(size: 30, weight: .bold))
-+            .frame(width: 64, height: 64)
-+            .background((held & bit) != 0 ? XbawksTheme.green.opacity(0.6)
-+                                          : Color.white.opacity(0.12),
-+                        in: RoundedRectangle(cornerRadius: 14))
-+            .contentShape(.hoverEffect, RoundedRectangle(cornerRadius: 14))
-+            .hoverEffect()
-+            .gesture(
-+                DragGesture(minimumDistance: 0)
-+                    .updating($held) { _, state, _ in
-+                        /* One key at a time. */
-+                        if state == 0 { state = bit }
-+                    }
-+            )
 +    }
 +}
 +
@@ -5118,6 +5224,38 @@ index 0000000..88c9bbf
 + * it behaved before any of this existed.
 + */
 +@MainActor
++final class HeadTracker {
++    private let session = ARKitSession()
++    private let world = WorldTrackingProvider()
++    private var running = false
++
++    /*
++     * Where the player's head is and which way it looks, for putting the
++     * room d-pad in front of them (A. kept losing a pad that appeared where
++     * it was last left). World tracking needs no permission; it starts the
++     * first time it is asked, and its first pose can take a moment.
++     */
++    func pose() async -> simd_float4x4? {
++        if !running {
++            running = true
++            do {
++                try await session.run([world])
++            } catch {
++                fputs("[host] head tracking failed (\(error))\n", stderr)
++                fflush(stderr)
++                return nil
++            }
++        }
++        for _ in 0..<40 {
++            if let a = world.queryDeviceAnchor(atTimestamp: CACurrentMediaTime()) {
++                return a.originFromAnchorTransform
++            }
++            try? await Task.sleep(for: .milliseconds(50))
++        }
++        return nil
++    }
++}
++
 +final class SurfaceFinder {
 +    private struct Surface {
 +        let y: Float
@@ -5337,10 +5475,10 @@ index 0000000..88c9bbf
 +}
 diff --git a/ui/xbawks-dpad-layout.swift b/ui/xbawks-dpad-layout.swift
 new file mode 100644
-index 0000000..36f8905
+index 0000000..bff79ce
 --- /dev/null
 +++ b/ui/xbawks-dpad-layout.swift
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,177 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Copyright (C) 2026 A. Cervantez
 +//
@@ -5349,6 +5487,7 @@ index 0000000..36f8905
 +// Where the virtual d-pad goes, and which part of the flat pad does what.
 +// No UI here, so it is tested on the Mac (tests/xbawks/test_dpad.swift).
 +import Foundation
++import simd
 +
 +extension Notification.Name {
 +    /// The screen's shape, the room's dimming or the d-pad's mount changed.
@@ -5357,24 +5496,46 @@ index 0000000..36f8905
 +
 +/*
 + * Where the d-pad for the Sense controllers lives: a panel beside the
-+ * screen on either side, or a raised pad lying flat on a table, pressed
-+ * with a fingertip. Saved as xbawks.dpad.mount.
++ * screen on either side, or the raised pad in the room, pressed with a
++ * fingertip, either upright (floating, always turned to face the player)
++ * or flat (dropped onto whatever surface is under it). Saved as
++ * xbawks.dpad.mount.
 + */
 +enum DPadMount: String, CaseIterable {
-+    case left, right, flat
++    case left, right, upright, flat
 +
 +    var title: String {
 +        switch self {
 +        case .left: return "Left"
 +        case .right: return "Right"
++        case .upright: return "Upright"
 +        case .flat: return "Flat"
 +        }
 +    }
++
++    /// The raised pad in the room rather than the panel by the screen.
++    var inRoom: Bool { self == .upright || self == .flat }
 +
 +    static var saved: DPadMount {
 +        get { DPadMount(rawValue: UserDefaults.standard.string(forKey: "xbawks.dpad.mount") ?? "") ?? .left }
 +        set {
 +            UserDefaults.standard.set(newValue.rawValue, forKey: "xbawks.dpad.mount")
++            NotificationCenter.default.post(name: .xbawksScreenLookChanged, object: nil)
++        }
++    }
++}
++
++/*
++ * Whether the flat pad is locked where it is: nothing moves or turns it,
++ * and its keys still press. For a pad standing in the air, where a
++ * fingertip pushing a key would otherwise push the pad away. Saved as
++ * xbawks.dpad.locked.
++ */
++enum DPadLock {
++    static var saved: Bool {
++        get { UserDefaults.standard.bool(forKey: "xbawks.dpad.locked") }
++        set {
++            UserDefaults.standard.set(newValue, forKey: "xbawks.dpad.locked")
 +            NotificationCenter.default.post(name: .xbawksScreenLookChanged, object: nil)
 +        }
 +    }
@@ -5417,6 +5578,38 @@ index 0000000..36f8905
 +        return p
 +    }
 +
++    /// The turn of the pad beside the screen: toed in toward the player
++    /// like a speaker, by 5 degrees (A. tried 20, 16 and 10), on top of
++    /// a curved screen's own turn at its edge, which already faces in.
++    static func sideYaw(curved: Bool, mount: DPadMount) -> Float {
++        let toeIn: Float = 5 * .pi / 180
++        let edge: Float = curved ? 1.4 / 2.6 : 0
++        return mount == .right ? -(edge + toeIn) : edge + toeIn
++    }
++
++    /// The way the player is looking, level: the head's forward with its
++    /// tilt taken out, so looking down still means ahead.
++    private static func ahead(_ head: simd_float4x4) -> SIMD3<Float> {
++        let f = -SIMD3<Float>(head.columns.2.x, 0, head.columns.2.z)
++        return simd_length(f) > 1e-4 ? simd_normalize(f) : [0, 0, -1]
++    }
++
++    /// Where the room pad appears: `distance` ahead of the player's head,
++    /// the way they are looking, and `below` under eye level.
++    static func inFront(of head: simd_float4x4, distance: Float,
++                        below: Float) -> SIMD3<Float> {
++        let eye = SIMD3<Float>(head.columns.3.x, head.columns.3.y, head.columns.3.z)
++        var p = eye + ahead(head) * distance
++        p.y = eye.y - below
++        return p
++    }
++
++    /// A flat pad's turn as it appears: Up pointing the way the player looks.
++    static func facing(_ head: simd_float4x4) -> simd_quatf {
++        let f = ahead(head)
++        return simd_quatf(angle: atan2(-f.x, -f.z), axis: [0, 1, 0])
++    }
++
 +    /// The flat pad's first home: a quarter metre in front of the console,
 +    /// on the same table.
 +    static func flatStart(console: SIMD3<Float>, consoleHeight: Float,
@@ -5436,6 +5629,25 @@ index 0000000..36f8905
 +        UserDefaults.standard.set([p.x, p.y, p.z], forKey: positionKey)
 +    }
 +
++    private static let rotationKey = "xbawks.dpad.rotation"
++
++    static func loadFlatRotation() -> simd_quatf? {
++        guard let a = UserDefaults.standard.array(forKey: rotationKey) as? [Float],
++              a.count == 4 else { return nil }
++        return simd_quatf(ix: a[0], iy: a[1], iz: a[2], r: a[3])
++    }
++
++    static func saveFlatRotation(_ q: simd_quatf) {
++        UserDefaults.standard.set([q.imag.x, q.imag.y, q.imag.z, q.real],
++                                  forKey: rotationKey)
++    }
++
++    /// The same pad laid level: the smallest turn that takes its up to the
++    /// world's up, so the way it faces is kept.
++    static func levelled(_ q: simd_quatf) -> simd_quatf {
++        simd_quatf(from: simd_normalize(q.act([0, 1, 0])), to: [0, 1, 0]) * q
++    }
++
 +    /// The held keys after the pad shows or hides: hiding it (a mount
 +    /// change, a controller change) lets go of everything, so the guest
 +    /// never keeps a direction nobody can release.
@@ -5446,18 +5658,19 @@ index 0000000..36f8905
 +}
 diff --git a/ui/xbawks-dpad.swift b/ui/xbawks-dpad.swift
 new file mode 100644
-index 0000000..2b7f416
+index 0000000..554cfc7
 --- /dev/null
 +++ b/ui/xbawks-dpad.swift
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,181 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Copyright (C) 2026 A. Cervantez
 +//
 +//  xbawks-dpad.swift
 +//
-+// The flat d-pad: a raised cross of four keys on a round base, laid on a
-+// table and pressed with a fingertip like a PlayStation d-pad. Built from
-+// primitives, so it needs no model file.
++// The d-pad in the room: a cross of four keys and a centre on a faint disc,
++// lying flat on a surface or standing upright facing the player, pressed
++// with a fingertip like a PlayStation d-pad.
++// Built from primitives, so it needs no model file.
 +import RealityKit
 +import UIKit
 +
@@ -5465,9 +5678,13 @@ index 0000000..2b7f416
 +/// them and the room's gestures for the console and the screen never do.
 +struct DPadPart: Component {}
 +
++/// The keys, for the press gesture, which must start the moment a finger
++/// lands; the disc is moved and turned by the room's own drag and twist.
++struct DPadKey: Component {}
++
 +enum FlatDPad {
-+    /// The base's thickness; the keys stand on top of it.
-+    static let height: Float = 0.012
++    /// The disc's thickness; the cross stands on it.
++    static let height: Float = 0.006
 +    private static let radius: Float = 0.06
 +    private static let keyLength: Float = 0.03
 +    private static let keyWidth: Float = 0.026
@@ -5484,21 +5701,52 @@ index 0000000..2b7f416
 +    ]
 +
 +    static func make() -> Entity {
-+        let base = ModelEntity(
-+            mesh: .generateCylinder(height: height, radius: radius),
-+            materials: [SimpleMaterial(color: UIColor(white: 0.12, alpha: 1),
-+                                       roughness: 0.6, isMetallic: false)])
++        /*
++         * Grabbed by its disc, which is what worked for two pinches: a
++         * handle bar or the centre alone were too small to hit with both
++         * hands. The disc's hit area is its four quarters between the
++         * arms and nothing under a key, so a fingertip pushing a key
++         * cannot meet the disc and push the pad away.
++         */
++        let base = Entity()
 +        base.name = DPadLayout.baseName
-+        base.components.set(CollisionComponent(shapes: [
-+            .generateBox(width: radius * 2, height: height, depth: radius * 2)]))
++        let inner = keyWidth / 2 + 0.003
++        let side = radius - inner
++        let quarters: [SIMD2<Float>] = [[1, 1], [1, -1], [-1, 1], [-1, -1]]
++        base.components.set(CollisionComponent(shapes: quarters.map { q in
++            ShapeResource.generateBox(width: side, height: height * 2, depth: side)
++                .offsetBy(translation: [q.x * (inner + side / 2), 0,
++                                        q.y * (inner + side / 2)])
++        }))
 +        base.components.set(InputTargetComponent())
-+        base.components.set(HoverEffectComponent())
 +        base.components.set(DPadPart())
 +
-+        let keyColour = SimpleMaterial(color: UIColor(white: 0.78, alpha: 1),
-+                                       roughness: 0.35, isMetallic: false)
-+        let markColour = SimpleMaterial(color: UIColor(white: 0.25, alpha: 1),
-+                                        roughness: 0.5, isMetallic: false)
++        /* The Translucent Green Xbox's own shell, a little denser than the
++         * console's so the cross reads on its own. */
++        let green = Editions.named("translucent-green")
++        let keyColour = glass(green.shell, opacity: min(1, green.opacity + 0.25))
++
++
++        /* The disc, faint, so the grab area can be seen; hidden while the
++         * pad is locked. Drawn only: the quarters above take the input. */
++        let disc = ModelEntity(
++            mesh: .generateCylinder(height: height, radius: radius),
++            materials: [glass(green.shell, opacity: 0.18)])
++        disc.name = "xbawks-dpad-disc"
++        base.addChild(disc)
++
++        /* North: a small bright chevron on the disc beyond the Up arm, so
++         * the way Up points is plain however a flat pad has been turned.
++         * Flat only; an upright pad or one by the screen has Up at the top. */
++        let north = ModelEntity(mesh: .generateCone(height: 0.009, radius: 0.006),
++                                materials: [UnlitMaterial(color: UIColor(white: 0.95, alpha: 1))])
++        north.name = "xbawks-dpad-north"
++        north.orientation = simd_quatf(from: [0, 1, 0], to: [0, 0, -1])
++        north.scale = [1, 1, 0.25]
++        north.position = [0, height / 2 + 0.0006, -(radius - 0.009)]
++        base.addChild(north)
++        let markColour = SimpleMaterial(color: UIColor(hex: green.jewel),
++                                        roughness: 0.3, isMetallic: false)
 +        for k in keys {
 +            let alongX = k.dir.x != 0
 +            let w = alongX ? keyLength : keyWidth
@@ -5517,6 +5765,7 @@ index 0000000..2b7f416
 +            key.components.set(InputTargetComponent())
 +            key.components.set(HoverEffectComponent())
 +            key.components.set(DPadPart())
++            key.components.set(DPadKey())
 +
 +            /* The arrow printed on the key: a flattened cone lying on its
 +             * top, pointing outward. */
@@ -5531,7 +5780,61 @@ index 0000000..2b7f416
 +            key.addChild(mark)
 +            base.addChild(key)
 +        }
-+        return base
++        /* The root is what is placed, and turned to face the player when
++         * upright; the cross inside it is what is grabbed and pressed. */
++        let root = Entity()
++        root.name = "xbawks-dpad"
++        root.addChild(base)
++        return root
++    }
++
++    private static func cross(of pad: Entity) -> Entity? {
++        pad.children.first { $0.name == DPadLayout.baseName }
++    }
++
++    /// The four keys, for showing them pressed or released.
++    static func keys(of pad: Entity) -> [Entity] {
++        cross(of: pad)?.children.filter {
++            if case .key = DPadLayout.role(ofEntityNamed: $0.name) { return true }
++            return false
++        } ?? []
++    }
++
++    /// Upright: the cross stands on edge, Up at the top, and (in the room)
++    /// the pad turns to face the player wherever it is put. Flat: it lies
++    /// level, keeping the way it faced. Beside the screen it stands with
++    /// the screen rather than turning to the player.
++    static func setUpright(_ pad: Entity, _ upright: Bool, facePlayer: Bool = true) {
++        cross(of: pad)?.orientation = upright
++            ? simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
++            : simd_quatf(angle: 0, axis: [0, 1, 0])
++        if upright && !facePlayer {
++            pad.components.remove(BillboardComponent.self)
++        } else if upright {
++            pad.components.set(BillboardComponent())
++        } else {
++            pad.components.remove(BillboardComponent.self)
++            pad.orientation = DPadLayout.levelled(pad.orientation)
++        }
++    }
++
++    /// See-through and glossy, like the console's translucent shells.
++    private static func glass(_ hex: UInt32, opacity: Float) -> PhysicallyBasedMaterial {
++        var m = PhysicallyBasedMaterial()
++        m.baseColor = .init(tint: UIColor(hex: hex))
++        m.roughness = .init(floatLiteral: 0.15)
++        m.blending = .transparent(opacity: .init(floatLiteral: opacity))
++        return m
++    }
++
++    /// What is drawn for a mount. The disc is the room pad's grab area,
++    /// hidden while locked (nothing to grab is the sign it will not move)
++    /// and beside the screen, where the pad is not moved; there it is just
++    /// the four keys. The north chevron is for the flat pad only.
++    static func style(_ pad: Entity, mount: DPadMount, locked: Bool) {
++        guard let parts = cross(of: pad)?.children else { return }
++        parts.first { $0.name == "xbawks-dpad-disc" }?.isEnabled = mount.inRoom && !locked
++        parts.first { $0.name == "xbawks-dpad-north" }?.isEnabled = mount == .flat
 +    }
 +
 +    /// Sinks a key while it is held and raises it again on release.
@@ -5783,10 +6086,10 @@ index 0000000..21a9943
 +}
 diff --git a/ui/xbawks-options.swift b/ui/xbawks-options.swift
 new file mode 100644
-index 0000000..c01e67d
+index 0000000..751f01c
 --- /dev/null
 +++ b/ui/xbawks-options.swift
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,210 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Copyright (C) 2026 A. Cervantez
 +//
@@ -5838,38 +6141,21 @@ index 0000000..c01e67d
 +            /* The screen and d-pad choices, before the game: in the room
 +             * they are on the strip above the screen instead. */
 +            if !midSession {
-+                /* Labelled, because segments hide a picker's title and
-+                 * "Flat" is a choice in two of them. */
-+                HStack(spacing: 14) {
-+                    labelled("Screen") {
-+                        Picker("Screen", selection: Binding(
-+                            get: { curved },
-+                            set: { v in curved = v; ScreenLook.curved = v })) {
-+                            Text("Flat").tag(false)
-+                            Text("Curved").tag(true)
-+                        }
-+                        .frame(width: 160)
-+                    }
-+                    labelled("Room") {
-+                        Picker("Room", selection: Binding(
-+                            get: { room },
-+                            set: { v in room = v; ScreenLook.room = v })) {
-+                            ForEach(RoomDim.allCases, id: \.self) { d in
-+                                Text(d.title).tag(d)
-+                            }
-+                        }
-+                        .frame(width: 300)
-+                    }
-+                }
-+                labelled("D-pad") {
-+                    Picker("D-pad", selection: Binding(
-+                        get: { mount },
-+                        set: { v in mount = v; DPadMount.saved = v })) {
-+                        ForEach(DPadMount.allCases, id: \.self) { m in
-+                            Text(m.title).tag(m)
-+                        }
-+                    }
-+                    .frame(width: 220)
++                /* The screen and d-pad choices before the game, as the same
++                 * fold-out pills as on the screen, in the same face. */
++                HStack(spacing: 10) {
++                    FoldOut(title: "Screen", size: 12,
++                            options: [(false, "Flat"), (true, "Curved")],
++                            value: Binding(get: { curved },
++                                           set: { v in curved = v; ScreenLook.curved = v }))
++                    FoldOut(title: "Room", size: 12,
++                            options: RoomDim.allCases.map { ($0, $0.title) },
++                            value: Binding(get: { room },
++                                           set: { v in room = v; ScreenLook.room = v }))
++                    FoldOut(title: "D-pad", size: 12,
++                            options: DPadMount.allCases.map { ($0, $0.title) },
++                            value: Binding(get: { mount },
++                                           set: { v in mount = v; DPadMount.saved = v }))
 +                }
 +            }
 +        }
@@ -5881,13 +6167,6 @@ index 0000000..c01e67d
 +                refreshControllers()
 +                try? await Task.sleep(for: .seconds(1))
 +            }
-+        }
-+    }
-+
-+    private func labelled<P: View>(_ title: String, @ViewBuilder _ picker: () -> P) -> some View {
-+        HStack(spacing: 8) {
-+            Text(title).fixedSize()
-+            picker().pickerStyle(.segmented)
 +        }
 +    }
 +
@@ -6297,10 +6576,10 @@ index 0000000..45a8ba3
 +}
 diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
 new file mode 100644
-index 0000000..58156b4
+index 0000000..ebe962e
 --- /dev/null
 +++ b/ui/xemu-host-app.swift
-@@ -0,0 +1,1183 @@
+@@ -0,0 +1,1388 @@
 +// The entry point, and now the screen.
 +//
 +// Measured on 2026-10-29: a spatial controller (the PSVR2 Sense pair)
@@ -6343,6 +6622,7 @@ index 0000000..58156b4
 +
 +    init() {
 +        DPadPart.registerComponent()
++        DPadKey.registerComponent()
 +        xemu_host_prepare()
 +        let vc = XemuScreenViewController()
 +        vc.loadViewIfNeeded()
@@ -6726,9 +7006,35 @@ index 0000000..58156b4
 +
 +/// A 4:3 screen two and a half metres ahead at eye height, two metres
 +/// wide, fed thirty times a second from the published frame.
++/// Update rate and longest gap of one drag, for the log.
++final class DragMeter {
++    private var start = Date(), last = Date(), count = 0, maxGap = 0.0
++
++    func begin() { start = Date(); last = start; count = 0; maxGap = 0 }
++
++    /// Seconds since the last update.
++    var idle: TimeInterval { Date().timeIntervalSince(last) }
++
++    func tick() {
++        let now = Date()
++        if count > 0 { maxGap = max(maxGap, now.timeIntervalSince(last)) }
++        last = now
++        count += 1
++    }
++
++    func report(_ what: String) {
++        let span = Date().timeIntervalSince(start)
++        fputs(String(format: "[host] %@: %d updates in %.2f s (%.0f/s), longest gap %.0f ms\n",
++                     what, count, span, Double(count) / max(span, 0.001), maxGap * 1000),
++              stderr)
++        fflush(stderr)
++    }
++}
++
 +struct ScreenSpace: View {
 +    @State private var screen = GuestScreen()
 +    @State private var surfaces = SurfaceFinder()
++    @State private var head = HeadTracker()
 +
 +    @State private var discs: [DiscEntry] = []
 +    @State private var selected = 0
@@ -6763,7 +7069,13 @@ index 0000000..58156b4
 +    /// The dark shell that dims the room, and the buttons beside the screen.
 +    @State private var dimmerEntity: Entity?
 +    @State private var screenControlsEntity: Entity?
-+    @State private var dpadEntity: Entity?
++    /// Where the d-pad lives while it is in the room; beside the screen
++    /// it is the screen's child instead.
++    @State private var padHome: Entity?
++    /// The placement last applied (mount and screen shape), so it is
++    /// redone only when one of them changes.
++    @State private var padPlacement = ""
++    @State private var dpadControlsEntity: Entity?
 +    /// The flat d-pad, its held key, whether it is out, and where a drag
 +    /// of its base began.
 +    @State private var flatPad: Entity?
@@ -6772,7 +7084,16 @@ index 0000000..58156b4
 +    @GestureState private var flatHeld: UInt16 = 0
 +    @State private var flatShown = false
 +    @State private var flatOrigin: SIMD3<Float>?
++    /// The pad's turn when a two-hand twist began; while set, the base drag
++    /// waits, so a twist and a drag never fight over the pad.
++    @State private var flatSpin: simd_quatf?
++    /// The room pad's mode last applied, so switching Upright and Flat
++    /// re-stands the cross once rather than every second.
++    @State private var flatMode: DPadMount?
 +    @State private var screenOrigin: SIMD3<Float>?
++    /// Counts a screen drag's updates. A class, not state: writing view
++    /// state on every update would redraw the view on every update.
++    @State private var screenMeter = DragMeter()
 +
 +    /// Long enough that a quick flick is not a move.
 +    private static let holdToAdjust = 0.25
@@ -6781,7 +7102,7 @@ index 0000000..58156b4
 +    private static let panelID = "swap-panel"
 +    private static let screenBarName = "xbawks-screen-bar"
 +    private static let screenControlsID = "screen-controls"
-+    private static let dpadID = "virtual-dpad"
++    private static let dpadControlsID = "dpad-controls"
 +
 +    var body: some View {
 +        RealityView { content, attachments in
@@ -6859,15 +7180,14 @@ index 0000000..58156b4
 +                scr.addChild(controls)
 +                screenControlsEntity = controls
 +            }
-+            /* Beside the screen's lower left; with the strip, it moves and
-+             * curves with the screen. */
-+            if let pad = attachments.entity(for: Self.dpadID),
++            /* The d-pad's controls at the screen's upper right; they
++             * follow the screen like the strip. */
++            if let controls = attachments.entity(for: Self.dpadControlsID),
 +               let scr = screenEntity {
-+                pad.position = DPadLayout.sidePosition(curved: ScreenLook.curved,
-+                                                       mount: DPadMount.saved)
-+                pad.scale = SIMD3<Float>(repeating: 2.5)
-+                scr.addChild(pad)
-+                dpadEntity = pad
++                controls.position = Self.dpadControlsPosition(curved: ScreenLook.curved)
++                controls.scale = SIMD3<Float>(repeating: 2.5)
++                scr.addChild(controls)
++                dpadControlsEntity = controls
 +            }
 +            /* The flat d-pad, out only when chosen and the Sense
 +             * controllers are playing; refreshFlatPad decides. */
@@ -6876,9 +7196,21 @@ index 0000000..58156b4
 +                ?? DPadLayout.flatStart(console: ConsolePlacement.loadPosition(),
 +                                        consoleHeight: ConsoleMetrics.height,
 +                                        padHeight: FlatDPad.height)
++            if let q = DPadLayout.loadFlatRotation() {
++                flat.orientation = DPadLayout.levelled(q)
++            }
 +            flat.isEnabled = false
-+            content.add(flat)
++            let home = Entity()
++            home.name = "xbawks-dpad-home"
++            content.add(home)
++            home.addChild(flat)
++            padHome = home
 +            flatPad = flat
++            /* Out at once with the Sense controllers, not on the next
++             * once-a-second check. Passed in: the state just set is not
++             * readable yet inside this closure, so the first check saw no
++             * pad, logged it at the origin, and never put it out. */
++            refreshFlatPad(flat, home: home, screen: screenEntity)
 +
 +            screen.start()
 +        } update: { _, attachments in
@@ -6891,8 +7223,8 @@ index 0000000..58156b4
 +            Attachment(id: Self.screenControlsID) {
 +                ScreenControls()
 +            }
-+            Attachment(id: Self.dpadID) {
-+                VirtualDPad()
++            Attachment(id: Self.dpadControlsID) {
++                DPadControls()
 +            }
 +            Attachment(id: Self.panelID) {
 +                SwapPanel(selected: $selected,
@@ -7002,13 +7334,12 @@ index 0000000..58156b4
 +            if let controls = screenControlsEntity {
 +                controls.position = Self.screenControlsPosition(curved: ScreenLook.curved)
 +            }
-+            dpadEntity?.position = DPadLayout.sidePosition(curved: ScreenLook.curved,
-+                                                           mount: DPadMount.saved)
++            dpadControlsEntity?.position = Self.dpadControlsPosition(curved: ScreenLook.curved)
 +            refreshFlatPad()
 +        }
 +        .onChange(of: flatHeld) { _, new in
 +            if let pad = flatPad {
-+                for k in pad.children {
++                for k in FlatDPad.keys(of: pad) {
 +                    if case .key(let bit) = DPadLayout.role(ofEntityNamed: k.name) {
 +                        FlatDPad.show(k, pressed: bit == new)
 +                    }
@@ -7023,68 +7354,21 @@ index 0000000..58156b4
 +                try? await Task.sleep(for: .seconds(1))
 +            }
 +        }
-+        .gesture(
++        .simultaneousGesture(
 +            /*
-+             * The flat pad's own gesture, with no minimum distance: a key
-+             * goes down the moment a fingertip (or a pinch) lands on it and
-+             * comes up on lift, and the base moves with the hand. Only
-+             * entities marked DPadPart reach it.
++             * The room pad's keys, with no minimum distance: a key goes
++             * down the moment a fingertip (or a pinch) lands on it and
++             * comes up on lift. Keys only: when this gesture also moved
++             * the disc it took the first pinch at once, and the second
++             * pinch of a twist never reached the rotate gesture.
 +             */
 +            DragGesture(minimumDistance: 0)
-+                .targetedToEntity(where: .has(DPadPart.self))
++                .targetedToEntity(where: .has(DPadKey.self))
 +                .updating($flatHeld) { value, state, _ in
 +                    /* One key at a time, and only while the pad is out. */
 +                    if case .key(let bit) = DPadLayout.role(ofEntityNamed: value.entity.name),
 +                       flatShown, state == 0 {
 +                        state = bit
-+                    }
-+                }
-+                .onChanged { value in
-+                    switch DPadLayout.role(ofEntityNamed: value.entity.name) {
-+                    case .key:
-+                        return
-+                    case .base:
-+                        guard let pad = flatPad else { return }
-+                        let travel = value.convert(value.translation3D,
-+                                                   from: .local, to: .scene)
-+                        if flatOrigin == nil {
-+                            flatOrigin = pad.position
-+                            Task { await surfaces.startIfNeeded() }
-+                        }
-+                        var p = flatOrigin! + travel
-+                        if let rest = surfaces.restingY(
-+                                x: p.x, z: p.z, draggedTo: p.y,
-+                                objectHeight: FlatDPad.height) {
-+                            p.y = max(p.y, rest)
-+                        }
-+                        pad.position = p
-+                    case .none:
-+                        return
-+                    }
-+                }
-+                .onEnded { value in
-+                    switch DPadLayout.role(ofEntityNamed: value.entity.name) {
-+                    case .key:
-+                        return
-+                    case .base:
-+                        guard let pad = flatPad else { return }
-+                        flatOrigin = nil
-+                        /* Settle onto the table under it, as the console
-+                         * does; with none known it stays where let go. */
-+                        var t = pad.transform
-+                        if let rest = surfaces.restingY(
-+                                x: t.translation.x, z: t.translation.z,
-+                                draggedTo: t.translation.y,
-+                                objectHeight: FlatDPad.height) {
-+                            t.translation.y = rest
-+                            pad.move(to: t, relativeTo: pad.parent,
-+                                     duration: 0.2, timingFunction: .easeOut)
-+                        }
-+                        DPadLayout.saveFlatPosition(t.translation)
-+                        fputs("[host] d-pad placed at \(t.translation)\n", stderr)
-+                        fflush(stderr)
-+                    case .none:
-+                        return
 +                    }
 +                }
 +        )
@@ -7095,15 +7379,37 @@ index 0000000..58156b4
 +        }
 +        .gesture(
 +            DragGesture()
-+                /* Not the flat d-pad: its parts have their own gesture,
-+                 * and a tap or drag here would compete for its pinch. */
-+                .targetedToEntity(where: !.has(DPadPart.self))
++                /*
++                 * Not the d-pad's keys, which have their own press gesture.
++                 * The pad's disc is moved here, as a branch of this one
++                 * drag: a second drag and twist of its own made the screen
++                 * drag wait on them, so its updates arrived in one burst on
++                 * release (56 updates in 0.00 s; 2026-11-21).
++                 */
++                .targetedToEntity(where: !.has(DPadKey.self))
 +                .onChanged { value in
++                    if DPadLayout.role(ofEntityNamed: value.entity.name) == .base {
++                        movePad(value)
++                        return
++                    }
 +                    if value.entity.name == Self.screenBarName,
 +                       let scr = screenEntity {
 +                        let travel = value.convert(value.translation3D,
 +                                                   from: .local, to: .scene)
-+                        if screenOrigin == nil { screenOrigin = scr.position }
++                        /*
++                         * A new drag, also when the last one was cancelled
++                         * and never ended: its origin was left behind, and
++                         * the next drag measured from it, so the screen
++                         * jumped back and then crept after the hand. A pause
++                         * in updates marks the start of a fresh drag.
++                         */
++                        if screenOrigin == nil || screenMeter.idle > 0.25 {
++                            screenOrigin = scr.position - travel
++                            screenMeter.begin()
++                        }
++                        /* How often the drag reports, and the longest gap:
++                         * A. found the screen slow to follow (2026-11-21). */
++                        screenMeter.tick()
 +                        let p = screenOrigin! + travel
 +                        scr.position = p
 +                        scr.orientation = Self.facingStart(p)
@@ -7140,9 +7446,15 @@ index 0000000..58156b4
 +                    console.position = p
 +                }
 +                .onEnded { value in
++                    if DPadLayout.role(ofEntityNamed: value.entity.name) == .base {
++                        flatOrigin = nil
++                        if flatSpin == nil { settleFlatPad() }
++                        return
++                    }
 +                    if value.entity.name == Self.screenBarName,
 +                       let scr = screenEntity {
 +                        screenOrigin = nil
++                        screenMeter.report("screen drag")
 +                        ScreenPlacement.save(scr.position)
 +                        fputs("[host] screen placed at \(scr.position)\n", stderr)
 +                        fflush(stderr)
@@ -7170,8 +7482,14 @@ index 0000000..58156b4
 +                          stderr)
 +                    fflush(stderr)
 +                }
-+        )
-+        .gesture(
++                /*
++                 * One gesture with the move, not a second one beside it: a
++                 * first pinch held for a move kept the separate twist from
++                 * ever starting, so only two pinches landing together
++                 * turned the console. Joined, a second pinch at any time,
++                 * either hand first, turns it (A., 2026-11-21).
++                 */
++                .simultaneously(with:
 +            /*
 +             * Two hands, any twist. Pinch with one hand, then the other, and
 +             * move the hands around each other: the console turns on the
@@ -7182,13 +7500,26 @@ index 0000000..58156b4
 +             * It stays level. A 1 degree threshold so small motions count.
 +             */
 +            RotateGesture3D(minimumAngleDelta: .degrees(1))
-+                /* Not the flat d-pad: its parts have their own gesture,
-+                 * and a tap or drag here would compete for its pinch. */
-+                .targetedToEntity(where: !.has(DPadPart.self))
++                /* The d-pad's disc turns here too (see the drag above). */
++                .targetedToEntity(where: !.has(DPadKey.self))
 +                .onChanged { value in
-+                    guard claim != .moving,
-+                          let console = Self.console(of: value.entity)
++                    if DPadLayout.role(ofEntityNamed: value.entity.name) == .base {
++                        turnPad(value)
++                        return
++                    }
++                    /*
++                     * Two pinches always turn: a second hand takes over
++                     * from a hold-pinch move rather than being refused,
++                     * which made the console hard to turn (A., 2026-11-21).
++                     * The move picks up again, without a jump, when the
++                     * turn ends and one hand is still holding.
++                     */
++                    guard let console = Self.console(of: value.entity)
 +                    else { return }
++                    if claim == .moving {
++                        dragOrigin = nil
++                        dragBase = nil
++                    }
 +                    claim = .turning
 +                    claimTouched = Date()
 +                    if spinOrigin == nil { spinOrigin = console.orientation }
@@ -7200,6 +7531,13 @@ index 0000000..58156b4
 +                        simd_quatf(angle: turn, axis: [0, 1, 0]) * spinOrigin!
 +                }
 +                .onEnded { value in
++                    if DPadLayout.role(ofEntityNamed: value.entity.name) == .base {
++                        guard flatSpin != nil else { return }
++                        flatSpin = nil
++                        flatOrigin = nil
++                        settleFlatPad()
++                        return
++                    }
 +                    defer { spinOrigin = nil }
 +                    guard claim == .turning,
 +                          let console = Self.console(of: value.entity)
@@ -7209,6 +7547,7 @@ index 0000000..58156b4
 +                                          rotation: console.orientation)
 +                    fputs("[host] console turned\n", stderr); fflush(stderr)
 +                }
++                )
 +        )
 +    }
 +
@@ -7233,21 +7572,166 @@ index 0000000..58156b4
 +        dome.components.set(OpacityComponent(opacity: opacity))
 +    }
 +
++    /// Puts the room pad in front of where the player is looking, every
++    /// time it appears or changes mode, so it is never somewhere to hunt
++    /// for. Upright: half a metre ahead, a little below the eyes. Flat:
++    /// ahead and lower, Up pointing the way they look, then set down on the
++    /// surface under it (again a moment later, once tables are found).
++    private func spawnPad(_ pad: Entity, _ mount: DPadMount) {
++        Task { @MainActor in
++            guard let pose = await head.pose() else { return }
++            let flat = mount == .flat
++            pad.position = DPadLayout.inFront(of: pose, distance: flat ? 0.45 : 0.5,
++                                              below: flat ? 0.45 : 0.15)
++            if flat {
++                pad.orientation = DPadLayout.facing(pose)
++                Task { await surfaces.startIfNeeded() }
++                settleFlatPad()
++                try? await Task.sleep(for: .seconds(1.5))
++                if flatOrigin == nil && DPadMount.saved == .flat { settleFlatPad() }
++            } else {
++                DPadLayout.saveFlatPosition(pad.position)
++            }
++            fputs("[host] d-pad put in front of the player at \(pad.position)\n", stderr)
++            fflush(stderr)
++        }
++    }
++
++    /// Moves the room pad by its disc with one hand. Anchored so the
++    /// hand's travel so far lands on where the pad is now: a drag resuming
++    /// after a twist carries on from there rather than jumping.
++    private func movePad(_ value: EntityTargetValue<DragGesture.Value>) {
++        guard let pad = flatPad, flatSpin == nil, !DPadLock.saved,
++              DPadMount.saved.inRoom else { return }
++        let travel = value.convert(value.translation3D, from: .local, to: .scene)
++        if flatOrigin == nil {
++            flatOrigin = pad.position - travel
++            Task { await surfaces.startIfNeeded() }
++        }
++        var p = flatOrigin! + travel
++        if DPadMount.saved == .flat,
++           let rest = surfaces.restingY(x: p.x, z: p.z, draggedTo: p.y,
++                                        objectHeight: FlatDPad.height) {
++            p.y = max(p.y, rest)
++        }
++        pad.position = p
++    }
++
++    /// Turns the flat pad on its table with two hands, the console's twist:
++    /// whichever of a turn about vertical or a steering-wheel roll
++    /// dominates. Upright, it turns itself to face the player.
++    private func turnPad(_ value: EntityTargetValue<RotateGesture3D.Value>) {
++        guard DPadMount.saved == .flat, !DPadLock.saved, let pad = flatPad else { return }
++        if flatSpin == nil { flatSpin = pad.orientation }
++        let r = value.rotation
++        let axis = r.axis
++        let turn = Float(r.angle.radians)
++            * Float(abs(axis.y) >= abs(axis.z) ? axis.y : -axis.z)
++        pad.orientation = simd_quatf(angle: turn, axis: [0, 1, 0]) * flatSpin!
++    }
++
++    /// Where a let-go pad ends up. Flat, it drops onto whatever surface
++    /// is under it, level; with none known it stays where let go. Upright,
++    /// it stays where let go, facing the player. Then saved.
++    private func settleFlatPad() {
++        guard let pad = flatPad, DPadMount.saved.inRoom else { return }
++        var t = pad.transform
++        var landed = false
++        if DPadMount.saved == .flat {
++            if let rest = surfaces.restingY(x: t.translation.x, z: t.translation.z,
++                                            draggedTo: t.translation.y,
++                                            objectHeight: FlatDPad.height) {
++                t.translation.y = rest
++                landed = true
++            }
++            t.rotation = DPadLayout.levelled(t.rotation)
++            pad.move(to: t, relativeTo: pad.parent, duration: 0.2,
++                     timingFunction: .easeOut)
++            DPadLayout.saveFlatRotation(t.rotation)
++        }
++        DPadLayout.saveFlatPosition(t.translation)
++        fputs("[host] d-pad placed at \(t.translation), "
++              + "\(landed ? "on a surface" : "in the air")\n", stderr)
++        fflush(stderr)
++    }
++
 +    /// Puts the flat pad out or away, and the side panel the other way.
 +    /// Going away lets go of any held key, so the guest is never left
 +    /// holding a direction.
-+    private func refreshFlatPad() {
++    private func refreshFlatPad(_ given: Entity? = nil, home givenHome: Entity? = nil,
++                                screen givenScreen: Entity? = nil) {
++        let flatPad = given ?? self.flatPad
 +        let mount = DPadMount.saved
-+        dpadEntity?.isEnabled = mount != .flat
-+        let want = mount == .flat && xemu_host_wants_virtual_dpad()
++        if let pad = flatPad { FlatDPad.style(pad, mount: mount, locked: DPadLock.saved) }
++        let curved = ScreenLook.curved
++        let placement = "\(mount.rawValue) \(curved)"
++        if placement != padPlacement, let pad = flatPad,
++           let home = givenHome ?? padHome, let scr = givenScreen ?? screenEntity {
++            if mount.inRoom {
++                /* Back in the room, where it was left. */
++                if pad.parent !== home {
++                    home.addChild(pad)
++                    pad.scale = .one
++                    pad.position = DPadLayout.loadFlatPosition() ?? pad.position
++                    pad.orientation = DPadLayout.levelled(
++                        DPadLayout.loadFlatRotation() ?? simd_quatf(angle: 0, axis: [0, 1, 0]))
++                    flatMode = nil
++                }
++                if mount != flatMode {
++                    FlatDPad.setUpright(pad, mount == .upright)
++                    spawnPad(pad, mount)
++                    flatMode = mount
++                }
++            } else {
++                /*
++                 * Beside the screen: the same cross, standing with the
++                 * screen at its lower corner, turned square to a curved
++                 * screen's edge, and drawn three and a half times its size
++                 * to read and hit at the screen's distance (two and a half
++                 * was too small; A., 2026-11-21). Pressed with a pinch.
++                 */
++                scr.addChild(pad)
++                FlatDPad.setUpright(pad, true, facePlayer: false)
++                pad.position = DPadLayout.sidePosition(curved: curved, mount: mount)
++                pad.orientation = simd_quatf(angle: DPadLayout.sideYaw(curved: curved, mount: mount),
++                                             axis: [0, 1, 0])
++                pad.scale = SIMD3<Float>(repeating: 3.5)
++                flatMode = mount
++            }
++            padPlacement = placement
++        }
++        let want = xemu_host_wants_virtual_dpad()
++        /*
++         * Nothing until the pad exists. The once-a-second check can run
++         * before the room has built it; it used to record the pad as shown
++         * anyway, and the room's own check then saw nothing to change and
++         * never turned the pad on (2026-11-21). Applied every time, too.
++         */
++        guard let shownPad = flatPad else { return }
++        shownPad.isEnabled = want
 +        guard want != flatShown else { return }
++        if want && mount.inRoom { spawnPad(shownPad, mount) }
 +        if DPadLayout.releaseOnChange(held: flatHeld, wasShowing: flatShown,
 +                                      nowShowing: want) != flatHeld {
 +            xemu_host_set_virtual_dpad(0)
-+            flatPad?.children.forEach { FlatDPad.show($0, pressed: false) }
++            if let pad = flatPad {
++                FlatDPad.keys(of: pad).forEach { FlatDPad.show($0, pressed: false) }
++            }
 +        }
 +        flatShown = want
 +        flatPad?.isEnabled = want
++        fputs("[host] d-pad \(want ? "shown" : "hidden") (mount \(mount.rawValue), "
++              + "at \(flatPad?.position ?? .zero))\n", stderr)
++        fflush(stderr)
++    }
++
++    /// Beside the screen's right edge, in its upper half, clear of a
++    /// right-mounted d-pad panel, which sits by the lower corner.
++    private static func dpadControlsPosition(curved: Bool) -> SIMD3<Float> {
++        var p = DPadLayout.sidePosition(curved: curved, mount: .right)
++        p.x += p.x > 0 ? 0.05 : -0.05
++        p.y = 0.35
++        return p
 +    }
 +
 +    /// Centred just above the screen's top edge. The middle of a curved
