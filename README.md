@@ -6,6 +6,19 @@ An original Xbox emulator for Apple Vision Pro, running on the headset itself. I
 
 As far as I can find, it is the first standalone, JIT based original Xbox emulator on the platform. The dashboard boots, a retail disc boots, and the game runs at its own frame rate on the headset's M5.
 
+## Update 2.0
+
+![Games at hardware frame rate](docs/media/fps-update.gif)
+
+**Games at hardware frame rate.** Several games now run at the frame rate the original console ran them at, on the headset itself. The numbers for each are in [What runs](#what-runs).
+
+| | |
+|---|---|
+| ![Custom colorways](docs/media/colorways.gif) | ![Choose resolution](docs/media/resolution.gif) |
+| **Custom colorways.** The console wears thirteen original Xbox editions, solid and translucent, with an optional glow. | **Choose your resolution.** 1x, 2x or 3x the console's own, from the picker; 2x is the default. |
+| ![Viewing options](docs/media/viewing-options.gif) | ![Positionable d-pad](docs/media/dpad.gif) |
+| **Viewing options.** A flat or curved screen, and the room behind it dimmed in three steps. | **A d-pad you can place.** For the Sense controllers, which have none: beside the screen, upright in the air, or flat on a table. |
+
 **What you need, before anything else:**
 
 - **[Apparition](https://apparition.illixion.com) on a Mac on the same network, every time you launch.** visionOS will not let an app make its own memory executable, and an emulator's JIT needs exactly that. Apparition attaches as a debugger for about two seconds at launch, prepares the code buffer, and detaches; without it the emulator refuses to start and says so in its log. This is not optional and there is no workaround on current visionOS. See [Why it needs a debugger to start](#why-it-needs-a-debugger-to-start).
@@ -30,14 +43,18 @@ on the headset rather than in a simulator, with sound.
 
 Ported and maintained by A.Cervantez. xemu and QEMU are the work of their respective projects and are GPL-2.0; so is everything here that touches them.
 
+**Sibling project: [720](https://github.com/Ywach404/720-avp)**, an Xbox 360 emulator for Apple Vision Pro, also running on the headset itself. It is a visionOS port of XeniOS built the same way: the console set down in your room, a Cover Flow shelf of your games, and PSVR2 Sense controllers and Bluetooth controllers as the gamepad.
+
 ## What it does today
 
 - Boots the Xbox dashboard and a retail game from a disc image, standalone, no Mac streaming.
 - Presents the picture on a 2.8 metre screen in a mixed immersive space, fed straight from the GPU.
 - Puts a true scale Xbox in the room. It rests on real tables, you can move it and turn it, and pressing it brings up a Cover Flow deck of your discs. Swapping a disc resets the console and boots the new one, as the hardware would; eject returns to the dashboard. The console can wear thirteen original Xbox editions, solid and translucent, from Standard Black to the Skeleton smoke, Crystal and Halo greens, with an optional glow.
-- Takes input from a pair of PSVR2 Sense controllers or a PS4 controller over Bluetooth: sticks, face buttons, analog triggers. With more than one connected, the picker chooses which one plays.
+- Takes input from a pair of PSVR2 Sense controllers or a Bluetooth controller such as the PS4's: sticks, face buttons, analog triggers. With more than one connected, the picker chooses which one plays.
 - Skips the Xbox start-up animation if you would rather go straight into the game, a switch in the picker.
 - Runs every game at twice the Xbox's resolution by default (1x and 3x are in the picker); Halo 2 holds 30 fps at 2x. The screen can be moved anywhere with the bar under it.
+- Shows the screen flat or curved, and dims the room behind it in three steps, from controls above the screen; an eye hides them all.
+- Gives the Sense controllers the d-pad they lack: a raised cross beside either side of the screen, standing in the air in front of you, or lying flat on a table, pressed with a fingertip or a pinch.
 - Pauses when you leave and resumes when you come back.
 
 What it does not do yet: save state. The devlog has the measurements behind that.
@@ -48,15 +65,15 @@ Measured on the headset between 2026-11-10 and 2026-11-17, each title played for
 
 | Title | Result | Notes |
 |---|---|---|
-| Halo: Combat Evolved | Plays | 29.4 fps, matching the original console. Cutscenes drift from their audio when a scene runs slow. |
+| Halo: Combat Evolved | Plays | 29.4 fps, matching the original console. The motion tracker draws round, as it should. Cutscenes drift from their audio when a scene runs slow. |
 | Dead or Alive 2 Ultimate | Plays | 60 fps, its full cap. The title upstream used to measure the vertex work this port carries. |
 | Jet Set Radio Future | Plays | 60 fps. The boost effect dips to about 25 for its duration, a known cost upstream too. |
-| Doom 3 | Plays | 32 fps, locked, the flattest line of anything here, at native resolution or at twice it. The first-rocket stutter is gone now that pipelines are cached between launches. |
+| Doom 3 | Plays | 32 fps, locked, the flattest line of anything here, at native resolution or at twice it. The first-rocket stutter is gone now that pipelines are cached between launches. Its menus and PDA move only on a d-pad; with the Sense controllers, which have none, the virtual d-pad works them. |
 | Project Gotham Racing 2 | Plays | 28 fps on a 30 fps target. Looks right; feels a little less smooth than it should. |
 | Blinx: The Time Sweeper | Plays | 33 fps on Deja Vu Canals, which ran at 6 before the vertex work. |
 | Cel Damage | Plays | 32 fps, up from 25 once x87 floating point ran on the headset's own hardware. |
 | Fuzion Frenzy | Plays | Launch title, no issues seen in a short run. |
-| Halo 2 | Plays | 33 fps through the Cairo Station firefight, memory flat at 4.6 GB. HUD, menus and scope all draw, and nothing else looked wrong. |
+| Halo 2 | Plays | 33 fps through the Cairo Station firefight, memory flat at 4.6 GB. HUD, menus, scope and motion tracker all draw, and character shadows are clean. |
 | The Elder Scrolls III: Morrowind | Plays | 18 to 28 fps outdoors in Balmora, 65 indoors, measured before the x87 change. A save in Balmora loads in under a minute, down from four. Hung on the prison ship until 2026-11-15; see the devlog for what it was waiting on. |
 
 "Plays" means I played it through; anything that looked wrong is in its notes. "Starts" means it got to gameplay and then failed in a way that is recorded in the devlog with the numbers.
