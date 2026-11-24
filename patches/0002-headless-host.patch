@@ -4231,10 +4231,10 @@ index 7967bbc..6f3c51b 100644
  void tcg_func_start(TCGContext *s)
 diff --git a/tests/xbawks/test_dpad.swift b/tests/xbawks/test_dpad.swift
 new file mode 100644
-index 0000000..3892dec
+index 0000000..5081e25
 --- /dev/null
 +++ b/tests/xbawks/test_dpad.swift
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,92 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Copyright (C) 2026 A. Cervantez
 +//
@@ -4299,14 +4299,13 @@ index 0000000..3892dec
 +        DPadLock.saved = false
 +        check(!DPadLock.saved, "lock saved off")
 +
-+        /* Toed in like speakers: each side turned toward the player, more
-+         * so on a curved screen, whose edges already face in. */
++        /* Angled in like speakers, flat screen or curved alike. */
 +        let fl = DPadLayout.sideYaw(curved: false, mount: .left)
-+        check(abs(fl - 5 * .pi / 180) < 1e-5 && fl == -DPadLayout.sideYaw(curved: false, mount: .right),
-+              "flat screen: each side toed in")
-+        let yl = DPadLayout.sideYaw(curved: true, mount: .left)
-+        check(yl > fl && yl == -DPadLayout.sideYaw(curved: true, mount: .right),
-+              "curved: the edge's turn plus the toe-in")
++        check(abs(fl - (1.4 / 2.6 + 5 * .pi / 180)) < 1e-5
++              && fl == -DPadLayout.sideYaw(curved: false, mount: .right),
++              "each side turned in by the edge's angle and 5 degrees")
++        check(DPadLayout.sideYaw(curved: true, mount: .left) == fl,
++              "the same beside a flat screen as a curved one")
 +
 +        /* In front of where the player looks: a head at (1, 1.6, 0) looking
 +         * along -x (turned 90 degrees left). */
@@ -5475,10 +5474,10 @@ index 0000000..86a7ea2
 +}
 diff --git a/ui/xbawks-dpad-layout.swift b/ui/xbawks-dpad-layout.swift
 new file mode 100644
-index 0000000..bff79ce
+index 0000000..9aacf1d
 --- /dev/null
 +++ b/ui/xbawks-dpad-layout.swift
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,179 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Copyright (C) 2026 A. Cervantez
 +//
@@ -5578,12 +5577,14 @@ index 0000000..bff79ce
 +        return p
 +    }
 +
-+    /// The turn of the pad beside the screen: toed in toward the player
-+    /// like a speaker, by 5 degrees (A. tried 20, 16 and 10), on top of
-+    /// a curved screen's own turn at its edge, which already faces in.
++    /// The turn of the pad beside the screen, the same for a flat screen
++    /// as a curved one: a curved screen's own turn at its edge, which faces
++    /// in toward the player, plus 5 degrees of toe-in like a speaker (A.
++    /// tried 20, 16 and 10). Turned only by the toe-in, the pads beside a
++    /// flat screen looked flat against it (A., 2026-11-21).
 +    static func sideYaw(curved: Bool, mount: DPadMount) -> Float {
 +        let toeIn: Float = 5 * .pi / 180
-+        let edge: Float = curved ? 1.4 / 2.6 : 0
++        let edge: Float = 1.4 / 2.6
 +        return mount == .right ? -(edge + toeIn) : edge + toeIn
 +    }
 +
@@ -6576,10 +6577,10 @@ index 0000000..45a8ba3
 +}
 diff --git a/ui/xemu-host-app.swift b/ui/xemu-host-app.swift
 new file mode 100644
-index 0000000..ebe962e
+index 0000000..5fed9a3
 --- /dev/null
 +++ b/ui/xemu-host-app.swift
-@@ -0,0 +1,1388 @@
+@@ -0,0 +1,1449 @@
 +// The entry point, and now the screen.
 +//
 +// Measured on 2026-10-29: a spatial controller (the PSVR2 Sense pair)
@@ -6612,13 +6613,6 @@ index 0000000..ebe962e
 +        String(format: "%.2fs", Date().timeIntervalSince(launchedAt))
 +    }
 +
-+    /*
-+     * Whether the screen is up. The launcher is rebuilt from scratch every
-+     * time it is summoned, so it cannot remember this itself, and it needs
-+     * to know: reopening the window to swap a disc must not try to open a
-+     * space that is already open.
-+     */
-+    @MainActor static var spaceIsOpen = false
 +
 +    init() {
 +        DPadPart.registerComponent()
@@ -6665,16 +6659,16 @@ index 0000000..ebe962e
 +        .windowResizability(.contentSize)
 +        .restorationBehavior(.disabled)
 +
-+        ImmersiveSpace(id: "screen") {
++        ImmersiveSpace(id: Room.id) {
 +            ScreenSpace()
 +                .onAppear {
-+                    XbawksApp.spaceIsOpen = true
++                    Room.shared.appeared()
 +                    fputs("[host] boot \(XbawksApp.sinceLaunch()): "
 +                          + "screen appeared\n", stderr)
 +                    fputs("[host] immersive space appeared\n", stderr); fflush(stderr)
 +                }
 +                .onDisappear {
-+                    XbawksApp.spaceIsOpen = false
++                    Room.shared.disappeared()
 +                    fputs("[host] immersive space disappeared\n", stderr); fflush(stderr)
 +                }
 +        }
@@ -6717,6 +6711,24 @@ index 0000000..ebe962e
 +                    .foregroundStyle(XbawksTheme.green)
 +                    .tracking(8)
 +                    .shadow(color: XbawksTheme.green.opacity(0.5), radius: 12)
++
++                /* Back into the room after the Digital Crown, the deck's
++                 * Close, or the system took it away: the same space as it
++                 * was left, the game still running. Only while it is shut. */
++                if !Room.shared.isOpen {
++                    Button {
++                        Task { await returnToRoom() }
++                    } label: {
++                        Text(Room.shared.opening ? "OPENING" : "RETURN TO IMMERSIVE")
++                            .font(XbawksTheme.face(16, .bold))
++                            .tracking(3)
++                            .padding(.horizontal, 26).padding(.vertical, 10)
++                            .background(XbawksTheme.green.opacity(0.55), in: Capsule())
++                            .gazeBrighten(Capsule())
++                    }
++                    .buttonStyle(BareButtonStyle())
++                    .disabled(Room.shared.opening)
++                }
 +
 +                if started {
 +                    /*
@@ -6765,9 +6777,9 @@ index 0000000..ebe962e
 +                        .multilineTextAlignment(.center)
 +                        .padding(.horizontal, 40)
 +
-+                    Button(XbawksApp.spaceIsOpen ? "Back to the game"
++                    Button(Room.shared.isOpen ? "Back to the game"
 +                                                   : "Resume") {
-+                        if XbawksApp.spaceIsOpen {
++                        if Room.shared.isOpen {
 +                            back()
 +                        } else {
 +                            Task { await open() }
@@ -6915,11 +6927,7 @@ index 0000000..ebe962e
 +             * session, opening it again either fails or dismisses the
 +             * window that was just asked for.
 +             */
-+            if !XbawksApp.spaceIsOpen {
-+                let result = await openImmersive(id: "screen")
-+                fputs("[host] launcher: screen \(result)\n", stderr)
-+                fflush(stderr)
-+            }
++            _ = await Room.shared.open(openImmersive)
 +        }
 +    }
 +
@@ -6970,7 +6978,7 @@ index 0000000..ebe962e
 +            xemu_host_start_with_disc(nil)
 +        }
 +        started = true
-+        if XbawksApp.spaceIsOpen {
++        if Room.shared.isOpen {
 +            dismissWindow(id: "launcher")
 +        } else {
 +            await open()
@@ -6987,7 +6995,7 @@ index 0000000..ebe962e
 +    }
 +
 +    @MainActor private func back() {
-+        if XbawksApp.spaceIsOpen {
++        if Room.shared.isOpen {
 +            dismissWindow(id: "launcher")
 +        } else {
 +            Task { await open() }
@@ -6995,12 +7003,66 @@ index 0000000..ebe962e
 +    }
 +
 +    @MainActor private func open() async {
-+        let result = await openImmersive(id: "screen")
-+        fputs("[host] launcher: immersive space \(result)\n", stderr); fflush(stderr)
++        guard let result = await Room.shared.open(openImmersive) else { return }
 +        switch result {
 +        case .opened: dismissWindow(id: "launcher")
 +        default: status = "could not open the screen (\(result)); try Resume"
 +        }
++    }
++
++    /// The header's RETURN TO IMMERSIVE: the same space, as it was left.
++    /// With a game running the window then steps aside, as for Resume, so
++    /// the controllers play again; without one it stays to pick from.
++    @MainActor private func returnToRoom() async {
++        guard let result = await Room.shared.open(openImmersive) else { return }
++        if case .opened = result {
++            if started { dismissWindow(id: "launcher") }
++        } else {
++            status = "could not open the room (\(result)); try again"
++        }
++    }
++}
++
++/*
++ * The room: the mixed immersive space, and whether it is up. Set by the
++ * space's own onAppear and onDisappear, not by whoever asked for it, so a
++ * Digital Crown press or a system dismissal shows in the launcher at once
++ * and RETURN TO IMMERSIVE comes up. Every open goes through open(_:), which
++ * refuses while one is already opening or open: asking twice errors.
++ * Reopening keeps the game running and the room as it was left, since
++ * placements are saved as they change. The same piece as 720's.
++ */
++@MainActor @Observable final class Room {
++    static let shared = Room()
++    static let id = "screen"
++
++    private(set) var isOpen = false
++    private(set) var opening = false
++    /// Opened at least once this launch: later opens are reopens.
++    private(set) var hasOpened = false
++
++    func appeared() {
++        isOpen = true
++        hasOpened = true
++    }
++
++    func disappeared() {
++        isOpen = false
++        fputs("[host] room: closed\n", stderr); fflush(stderr)
++    }
++
++    /// Opens the room unless it is open or opening; nil when it did not ask.
++    func open(_ action: OpenImmersiveSpaceAction) async -> OpenImmersiveSpaceAction.Result? {
++        guard !isOpen, !opening else { return nil }
++        let reopen = hasOpened
++        opening = true
++        defer { opening = false }
++        let result = await action(id: Self.id)
++        if case .opened = result { isOpen = true }
++        fputs(reopen ? "[host] room: reopened (\(result))\n"
++                     : "[host] launcher: screen \(result)\n", stderr)
++        fflush(stderr)
++        return result
 +    }
 +}
 +
